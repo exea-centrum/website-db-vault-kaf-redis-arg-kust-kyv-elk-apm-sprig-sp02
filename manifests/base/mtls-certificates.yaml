@@ -1,0 +1,150 @@
+# KROK 6 (mTLS): certyfikaty klienta dla usług wewnętrznych.
+# UWAGA: dla Vault issuer przez endpoint pki/issue/* cert-manager wymaga
+# certificateRequestPolicy=SignVerbatim (zachowanie klucza publicznego z CSR).
+# Bez tego: "public key does not match the CSR" (InvalidCertificate).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fastapi-mtls
+  namespace: davtro02
+spec:
+  secretName: fastapi-mtls
+  duration: 720h   # 30d
+  renewBefore: 168h # 7d
+  commonName: fastapi-web-app.davtro02.svc
+  dnsNames:
+    - fastapi-web-app.davtro02.svc
+    - fastapi-web-app.davtro02.svc.cluster.local
+    - fastapi-web-app-svc.davtro02.svc
+    - fastapi-web-app-svc.davtro02.svc.cluster.local
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    name: vault-issuer-internal
+    kind: ClusterIssuer
+    group: cert-manager.io
+  usages:
+    - digital signature
+    - key encipherment
+    - client auth
+    - server auth
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: message-processor-mtls
+  namespace: davtro02
+spec:
+  secretName: message-processor-mtls
+  duration: 720h
+  renewBefore: 168h
+  commonName: message-processor.davtro02.svc
+  dnsNames:
+    - message-processor.davtro02.svc
+    - message-processor.davtro02.svc.cluster.local
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    name: vault-issuer-internal
+    kind: ClusterIssuer
+    group: cert-manager.io
+  usages:
+    - digital signature
+    - key encipherment
+    - client auth
+    - server auth
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: spring-app-mtls
+  namespace: davtro02
+spec:
+  secretName: spring-app-mtls
+  duration: 720h
+  renewBefore: 168h
+  commonName: spring-app.davtro02.svc
+  dnsNames:
+    - spring-app.davtro02.svc
+    - spring-app.davtro02.svc.cluster.local
+    - spring-app-svc.davtro02.svc
+    - spring-app-svc.davtro02.svc.cluster.local
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    name: vault-issuer-internal
+    kind: ClusterIssuer
+    group: cert-manager.io
+  usages:
+    - digital signature
+    - key encipherment
+    - client auth
+    - server auth
+---
+# KROK 9 (Vault HTTPS): certyfikat serwera Vault (TLS na :8203).
+# Podpisany przez DEDYKOWANE CA cert-managera (Issuer vault-ca z vault-server-tls.yaml),
+# a NIE przez Vault PKI - inaczej powstaloby bledne kolo (cert Vaulta wymagalby
+# dzialajacego Vaulta). cert-manager SAM odnawia lisc (renewBefore 7 dni), a zaufanie
+# jest stabilne, bo CA ma osobny, dlugi TTL. Sekret vault-tls zawiera tez ca.crt,
+# z ktorego korzystaja klienci (ESO caProvider, transit_client, snapshot, helpers).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: davtro02
+spec:
+  secretName: vault-tls
+  duration: 720h
+  renewBefore: 168h
+  commonName: vault.davtro02.svc
+  dnsNames:
+    - vault
+    - vault.davtro02
+    - vault.davtro02.svc
+    - vault.davtro02.svc.cluster.local
+    - vault-0.vault.davtro02.svc.cluster.local
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    name: vault-ca
+    kind: Issuer
+    group: cert-manager.io
+---
+# KROK 11: broker Kafka - dwutrybowy start (PLAINTEXT 9092 + mTLS 9094).
+# 9093 pozostaje wylacznie dla controllera KRaft.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kafka-server-tls
+  namespace: davtro02
+spec:
+  secretName: kafka-server-tls
+  duration: 720h
+  renewBefore: 168h
+  commonName: kafka-kraft.davtro02.svc
+  dnsNames:
+    - kafka-kraft
+    - kafka-kraft.davtro02
+    - kafka-kraft.davtro02.svc
+    - kafka-kraft.davtro02.svc.cluster.local
+    - kafka-kraft-0.kafka-kraft.davtro02.svc.cluster.local
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    name: vault-issuer-internal
+    kind: ClusterIssuer
+    group: cert-manager.io
+  usages:
+    - digital signature
+    - key encipherment
+    - server auth

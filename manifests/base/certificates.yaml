@@ -1,0 +1,34 @@
+# KROK 5 (PKI): certyfikaty ingress (90d, renew 15d przed koncem).
+# cert-manager sam renewuje -> Secret tls.crt/tls.key podmieniany bez restartu.
+# Po instalacji kontrolera ingress + cert-managera Ingress dostaje HTTPS.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: davtro-tls
+  namespace: davtro02
+spec:
+  secretName: davtro-tls
+  duration: 2160h   # 90d
+  renewBefore: 360h # 15d
+  commonName: davtro.local
+  dnsNames:
+    - davtro.local
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: spark-tls
+  namespace: davtro02
+spec:
+  secretName: spark-tls
+  duration: 2160h
+  renewBefore: 360h
+  commonName: spark.davtro.local
+  dnsNames:
+    - spark.davtro.local
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer

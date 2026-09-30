@@ -1,0 +1,50 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: davtro-baseline-policy
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-ghcr-images
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [davtro]
+      validate:
+        message: "Obrazy kontenerow w namespace 'davtro' musza pochodzic z ghcr.io lub zaufanych rejestrow."
+        pattern:
+          spec:
+            containers:
+              - image: "ghcr.io/* | bitnami/* | postgres/* | redis/* | grafana/* | prom/* | hashicorp/* | dpage/* | provectuslabs/* | danielqsj/* | eclipse-temurin/* | python:*"
+    - name: require-resource-requests-limits
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [davtro]
+      validate:
+        message: "Kazdy kontener musi miec zdefiniowane requests/limits."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    cpu: "?*"
+                    memory: "?*"
+    - name: disallow-privileged
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [davtro]
+      validate:
+        message: "Kontenery uprzywilejowane sa niedozwolone."
+        pattern:
+          spec:
+            =(securityContext):
+              =(privileged): "false"

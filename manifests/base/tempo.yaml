@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-config
+  namespace: davtro02
+data:
+  tempo.yaml: |
+    server: { http_listen_port: 3200 }
+    distributor:
+      receivers:
+        otlp:
+          protocols: { http: {}, grpc: {} }
+    storage:
+      trace: { backend: local, local: { path: /tmp/tempo/traces } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: davtro02
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: tempo } }
+  template:
+    metadata: { labels: { app: tempo } }
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: tempo
+          image: grafana/tempo:2.6.0
+          args: ["-config.file=/etc/tempo/tempo.yaml"]
+          ports: [{ containerPort: 3200 }]
+          volumeMounts:
+            - { name: config, mountPath: /etc/tempo }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+      volumes:
+        - name: config
+          configMap: { name: tempo-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: davtro02
+spec:
+  selector: { app: tempo }
+  ports: [{ port: 3200, targetPort: 3200 }]

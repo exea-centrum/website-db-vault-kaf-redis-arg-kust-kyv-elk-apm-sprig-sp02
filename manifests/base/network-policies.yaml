@@ -1,0 +1,126 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: davtro02
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  namespace: davtro02
+spec:
+  podSelector: {}
+  ingress:
+    - from: [{ podSelector: {} }]
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-eso-to-vault
+  namespace: davtro02
+spec:
+  podSelector:
+    matchLabels:
+      app: vault
+  ingress:
+    - from:
+        # Caly ns external-secrets (pody ESO) -> naprawia
+        # 'context deadline exceeded' w SecretStore vault-backend.
+        # UWAGA: sam namespaceSelector (bez podSelector) - kombinacja
+        # podSelector+namespaceSelector w JEDNYM elemencie from to AND
+        # (ten sam pod musialby byc w obu ns), wiec musi byc osobno.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: external-secrets
+      ports:
+        # KROK 10: ESO komunikuje sie z Vaultem wylacznie po TLS.
+        - { protocol: TCP, port: 8203 }
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-web
+  namespace: davtro02
+spec:
+  podSelector: { matchLabels: { app: fastapi-web-app } }
+  ingress:
+    - from: []
+      ports: [{ protocol: TCP, port: 8080 }]
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-frontend
+  namespace: davtro02
+spec:
+  podSelector: { matchLabels: { app: frontend } }
+  ingress:
+    - from: []
+      ports: [{ protocol: TCP, port: 8080 }]
+  policyTypes: [Ingress]
+---
+# KROK 5 (PKI): kontroler ingress (ns ingress, po `microk8s enable ingress`)
+# musi dobic do backendow po HTTP (terminacja TLS na kontrolerze).
+# Bez tej reguly default-deny odcina ruch kontroler -> fastapi/frontend.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controller-to-web
+  namespace: davtro02
+spec:
+  podSelector:
+    matchLabels:
+      app: fastapi-web-app
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress
+      ports:
+        - { protocol: TCP, port: 8080 }
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controller-to-frontend
+  namespace: davtro02
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress
+      ports:
+        - { protocol: TCP, port: 8080 }
+  policyTypes: [Ingress]
+---
+# KROK 5/10 (PKI): kontroler cert-manager (ns cert-manager) musi dobic
+# do API Vaulta po HTTPS :8203 (ClusterIssuer sklada CSR przez pki/sign/*).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-certmanager-to-vault
+  namespace: davtro02
+spec:
+  podSelector:
+    matchLabels:
+      app: vault
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cert-manager
+      ports:
+        - { protocol: TCP, port: 8203 }
+  policyTypes: [Ingress]

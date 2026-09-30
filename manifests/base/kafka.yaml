@@ -1,0 +1,202 @@
+# Kafka KRaft (bez Zookeepera)
+# KROK 11: dual listener — PLAINTEXT :9092 (kompatybilność/testy) oraz mTLS :9094.
+# UWAGA: :9093 jest kanałem controllera KRaft i nie może być portem klientów.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka-kraft
+  namespace: davtro02
+spec:
+  serviceName: kafka-kraft
+  replicas: 1
+  selector: { matchLabels: { app: kafka-kraft } }
+  template:
+    metadata: { labels: { app: kafka-kraft } }
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      # KROK 11 (Kafka SSL) - DLACZEGO initContainer z openssl:
+      # obraz apache/kafka:3.7.0 w /etc/kafka/docker/configure (blok "SSL is enabled.")
+      # wymaga KEYSTORE/TRUSTSTORE z plikow w /etc/kafka/secrets oraz plikow z haslami:
+      #   KAFKA_SSL_KEYSTORE_FILENAME, KAFKA_SSL_KEY_CREDENTIALS, KAFKA_SSL_KEYSTORE_CREDENTIALS,
+      #   KAFKA_SSL_TRUSTSTORE_FILENAME, KAFKA_SSL_TRUSTSTORE_CREDENTIALS.
+      # Nie zna natomiast zmiennych PEM (KAFKA_SSL_KEYSTORE_*_FILE / *_CERTIFICATES_FILE).
+      # Skutek braku KAFKA_SSL_KEYSTORE_FILENAME:
+      #   /etc/kafka/docker/configure: line 24: !1: unbound variable  -> exit 1
+      #   (funkcja ensure() wola ${!1} przy `set -u`) -> broker w CrashLoopBackOff.
+      # Dlatego cert z cert-managera (Secret kafka-server-tls: tls.crt/tls.key/ca.crt)
+      # konwertujemy do PKCS12 tym samym wzorcem co scripts/port-forward*.sh
+      # (`openssl pkcs12 -export ... -certfile ca.crt`). Hasla sa losowe, generowane
+      # przy starcie poda - nie ma ich ani w Git, ani w Secretach klastra.
+      initContainers:
+        - name: keystores
+          image: docker.io/alpine/openssl:3.5.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PEM=/etc/kafka-tls
+              OUT=/etc/kafka/secrets
+              # 24 znaki base64 bez /+= (bezpieczne w CLI i w plikach hasel obrazu)
+              gen() { head -c 32 /dev/urandom | base64 | tr -d '\n/+=' | cut -c1-24; }
+              KSP=$(gen); TSP=$(gen)
+              printf '%s' "$KSP" > "$OUT/keystore.creds"
+              printf '%s' "$KSP" > "$OUT/key.creds"
+              printf '%s' "$TSP" > "$OUT/truststore.creds"
+              # keystore: lisc + klucz + lancuch CA (klucz i store maja to samo haslo)
+              openssl pkcs12 -export \
+                -inkey "$PEM/tls.key" -in "$PEM/tls.crt" -certfile "$PEM/ca.crt" \
+                -name kafka-server -out "$OUT/kafka.keystore.p12" -passout "pass:$KSP"
+              # NIE BUDUJEMY TUTAJ TRUSTSTORE z openssl (`pkcs12 -export -nokeys`).
+              # Tak wygenerowany PKCS#12 jest dla JVM "pusty": Java nie traktuje
+              # cert-bagu z klucza prywatnego jako trustedCertEntry, wiec PKIX
+              # dostaje zero trust anchors. Objaw w logach brokera (KROK 11 byl pozorny):
+              #   java.security.InvalidAlgorithmParameterException: the trustAnchors
+              #   parameter must be non-empty
+              # Przy KAFKA_SSL_CLIENT_AUTH=required broker odrzuca wtedy certy klientow,
+              # czyli fastapi/message-processor nie maja jak polaczyc sie z :9094
+              # (rdkafka: "Disconnected while requesting ApiVersion").
+              # Truststore buduje osobny initContainer `truststore` przez keytool.
+              chmod 600 "$OUT"/*
+              echo "===> keystore OK: $(ls -1 "$OUT" | tr '\n' ' ')"
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+          volumeMounts:
+            - { name: kafka-tls, mountPath: /etc/kafka-tls, readOnly: true }
+            - { name: kafka-secrets, mountPath: /etc/kafka/secrets }
+        # KROK 11 (poprawka): truststore PKCS12 MUSI powstac przez `keytool -importcert`
+        # (trustedCertEntry). Java/PKIX odrzuca cert-bag z `openssl pkcs12 -export -nokeys`
+        # -> "the trustAnchors parameter must be non-empty" -> przy CLIENT_AUTH=required
+        # broker nie przyjmuje zadnego certu klienta.
+        # Obraz apache/kafka:3.7.0 ma JDK (/opt/java/openjdk/bin/keytool) i jest juz
+        # uzywany przez ten StatefulSet, wiec nie dochodzi zadnego nowego obrazu.
+        - name: truststore
+          image: apache/kafka:3.7.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              KEYTOOL=/opt/java/openjdk/bin/keytool
+              OUT=/etc/kafka/secrets
+              TSP="$(cat "$OUT/truststore.creds")"
+              rm -f "$OUT/kafka.truststore.p12"
+              "$KEYTOOL" -importcert -noprompt -trustcacerts \
+                -alias davtro-internal-ca \
+                -file /etc/kafka-tls/ca.crt \
+                -keystore "$OUT/kafka.truststore.p12" \
+                -storetype PKCS12 -storepass "$TSP"
+              chmod 600 "$OUT/kafka.truststore.p12"
+              # Sanity check: truststore musi zawierac dokladnie 1 trustedCertEntry.
+              # grep bez trafienia = set -e ubije initContainer (lepiej crash niz
+              # broker bez trust anchorow, o czym swiadczy w logach stack trace).
+              "$KEYTOOL" -list -v -keystore "$OUT/kafka.truststore.p12" \
+                -storepass "$TSP" | grep -E 'Entry type: trustedCertEntry|Alias name: davtro-internal-ca|Your keystore contains'
+              echo "===> truststore OK (trustedCertEntry=1)"
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 256Mi }
+          volumeMounts:
+            - { name: kafka-tls, mountPath: /etc/kafka-tls, readOnly: true }
+            - { name: kafka-secrets, mountPath: /etc/kafka/secrets }
+      volumes:
+        - name: kafka-tls
+          secret:
+            secretName: kafka-server-tls
+        # PKCS12 + pliki z haslami czytane przez /etc/kafka/docker/configure (emptyDir).
+        - name: kafka-secrets
+          emptyDir: {}
+      containers:
+        - name: kafka
+          image: apache/kafka:3.7.0
+          ports:
+            - { name: broker, containerPort: 9092 }
+            - { name: controller, containerPort: 9093 }
+            - { name: tls, containerPort: 9094 }
+          env:
+            - { name: CLUSTER_ID, value: "MkU3OEVBNTcwNTJENDM2Qk" }
+            - { name: KAFKA_NODE_ID, value: "0" }
+            - { name: KAFKA_PROCESS_ROLES, value: "controller,broker" }
+            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093,SSL://:9094" }
+            - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka-kraft:9092,SSL://kafka-kraft:9094" }
+            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "0@kafka-kraft-0.kafka-kraft:9093" }
+            - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
+            - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "PLAINTEXT" }
+            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL" }
+            # KROK 11 (Kafka SSL): PKCS12 + pliki z haslami z initContainera `keystores`.
+            # Nazwy zmiennych MUSZA byc takie, jakich szuka /etc/kafka/docker/configure
+            # (obraz sam dokleja /etc/kafka/secrets/ do *FILENAME i czyta hasla z plikow).
+            - { name: KAFKA_SSL_KEYSTORE_TYPE, value: "PKCS12" }
+            - { name: KAFKA_SSL_KEYSTORE_FILENAME, value: "kafka.keystore.p12" }
+            - { name: KAFKA_SSL_KEY_CREDENTIALS, value: "key.creds" }
+            - { name: KAFKA_SSL_KEYSTORE_CREDENTIALS, value: "keystore.creds" }
+            - { name: KAFKA_SSL_TRUSTSTORE_TYPE, value: "PKCS12" }
+            - { name: KAFKA_SSL_TRUSTSTORE_FILENAME, value: "kafka.truststore.p12" }
+            - { name: KAFKA_SSL_TRUSTSTORE_CREDENTIALS, value: "truststore.creds" }
+            - { name: KAFKA_SSL_CLIENT_AUTH, value: "required" }
+            - { name: KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM, value: "https" }
+            - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs" }
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { cpu: 1, memory: 1Gi }
+          volumeMounts:
+            - { name: kafka-data, mountPath: /tmp/kraft-combined-logs }
+            # Keystory PKCS12 + hasla z initContainera (PEM w /etc/kafka-tls czyta tylko initContainer).
+            - { name: kafka-secrets, mountPath: /etc/kafka/secrets, readOnly: true }
+  volumeClaimTemplates:
+    - metadata: { name: kafka-data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-kraft
+  namespace: davtro02
+spec:
+  clusterIP: None
+  selector: { app: kafka-kraft }
+  ports:
+    - { name: broker, port: 9092, targetPort: 9092 }
+    - { name: controller, port: 9093, targetPort: 9093 }
+    - { name: tls, port: 9094, targetPort: 9094 }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topic-job
+  namespace: davtro02
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: kafka-topic-init
+    spec:
+      serviceAccountName: kafka-job-sa
+      restartPolicy: OnFailure
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: kafka-topic-init
+          image: apache/kafka:3.7.0
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 200m, memory: 256Mi }
+          command:
+            - /bin/bash
+            - -c
+            - |
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-kraft:9092 --create --if-not-exists --topic bookings-created --partitions 3 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-kraft:9092 --create --if-not-exists --topic email-invoices --partitions 3 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-kraft:9092 --create --if-not-exists --topic marketing-actions --partitions 3 --replication-factor 1
+
+

@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-web-app
+  namespace: davtro02
+  labels: { app: fastapi-web-app }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: fastapi-web-app }
+  template:
+    metadata:
+      labels: { app: fastapi-web-app }
+    spec:
+      serviceAccountName: davtro-sa
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+        - { name: db-creds, secret: { secretName: fastapi-db-creds } }
+        - { name: transit-helpers, configMap: { name: transit-helpers } }
+        # optional: cert vault-tls wystawia cert-manager dopiero po starcie Vaulta
+        # (klero-wajka) - bez tego nowe pody utykaja w ContainerCreating.
+        - { name: vault-tls, secret: { secretName: vault-tls, optional: true } }
+        - { name: fastapi-mtls, secret: { secretName: fastapi-mtls } }
+      containers:
+        - name: fastapi
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01:latest
+          ports: [{ containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: fastapi-config }
+            - secretRef: { name: davtro-secrets }
+          env:
+            # Dynamiczne credsy DB z Vaulta (database/creds/davtro-app-rw, rotowane co 30m).
+            # Env nadpisuje wartosci z envFrom; pliki z sekretu ESO odswieza kubelet,
+            # aplikacja przeladowuje pule polaczen przy wykryciu zmiany (main.py watch_db_creds).
+            - { name: DB_USER_FILE, value: /etc/db-creds/username }
+            - { name: DB_PASSWORD_FILE, value: /etc/db-creds/password }
+            # KROK 9 (Vault HTTPS): transit po TLS z CA davtro-internal
+            - { name: VAULT_TRANSIT_ADDR, value: "https://vault.davtro02.svc.cluster.local:8203" }
+            - { name: VAULT_TRANSIT_CA_FILE, value: "/etc/vault-tls/ca.crt" }
+            - { name: VAULT_TRANSIT_KEY, value: "davtro-app" }
+            - { name: VAULT_TRANSIT_AUTH_ROLE, value: "davtro-transit" }
+            - { name: KAFKA_TLS_CERT_FILE, value: "/etc/mtls/tls.crt" }
+            - { name: KAFKA_TLS_KEY_FILE, value: "/etc/mtls/tls.key" }
+            - { name: KAFKA_CA_FILE, value: "/etc/mtls/ca.crt" }
+            # KROK 6 (mTLS): certyfikaty klienta
+            - { name: MTLS_CERT_FILE, value: "/etc/mtls/tls.crt" }
+            - { name: MTLS_KEY_FILE, value: "/etc/mtls/tls.key" }
+            - { name: MTLS_CA_FILE, value: "/etc/mtls/ca.crt" }
+          volumeMounts:
+            - { name: db-creds, mountPath: /etc/db-creds, readOnly: true }
+            - { name: transit-helpers, mountPath: /usr/local/bin/transit, readOnly: true }
+            - { name: vault-tls, mountPath: /etc/vault-tls, readOnly: true }
+            - { name: fastapi-mtls, mountPath: /etc/mtls, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /api/health, port: 8080 }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /api/health, port: 8080 }
+            initialDelaySeconds: 15
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
