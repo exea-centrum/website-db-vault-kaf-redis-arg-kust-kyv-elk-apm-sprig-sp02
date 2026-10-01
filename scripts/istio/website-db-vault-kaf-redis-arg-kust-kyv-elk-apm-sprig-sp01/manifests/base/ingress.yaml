@@ -1,0 +1,43 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: davtro-ingress
+  namespace: davtro02
+spec:
+  ingressClassName: public
+  rules:
+    - host: davtro.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: fastapi-web-app-svc, port: { number: 80 } }
+          - path: /grafana
+            pathType: Prefix
+            backend:
+              service: { name: grafana, port: { number: 3000 } }
+          - path: /kafka-ui
+            pathType: Prefix
+            backend:
+              service: { name: kafka-ui, port: { number: 80 } }
+          - path: /pgadmin
+            pathType: Prefix
+            backend:
+              service: { name: pgadmin, port: { number: 80 } }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: spark-ingress
+  namespace: davtro02
+spec:
+  ingressClassName: public
+  rules:
+    - host: spark.davtro.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: spark-master-svc, port: { number: 8082 } }

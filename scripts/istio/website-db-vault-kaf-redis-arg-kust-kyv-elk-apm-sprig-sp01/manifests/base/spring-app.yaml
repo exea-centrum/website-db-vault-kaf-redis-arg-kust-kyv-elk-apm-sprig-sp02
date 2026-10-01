@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spring-app-deployment
+  namespace: davtro02
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: spring-app } }
+  template:
+    metadata: { labels: { app: spring-app } }
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: spring-app
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spring:latest
+          ports: [{ containerPort: 8081 }]
+          envFrom:
+            - secretRef: { name: davtro-secrets }
+          env:
+            - { name: DB_HOST, value: "postgres-db-rw" }
+            - { name: DB_NAME, value: "davtro_rentals" }
+            - { name: KAFKA_BOOTSTRAP, value: "kafka-kraft:9092" }
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spring-app-svc
+  namespace: davtro02
+spec:
+  selector: { app: spring-app }
+  ports: [{ port: 80, targetPort: 8081 }]

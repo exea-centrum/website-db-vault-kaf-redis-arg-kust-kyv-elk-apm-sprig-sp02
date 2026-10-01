@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: message-processor
+  namespace: davtro02
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: message-processor } }
+  template:
+    metadata: { labels: { app: message-processor } }
+    spec:
+      serviceAccountName: davtro-sa
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: message-processor
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-consumer:latest
+          envFrom:
+            - configMapRef: { name: fastapi-config }
+            - secretRef: { name: davtro-secrets }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 300m, memory: 256Mi }

@@ -1,0 +1,42 @@
+# Dev-mode Vault - w produkcji uzyj Helm chart HashiCorp Vault (HA + auto-unseal)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault
+  namespace: davtro02
+spec:
+  serviceName: vault
+  replicas: 1
+  selector: { matchLabels: { app: vault } }
+  template:
+    metadata: { labels: { app: vault } }
+    spec:
+      serviceAccountName: davtro-sa
+      securityContext:
+        runAsUser: 100
+        runAsGroup: 100
+        fsGroup: 100
+      containers:
+        - name: vault
+          image: hashicorp/vault:1.17
+          # Bezposrednio vault zamiast docker-entrypoint.sh - entrypoint probuje
+          # setcap (CAP_SETFCAP) i pada w srodowisku bez tej capability.
+          # Dev-mode sam wylacza mlock, wiec setcap nie jest potrzebny.
+          command: ["vault", "server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
+          ports: [{ containerPort: 8200 }]
+          env:
+            - { name: VAULT_SKIP_SETCAP, value: "true" }
+            - name: VAULT_DEV_ROOT_TOKEN_ID
+              valueFrom: { secretKeyRef: { name: davtro-secrets, key: VAULT_ROOT_TOKEN, optional: true } }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: davtro02
+spec:
+  selector: { app: vault }
+  ports: [{ port: 8200, targetPort: 8200 }]

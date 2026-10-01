@@ -1,0 +1,62 @@
+# Wymaga kube-prometheus-stack (patrz scripts/bootstrap-monitoring.sh).
+# Label release: prometheus dopasowuje domyslny selektor operatora.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fastapi-web-app
+  namespace: davtro02
+  labels: { release: prometheus }
+spec:
+  selector:
+    matchLabels: { app: fastapi-web-app }
+  namespaceSelector:
+    matchNames: [davtro02]
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: postgres-exporter
+  namespace: davtro02
+  labels: { release: prometheus }
+spec:
+  selector:
+    matchLabels: { app: postgres-exporter }
+  namespaceSelector:
+    matchNames: [davtro02]
+  endpoints:
+    - port: metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kafka-exporter
+  namespace: davtro02
+  labels: { release: prometheus }
+spec:
+  selector:
+    matchLabels: { app: kafka-exporter }
+  namespaceSelector:
+    matchNames: [davtro02]
+  endpoints:
+    - port: metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: node-exporter
+  namespace: davtro02
+  labels: { release: prometheus }
+spec:
+  selector:
+    matchLabels: { app: node-exporter }
+  namespaceSelector:
+    matchNames: [davtro02]
+  endpoints:
+    - port: metrics
+      interval: 15s

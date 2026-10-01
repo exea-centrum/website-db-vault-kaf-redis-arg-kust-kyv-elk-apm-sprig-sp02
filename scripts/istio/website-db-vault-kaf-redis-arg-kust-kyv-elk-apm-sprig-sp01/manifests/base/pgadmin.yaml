@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgadmin
+  namespace: davtro02
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: pgadmin } }
+  template:
+    metadata: { labels: { app: pgadmin } }
+    spec:
+      securityContext:
+        runAsUser: 5050
+        runAsGroup: 5050
+        fsGroup: 5050
+      containers:
+        - name: pgadmin
+          image: dpage/pgadmin4:8
+          env:
+            - { name: PGADMIN_DEFAULT_EMAIL, value: admin@davtro.pl }
+            - name: PGADMIN_DEFAULT_PASSWORD
+              valueFrom: { secretKeyRef: { name: davtro-secrets, key: DB_PASSWORD } }
+          ports: [{ containerPort: 80 }]
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgadmin
+  namespace: davtro02
+spec:
+  selector: { app: pgadmin }
+  ports: [{ port: 80, targetPort: 80 }]

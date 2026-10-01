@@ -1,0 +1,27 @@
+# PostgreSQL na oficjalnym operatorze CloudNativePG (CNPG, CNCF).
+# Wymaga: helm install cnpg cloudnative-pg/cloudnative-pg -n cnpg-system --create-namespace
+# (patrz scripts/bootstrap-monitoring.sh). Operator sam dba o:
+#   - inicjalizacje klastra i uprawnienia PV (bez root initContainera),
+#   - failover / HA (3 instancje, 1 primary + 2 repliki z streamingu),
+#   - rotacje certyfikatow TLS (serverTLSSecret z cert-managera),
+#   - backupy (dopisac spec.backup sekcje + BarmanObjectStore).
+# Uslugi wygenerowane przez operator: postgres-db-rw / postgres-db-ro / postgres-db-r
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres-db
+  namespace: davtro02
+spec:
+  instances: 3
+  storage:
+    size: 5Gi
+  bootstrap:
+    initdb:
+      database: davtro_rentals
+      owner: davtro
+      secret:
+        name: davtro-secrets   # klucze: username, password
+  certificates:
+    serverTLSSecret: postgres-db-tls   # cert-manager, rotacja auto
+  monitoring:
+    enablePodMonitor: true             # kube-prometheus-stack zbiera metryki

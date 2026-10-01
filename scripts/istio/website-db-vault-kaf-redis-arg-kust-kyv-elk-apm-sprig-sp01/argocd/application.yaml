@@ -1,0 +1,21 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: davtro-website
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01.git
+    targetRevision: HEAD
+    path: manifests/overlays/production
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: davtro02
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - Replace=true

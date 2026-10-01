@@ -1,0 +1,75 @@
+# Wymaga cert-manager (patrz scripts/bootstrap-monitoring.sh).
+# Rotacja: cert-manager odnawia certyfikat, gdy zostanie renewBefore czasu
+# zycia, i atomowo aktualizuje Secret -> pod przejmuje nowy certyfikat
+# (po restarcie/rolloucie; mtls mesh - natychmiast, patrz architecture.md).
+# Hierarchia: selfsigned root -> CA DavTro -> certyfikaty serwerow.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: davtro-selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: davtro-ca
+  namespace: davtro02
+spec:
+  isCA: true
+  commonName: davtro-internal-ca
+  secretName: davtro-ca-key-pair
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: davtro-selfsigned-issuer
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: davtro-ca-issuer
+spec:
+  ca:
+    secretName: davtro-ca-key-pair
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-db-tls
+  namespace: davtro02
+spec:
+  secretName: postgres-db-tls
+  duration: 2160h
+  renewBefore: 360h      # rotacja ~co 15 dni
+  dnsNames:
+    - postgres-db-rw
+    - postgres-db-rw.davtro02
+    - postgres-db-rw.davtro02.svc
+    - postgres-db-rw.davtro02.svc.cluster.local
+    - postgres-db-ro.davtro02.svc
+  issuerRef:
+    name: davtro-ca-issuer
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kafka-kraft-tls
+  namespace: davtro02
+spec:
+  secretName: kafka-kraft-tls
+  duration: 2160h
+  renewBefore: 360h      # rotacja ~co 15 dni
+  dnsNames:
+    - kafka-kraft
+    - kafka-kraft.davtro02
+    - kafka-kraft.davtro02.svc
+    - kafka-kraft.davtro02.svc.cluster.local
+    - kafka-kraft-0.kafka-kraft.davtro02.svc
+  issuerRef:
+    name: davtro-ca-issuer
+    kind: ClusterIssuer

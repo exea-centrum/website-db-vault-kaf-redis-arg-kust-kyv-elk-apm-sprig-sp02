@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-web-app
+  namespace: davtro02
+  labels: { app: fastapi-web-app }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: fastapi-web-app }
+  template:
+    metadata:
+      labels: { app: fastapi-web-app }
+    spec:
+      serviceAccountName: davtro-sa
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: fastapi
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01:latest
+          ports: [{ containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: fastapi-config }
+            - secretRef: { name: davtro-secrets }
+          readinessProbe:
+            httpGet: { path: /api/health, port: 8080 }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /api/health, port: 8080 }
+            initialDelaySeconds: 15
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }

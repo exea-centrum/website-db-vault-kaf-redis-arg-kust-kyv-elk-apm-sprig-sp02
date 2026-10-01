@@ -135,3 +135,88 @@ Twoja kolejność jest dobra, ale **„Redis bez hasła" nie jest P2 — to P0**
 **Moja odpowiedź na „jaki następny krok": KROK 5, zaczynając od hasła Redisa, potem role Vault per workload + `spring-ro`/`spark-ro`.**
 
 Powiedz „start" — wdrożę to etapami: (1) Redis `requirepass` + weryfikacja, (2) SA per workload i role Vault, (3) `spring-ro`/`spark-ro` i odłączenie ich od statycznego `davtro-secrets`. Zatrzymuję się na każdym etapie do weryfikacji na klastrze, i pamiętaj o niewypchniętym commicie `a0b1861` (KROK 12) — wypchnę go w osobnym kroku, żeby nie mieszać zmian.
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$
+Zweryfikowałem repo **i** żywy klaster. Poniżej stan faktyczny, a potem konkretna odpowiedź na Twoje pytanie: **co usunąć / z czego zrezygnować, a co zostawić, jeśli przechodzisz na Istio**.
+
+---
+
+# 1. Stan zweryfikowany (dziś, na żywo)
+
+| Element | Twoja lista | Rzeczywistość (klaster `parrot`) |
+|---|---|---|
+| Ingress | „nginx” | ❌ **to nie nginx, to Traefik.** `kubectl get ingressclass` → `nginx`, `public (default)`, `traefik` — **wszystkie trzy** mają `CONTROLLER: traefik.io/ingress-controller`. Pod `ingress/traefik-vm7pq` (Helm release `traefik`, 19 dni). |
+| Addon `ingress` | enabled | ✅, ale pod nim siedzi **Traefik** (nowy addon MicroK8s jest Gateway-API-owy: `Gateway ingress/traefik-gateway`, PROGRAMMED=True). |
+| Addon `traefik` | disabled | ✅ zbędny — `ingress` go zastępuje. Nic do usuwania. |
+| Istio | „istio enabled” | ⚠️ **Istio wisi, ale jest nieużywane**: `istiod` + `istio-ingressgateway` + `istio-egressgateway` działają **127 dni**, a namespace `davtro02` **nie ma** labela `istio-injection` → wszystkie pody mają tylko swój kontener (sprawdziłem: `fastapi-web-app-... sidecars=fastapi`, `frontend-... sidecars=nginx` itd.). |
+| Ingressy aplikacji | działają | ⚠️ `davtro-ingress` / `spark-ingress` mają **`status.loadBalancer: {}` = pusty ADDRESS**. Powód: Traefik ma `--providers.kubernetesingress.ingressendpoint.publishedservice=ingress/traefik`, a **Service `traefik` jest `LoadBalancer` z `EXTERNAL-IP: <pending>` (brak MetalLB)** → nie ma adresu do opublikowania. Ruch realnie idzie przez NodePort **31086 (80)** / **30968 (443)**. |
+| `scripts/port-forward.sh` | — | 🔴 **błąd**: skrypt robi `port-forward svc/davtro-ingress`. W `davtro02` **nie ma takiego Service** (są tylko `fastapi-web-app-svc`, `frontend-svc`, …). Wpis `https-fastapi/https-frontend/https-spring` **nie zadziała**. Powinno być `-n ingress svc/traefik`, a po migracji `-n istio-system svc/istio-ingressgateway`. |
+| Git | (z planu: „commit niewypchnięty”) | ⚠️ **nieaktualne**: `origin/main` = `b0a0476` (CI: tag obrazów), lokalny HEAD = `83bb8e9` → **jesteś 1 commit ZA `origin/main`** (`git status`: `main...origin/main [wstecz 1]`). Nie ma nic do wypchnięcia, trzeba `git pull`. |
+| Reszta | — | ✅ bez zmian: Vault TLS :8203, 3 ClusterIssuer READY, 9–10 Certificate READY, 8 NetworkPolicy, Kyverno (3 polityki), ESO, Transit. |
+| Kyverno | — | 🔴 **cichy defekt**: wszystkie 3 reguły mają `namespaces: [davtro]`, a workloady są w **`davtro02`** → polityki **faktycznie nie działają**. |
+
+---
+
+# 2. Jeśli przechodzisz na Istio — co USUNĄĆ, co ZOSTAWIĆ
+
+Ważne: **nic nie musisz instalować** — Istio już stoi. „Przejście” = podpięcie `davtro02` do mesha + przeniesienie wejścia z Traefika na `istio-ingressgateway`.
+
+## 2.1. Możesz usunąć / z czego zrezygnować (po weryfikacji Istio!)
+
+| # | Co usunąć | Dlaczego | Uwaga |
+|---|---|---|---|
+| 1 | `manifests/base/ingress.yaml` (2× `Ingress`) + wpis w `kustomization.yaml` | Zastępuje to **`Gateway` + `VirtualService`** (te same 2 ho­sty: `davtro.local`, `spark.davtro.local` i te same 5 ścieżek: `/api`, `/`, `/grafana`, `/kafka-ui`, `/pgadmin`) | rób to **po** postawieniu Gatewaya (Traefik = droga powrotu) |
+| 2 | Adnotacja `argocd.argoproj.io/ignore-healthcheck: "true"` z obu Ingressów | Istnieje tylko dlatego, że Ingress „czeka bez adresu”. `Gateway` ma normalny status od istiod | — |
+| 3 | NP `allow-ingress-controller-to-web` i `allow-ingress-controller-to-frontend` | Wskazują `namespaceSelector: kubernetes.io/metadata.name: ingress`. Po migracji kontrolerem jest `istio-system` → te reguły **przestają cokolwiek wpuszczać** | zamień na `istio-system` (albo zostaw jako uzupełnienie NP) |
+| 4 | NP `allow-ingress-to-web` i `allow-ingress-to-frontend` (`from: []`) | To **dziura**: `from: []` = „wpuszczam każdego na `:8080`”, więc `default-deny` jest w praktyce zniesiony. Powinno zniknąć **niezależnie od Istio** | zastępuje je `AuthorizationPolicy` |
+| 5 | Addon MicroK8s `ingress` → `microk8s disable ingress` | Usuwa Traefika, `IngressClass public/nginx/traefik`, ns `ingress` i `traefik-gateway` | **dopiero po** potwierdzeniu, że Istio Gateway serwuje `davtro.local` |
+| 6 | (warunkowo) `manifests/base/mtls-certificates.yaml` → `fastapi-mtls`, `message-processor-mtls`, `spring-app-mtls` | Istio daje mTLS automatycznie (tożsamości SPIFFE z istiod), więc certy klienta do **ruchu app↔app nie są potrzebne** | ⚠️ **ALE**: te same sekrety są mountowane jako `/etc/mtls` i **używane do mTLS do Kafki** (`KAFKA_TLS_CERT_FILE=/etc/mtls/tls.crt`). **Na teraz: ZOSTAW.** Usuniesz, dopiero gdy Kafka przestanie wymagać certów klienta |
+| 7 | `pki-issuer.yaml` → rola `davtro-internal` | Używana tylko przez te mTLS-y app↔app. Po 6 staje się martwa | rola `davtro-ingress` **musi zostać** |
+
+## 2.2. Musisz ZOSTAWIĆ (Istio tego nie zastępuje)
+
+- **cert-manager + Vault PKI** (`pki-issuer.yaml`, `certificates.yaml`, `vault-server-tls.yaml`) — `Gateway` Istio **też** konsumuje k8s Secret TLS (`davtro-tls`, `spark-tls`, `credentialName`). Bez tego nie ma HTTPS.
+- **`kafka-server-tls` + mTLS Kafki** (`/etc/mtls`) — Kafka to L4, Istio nie robi protocol-aware mTLS dla Kafki. Certy zostają.
+- **Cały Vault** (raft, TLS :8203, Transit PII, database engine, KV v2, snapshot), **ESO**, **dynamiczne creds DB**.
+- **Postgres, Redis, ELK/Loki/Tempo/Grafana/Prometheus/Alertmanager, ArgoCD, Kustomize, HPA/PDB, HPA, Kyverno** (te ostatnie warto „naprawić” — zły namespace).
+- **`default-deny-ingress`** + `allow-intra-namespace` — NP działa w L3/L4 i **uzupełnia** `AuthorizationPolicy` (Istio nie zastępuje NetworkPolicy). Zostają.
+- **`frontend/nginx.conf`** — to nie ingress, tylko serwer aplikacji (SPA + proxy `/api`). Zostaje.
+- **`scripts/port-forward.sh`** — zostaje, ale wymaga poprawki (patrz §1).
+- **`istio-egressgateway`** — zostaje i możesz go **wykorzystać** do TLS-origination do Postgres/Redis (Twój roadmap #6) zamiast pisać TLS ręcznie.
+
+## 2.3. Co trzeba dodać (nowe pliki + kustomization)
+
+1. `manifests/base/namespace.yaml` → label `istio-injection: enabled` (jeśli chcesz sidecary).
+2. `manifests/base/istio-gateway.yaml` → `Gateway networking.istio.io/v1` (`selector: istio: ingressgateway`, servery 80/443, `tls.credentialName: davtro-tls` dla `davtro.local` i `spark-tls` dla `spark.davtro.local`).
+3. `manifests/base/istio-virtualservices.yaml` → `VirtualService` z 5 ścieżkami (przepisanie 1:1 z `ingress.yaml`).
+4. `manifests/base/istio-peer-authentication.yaml` → **najpierw `PERMISSIVE`**, dopiero po rolloutcie `STRICT`.
+5. `manifests/base/istio-authorization-policy.yaml` → zastępuje dziurawe NP z §2.1/4.
+6. Wszystkie 5 plików dopisać do `resources` w `manifests/base/kustomization.yaml`.
+
+## 2.4. Pułapki specyficzne dla tego repo (kolejność ma znaczenie)
+
+- **STRICT mTLS + brak sidecarów = całkowita awaria.** Zacznij od `PERMISSIVE`.
+- Po labelu `istio-injection` **wszystkie pody muszą się zrestartować** (istio-proxy + ~100 mC/…) — ArgoCD tego nie zrobi sam „w locie”.
+- **Kyverno ma bug** (`namespaces: [davtro]`), więc sidecary **nie zostaną zablokowane** przez `require-requests-limits`/`require-ghcr-images` — a powinny (istio-proxy to `docker.io/istio/proxyv2`, bez requests/limits). To osobny, realny defekt do naprawy.
+- **`istio-ingressgateway` jest `LoadBalancer` z `<pending>`** (jak Traefik) → i tak wejście tylko przez NodePort (`80→31426`, `443→31411`) lub port-forward. Chcesz prawdziwy VIP → MetalLB.
+- **Prometheus/metryki**: job `fastapi` celuje w `:80/metrics` (i zwraca 404), a przy `STRICT` scrape przez sidecara się psuje → zostań na `PERMISSIVE`, dopóki nie poprawisz metryk.
+- **Stateful infra** (`vault`, `kafka-kraft`, `postgres-db`, `redis`): rozważ `sidecar.istio.io/inject: "false"` — Vault/Kafka mają własny TLS/raft i sidecar tylko komplikuje lifecycle.
+
+---
+
+# 3. Co jest zrobione + mój proponowany następny krok
+
+**Zrobione i potwierdzone:** Vault raft+PVC, audit, KV v2, TLS :8203, Transit PII, ESO + dynamiczne creds DB, cert-manager + Vault PKI (9 cert READY), NetworkPolicy default-deny, Kyverno (3 polityki — choć nieaktywne), snapshot Vaulta (naprawiony), Kafka mTLS (naprawiony w KROK 12), GitOps CI/CD + ArgoCD.
+
+**Realny następny krok (w tej kolejności):**
+
+1. **P0 git**: `git pull --rebase` — jesteś **1 commit za `origin/main`** (`b0a0476`). Zaktualizować `scripts/plan_etapy_kroki.md` (wpis „commit niewypchnięty a0b1861” jest już nieprawdziwy).
+2. **P0 Vault metrics 403** (z planu): `rollout restart sts/vault` → Vault wczyta nowy `telemetry{}`; sprawdzić `up{job="vault"}==1`. Potem **test restore ze snapshotu** (wciąż nietestowany).
+3. **P0/cichy defekt**: `scripts/port-forward.sh` — `svc/davtro-ingress` **nie istnieje** → poprawić na `-n ingress svc/traefik` (a po migracji `-n istio-system svc/istio-ingressgateway`).
+4. **P1**: naprawić namespace w `kyverno-policy.yaml` (`davtro02`) — inaczej cała polityka to atrapa.
+5. **Dopiero potem migracja na Istio** wg §2.3–2.4 (Gateway → weryfikacja → dopiero wtedy `microk8s disable ingress`).
+
+Chcesz, żebym zaczął realizować? Mogę iść w dwóch wariantach — wybierz jeden:
+
+- **A) „naprawy P0 najpierw”**: pull + restart Vaulta + weryfikacja metryk + fix `port-forward.sh` + fix namespace Kyverno.
+- **B) „od razu Istio”**: dodać `istio-gateway.yaml` + `istio-virtualservices.yaml` + label namespace + NP dla `istio-system` i przeprowadzić kontrolowaną migrację wejścia (Traefik zostaje jako droga powrotu).
