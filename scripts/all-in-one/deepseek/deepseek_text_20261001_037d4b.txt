@@ -1,0 +1,15 @@
+
+---
+
+## Podsumowanie: co Istio realnie załatwia
+
+| Problem | Rozwiązanie przed | Rozwiązanie po (Istio) |
+|---|---|---|
+| **mTLS FastAPI↔Kafka** | `confluent-kafka` z SSL, cert z Vault PKI, montowanie `/etc/mtls` | Sidecar Envoy robi mTLS, aplikacja gada PLAINTEXT do `localhost` |
+| **mTLS FastAPI↔Postgres** | Brak (Postgres bez TLS w tej wersji) | Sidecar Envoy szyfruje TCP do `postgres-clusterip:5432` |
+| **Rotacja certów aplikacji** | cert-manager + restart podów | Envoy rotuje w RAM co 24h, **bez restartu** |
+| **NetworkPolicy L4** | 6+ plików YAML (`default-deny`, `allow-*`) | 1× `PeerAuthentication STRICT` + `AuthorizationPolicy` L7 |
+| **Ingress** | `ingress-nginx` + `Ingress` + 2× `Certificate` | `Gateway` + `VirtualService` + 2× `Certificate` (tylko dla gateway) |
+| **Tożsamość** | `serviceAccountName` + brak weryfikacji L7 | SPIFFE (`cluster.local/ns/davtro02/sa/fastapi-sa`) w `AuthorizationPolicy` |
+| **PII w spoczynku** | Vault Transit | **Vault Transit (bez zmian – Istio tego nie robi)** |
+| **Sekrety** | ESO | **ESO (bez zmian – Istio tego nie robi)** |
