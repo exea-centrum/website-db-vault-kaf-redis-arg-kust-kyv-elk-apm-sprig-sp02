@@ -1,0 +1,62 @@
+# KROK 11 (Istio): DestinationRule dla uslug z ruchem do sidecarow.
+# Wymusza ISTIO_MUTUAL dla calego ruchu wewnetrznego.
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: default
+  namespace: davtro02
+spec:
+  host: "*.davtro02.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: fastapi-dr
+  namespace: davtro02
+spec:
+  host: fastapi-web-app-svc
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 100
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: postgres-dr
+  namespace: davtro02
+spec:
+  host: postgres-clusterip
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: redis-dr
+  namespace: davtro02
+spec:
+  host: redis
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: kafka-dr
+  namespace: davtro02
+spec:
+  host: kafka-kraft
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL

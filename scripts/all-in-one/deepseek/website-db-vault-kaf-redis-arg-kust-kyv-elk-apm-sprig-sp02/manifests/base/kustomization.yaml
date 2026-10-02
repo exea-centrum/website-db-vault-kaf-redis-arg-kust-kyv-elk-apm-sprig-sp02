@@ -1,0 +1,70 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+# Namespace + Istio injection
+- istio-namespace-label.yaml
+# ServiceAccounts
+- serviceaccount.yaml
+# Istio resources
+- istio-peer-auth.yaml
+- istio-authz.yaml
+- istio-gateway.yaml
+- istio-destination-rules.yaml
+# Secrets / Vault
+- configmap.yaml
+- secret-store.yaml
+- external-secrets.yaml
+- external-secrets-db-dynamic.yaml
+- transit-helpers.yaml
+- vault.yaml
+- vault-snapshot.yaml
+- vault-bootstrap.yaml
+- vault-server-tls.yaml
+- pki-issuer.yaml
+- certificates.yaml
+# Applications
+- deployment.yaml
+- service.yaml
+- frontend.yaml
+- message-processor.yaml
+- spring-app.yaml
+- spark.yaml
+# Data
+- postgres.yaml
+- redis.yaml
+- kafka.yaml
+# Autoscaling / availability
+- hpa.yaml
+- pdb.yaml
+# Observability
+- prometheus.yaml
+- alertmanager.yaml
+- exporters.yaml
+- cert-expiry-exporter.yaml
+- grafana.yaml
+- loki.yaml
+- promtail.yaml
+- tempo.yaml
+# Tools
+- pgadmin.yaml
+- kafka-ui.yaml
+# Policy
+- kyverno-policy.yaml
+
+images:
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+  newTag: latest
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
+  newTag: latest
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
+  newTag: latest
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
+  newTag: latest
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
+  newTag: latest

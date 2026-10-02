@@ -1,0 +1,88 @@
+# KROK 11 (Istio mTLS): STRICT mTLS w calym namespace.
+# Envoy wymaga certyfikatu SPIFFE od KAZDEGO polaczenia wewnatrz namespace.
+# Aplikacje NIE musza znac TLS - sidecar robi to transparentnie.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: davtro02
+spec:
+  mtls:
+    mode: STRICT
+---
+# Wyjatek: porty monitoringu/scrape (Prometheus, exportery) - PERMISSIVE,
+# bo Prometheus nie ma sidecara i nie ma certu SPIFFE.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: prometheus-scrape-permissive
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels:
+      app: prometheus
+  mtls:
+    mode: PERMISSIVE
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: exporters-permissive
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels:
+      app: postgres-exporter
+  mtls:
+    mode: PERMISSIVE
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: kafka-exporter-permissive
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels:
+      app: kafka-exporter
+  mtls:
+    mode: PERMISSIVE
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: node-exporter-permissive
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  mtls:
+    mode: PERMISSIVE
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: cert-expiry-exporter-permissive
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels:
+      app: cert-expiry-exporter
+  mtls:
+    mode: PERMISSIVE
+---
+# Kafka KRaft: kontroler (9093) mowi wlasnym protokolem - nie przez Envoy.
+# Listener brokera (9092) jest pod mTLS przez sidecar.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: kafka-controller-permissive
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels:
+      app: kafka-kraft
+  portLevelMtls:
+    9093:
+      mode: DISABLE

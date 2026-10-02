@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+target/
+node_modules/
+*.jks
+*.p12
+*.crt
+*.key
