@@ -1,0 +1,10 @@
+FROM python:3.12-slim
+RUN groupadd -g 1000 appuser && useradd -u 1000 -g appuser appuser
+WORKDIR /srv
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libpq-dev && rm -rf /var/lib/apt/lists/*
+COPY backend-fastapi/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+COPY backend-fastapi/app ./app
+RUN chown -R appuser:appuser /srv
+USER appuser
+CMD ["python", "-m", "app.consumer"]

@@ -1,0 +1,36 @@
+# Vault PKI -> cert-manager -> istio-csr.
+# This is an Istio intermediate CA signed by the Vault PKI issuer.
+# The Vault Root CA private key never leaves Vault.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: istio-ca
+  namespace: cert-manager
+spec:
+  secretName: istio-ca
+  duration: 87600h
+  renewal:
+    policy: Disabled
+  commonName: davtro-istio-ca
+  isCA: true
+  usages:
+    - cert sign
+    - digital signature
+    - key encipherment
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Never
+  issuerRef:
+    name: vault-istio-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: istio-root-ca
+  namespace: cert-manager
+type: Opaque
+stringData:
+  README: "scripts/install-istio.sh replaces this placeholder with ca.pem from Certificate/istio-ca."

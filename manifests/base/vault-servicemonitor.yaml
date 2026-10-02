@@ -1,0 +1,22 @@
+# Wymaga Prometheus Operatora (CRD ServiceMonitor) - analogicznie jak service-monitors.yaml.
+# NIE podpiety w kustomization.yaml - odkomentuj tam ta linie po instalacji operatora.
+# Zrodlo metryk: /v1/sys/metrics?format=prometheus (telemetry w vault.yaml config.hcl).
+# Proponowane alerty w Grafanie/Alertmanagerie:
+#   vault_core_sealed == 1                -> Vault zasealowany
+#   rate(vault_audit_log_request_error[5m]) > 0 -> bledy auth/autoryzacji
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vault
+  namespace: davtro02
+  labels: { release: prometheus }
+spec:
+  selector:
+    matchLabels:
+      app: vault
+  endpoints:
+    - port: http
+      path: /v1/sys/metrics
+      params:
+        format: ["prometheus"]
+      interval: 30s

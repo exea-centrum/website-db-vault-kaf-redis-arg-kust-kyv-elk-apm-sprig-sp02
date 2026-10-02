@@ -1,9 +1,0 @@
-# Istio: automatyczne wstrzykiwanie sidecarow do wszystkich podow w namespace.
-# To jest fundament - bez tej etykiety Envoy nie zostanie dodany i mTLS nie zadziala.
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: davtro02
-  labels:
-    istio-injection: enabled
-    app.kubernetes.io/part-of: davtro-platform
