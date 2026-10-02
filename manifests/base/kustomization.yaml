@@ -4,6 +4,8 @@ kind: Kustomization
 # KROK 5 (PKI): Vault CA + cert-manager. AKTYWNE - cert-manager zainstalowany
 # na klastrze (CRD ClusterIssuer/Certificate istnieja, SA cert-manager-vault +
 # Secret cert-manager-vault-token gotowe). Kolejnosc celowa: issuer przed certami.
+#
+# UWAGA: namespace.yaml MUSI byc pierwszy - namespace tworzony przed reszta zasobow.
 resources:
 - namespace.yaml
 - serviceaccount.yaml
@@ -44,6 +46,9 @@ resources:
 - mtls-certificates.yaml
 - transit-helpers.yaml
 
+# UWAGA: kazda pozycja MUSI miec 'name', 'newName' i 'newTag'.
+# CI (kustomize edit set image) nadpisuje 'newTag' tagiem SHA commita.
+# Kolejnosc jest dowolna, ale utrzymujemy ja stala dla czytelnych diffow.
 images:
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
