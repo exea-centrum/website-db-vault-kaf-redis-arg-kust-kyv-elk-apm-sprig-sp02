@@ -37,13 +37,16 @@ resources:
 - tempo.yaml
 - pgadmin.yaml
 - kafka-ui.yaml
-- network-policies.yaml
-- ingress.yaml
+
+# Istio zamiast Ingress / NetworkPolicy / aplikacyjnego mTLS
+- istio-csr-pki.yaml
+- istio-security.yaml
+- istio-gateway.yaml
+
 - kyverno-policy.yaml
 - pki-issuer.yaml
 - vault-server-tls.yaml
 - certificates.yaml
-- mtls-certificates.yaml
 - transit-helpers.yaml
 
 # UWAGA: kazda pozycja MUSI miec 'name', 'newName' i 'newTag'.
