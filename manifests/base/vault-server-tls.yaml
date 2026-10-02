@@ -1,21 +1,47 @@
-# KROK 9 (Vault HTTPS): certyfikat SERWERA Vaulta NIE MOZE pochodzic z Vault PKI.
+# KROK 9 — Bootstrap TLS dla Vault
 #
-# Dlaczego: cert-manager podpisuje certyfikat przez Vault PKI (pki/sign/...), czyli
-# MUSI najpierw polaczyc sie z dzialajacym Vaultem. A Vault bez wlasnego certyfikatu
-# nie wstaje z listenerem TLS (:8203). Bladne kolo ("klero-wajka"):
-#   Vault z TLS -> potrzebuje certu -> cert z Vault PKI -> potrzebuje Vaulta.
-# Objaw na klastrze: ESO/klienci czekali na secret `vault-tls`, ktory nigdy nie
-# powstal, pody nie mogly sie zamontowac, a CALY sync ArgoCD byl Degraded/SyncError.
+# WAŻNE:
+# Ten plik NIE korzysta z Vault PKI do wystawienia certyfikatu Vaulta.
+# Vault PKI nie może wystawić własnego pierwszego certyfikatu, ponieważ
+# Vault musi już działać, aby cert-manager mógł się z nim połączyć.
 #
-# Rozwiazanie (standardowy wzorzec bootstrapu TLS): male, WEWNETRZNE CA generowane
-# przez cert-manager BEZ udzialu Vaulta; cert serwera Vaulta podpisuje to CA.
-#   * `vault-tls` istnieje ZANIM Vault wystartuje -> zero blednego kola,
-#   * klienci ufaja `ca.crt` z sekretu `vault-tls` (ESO caProvider, transit_client,
-#     vault-snapshot) - nic nie trzeba zmieniac po stronie klientow,
-#   * CA jest TRWALE (osobny, dlugi TTL) - odnowienie liscia nie zmienia zaufania,
-#     wiec rotacja certu nie zrywa polaczen klientow.
-# UWAGA: to CA sluzy TYLKO certowi serwera Vaulta. Certy wewnetrznych uslug
-# (mTLS fastapi/spring, Ingress) dalej wystawia PKI Vaulta (pki/davtro-internal).
+# Łańcuch bootstrapu:
+#
+#   cert-manager
+#       |
+#       +--> vault-selfsigned
+#                 |
+#                 +--> vault-ca
+#                       |
+#                       +--> vault-ca Issuer
+#                               |
+#                               +--> vault-tls Secret
+#                                       |
+#                                       +--> Vault :8203 HTTPS
+#
+# Rezultat:
+#   vault-ca  = stabilne CA bootstrapowe
+#   vault-tls = certyfikat serwera Vault + tls.key + ca.crt
+#
+# Secret `vault-tls` MUSI istnieć przed uruchomieniem Vault StatefulSet,
+# ponieważ vault.yaml montuje go jako wymagany volume.
+#
+# Certyfikat Vaulta jest przeznaczony dla:
+#   - vault.davtro02.svc.cluster.local
+#   - vault-0.vault.davtro02.svc.cluster.local
+#   - vault
+#   - vault.davtro02.svc.cluster.local
+#   - localhost / 127.0.0.1 dla diagnostyki port-forward
+#
+# CA bootstrapowe służy wyłącznie do TLS serwera Vault.
+# Certyfikaty aplikacyjne / Istio / mTLS nadal mogą być wystawiane
+# przez właściwe PKI Vaulta po jego uruchomieniu.
+#
+# UWAGA:
+# Nie usuwaj `vault-ca` ani `vault-tls` ręcznie podczas normalnej pracy.
+# CA jest długowieczne, a certyfikat serwera jest odnawiany przez cert-manager.
+
+---
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -23,9 +49,15 @@ metadata:
   namespace: davtro02
 spec:
   selfSigned: {}
+
 ---
-# Samopodpisana CA (10 lat) - sekret `vault-ca` z tls.crt/tls.key dla Issuer typu CA.
-# `rotationPolicy: Never` + dlugi TTL = stabilne zaufanie przez caly czas zycia.
+# Bootstrapowe CA dla Vault.
+#
+# 10 lat ważności:
+#   87600h = 10 lat
+#
+# CA jest stabilne, dzięki czemu odnowienie certyfikatu `vault-tls`
+# nie zmienia certyfikatu CA używanego przez klientów.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -33,24 +65,34 @@ metadata:
   namespace: davtro02
 spec:
   secretName: vault-ca
+
   isCA: true
+
   commonName: davtro-vault-ca
-  duration: 87600h    # 10 lat
-  renewBefore: 8760h  # 1 rok
+
+  duration: 87600h
+  renewBefore: 8760h
+
   privateKey:
     algorithm: RSA
     size: 2048
     rotationPolicy: Never
+
   usages:
     - digital signature
     - cert sign
     - crl sign
+
   issuerRef:
     name: vault-selfsigned
     kind: Issuer
     group: cert-manager.io
+
 ---
-# Issuer typu CA - podpisuje cert serwera Vaulta (`Certificate vault-tls`).
+# Issuer CA.
+#
+# cert-manager używa Secret `vault-ca` jako CA do podpisania
+# właściwego certyfikatu serwera Vault.
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -59,3 +101,81 @@ metadata:
 spec:
   ca:
     secretName: vault-ca
+
+---
+# WŁAŚCIWY certyfikat serwera Vault.
+#
+# TO jest brakujący element w poprzedniej wersji.
+#
+# Po wystawieniu Certificate cert-manager utworzy:
+#
+#   Secret/vault-tls
+#
+# zawierający:
+#
+#   tls.crt
+#   tls.key
+#   ca.crt
+#
+# Ten Secret jest następnie montowany przez:
+#
+#   vault StatefulSet       -> /vault/tls
+#   vault-bootstrap         -> /etc/vault-tls
+#   vault-snapshot          -> /etc/vault-tls
+#
+# oraz może być używany przez ESO / Prometheus jako CA.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: davtro02
+spec:
+  secretName: vault-tls
+
+  # Certyfikat serwera nie jest CA.
+  isCA: false
+
+  commonName: vault.davtro02.svc.cluster.local
+
+  duration: 2160h
+  renewBefore: 360h
+
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+
+  usages:
+    - digital signature
+    - key encipherment
+    - server auth
+
+  dnsNames:
+    # Główny adres używany przez bootstrap:
+    - vault.davtro02.svc.cluster.local
+
+    # FQDN Service:
+    - vault.davtro02.svc
+
+    # Krótsze nazwy Service:
+    - vault
+    - vault.davtro02
+
+    # Adres StatefulSet:
+    - vault-0.vault.davtro02.svc.cluster.local
+
+    # Wariant FQDN:
+    - vault-0.vault.davtro02.svc
+
+    # Lokalne użycie / diagnostyka:
+    - localhost
+
+  ipAddresses:
+    - 127.0.0.1
+
+  issuerRef:
+    name: vault-ca
+    kind: Issuer
+    group: cert-manager.io
+
+# Issuer typu CA - podpisuje cert serwera Vaulta (Certificate vault-tls). apiVersion: cert-manager.io/v1 kind: Issuer metadata: name: vault-ca namespace: davtro02 spec: ca: secretName: vault-ca
