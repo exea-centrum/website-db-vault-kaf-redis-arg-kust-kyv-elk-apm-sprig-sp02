@@ -22,7 +22,7 @@ spec:
   mtls:
     mode: STRICT
   portLevelMtls:
-    8203:
+    "8203":
       mode: DISABLE
 ---
 # Identity-based access replacing the former intra-namespace NetworkPolicy.
