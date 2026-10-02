@@ -6,6 +6,9 @@ kind: Kustomization
 # Secret cert-manager-vault-token gotowe). Kolejnosc celowa: issuer przed certami.
 #
 # UWAGA: namespace.yaml MUSI byc pierwszy - namespace tworzony przed reszta zasobow.
+
+# Istio zamiast Ingress / NetworkPolicy / aplikacyjnego mTLS
+
 resources:
 - namespace.yaml
 - serviceaccount.yaml
@@ -37,12 +40,9 @@ resources:
 - tempo.yaml
 - pgadmin.yaml
 - kafka-ui.yaml
-
-# Istio zamiast Ingress / NetworkPolicy / aplikacyjnego mTLS
 - istio-csr-pki.yaml
 - istio-security.yaml
 - istio-gateway.yaml
-
 - kyverno-policy.yaml
 - pki-issuer.yaml
 - vault-server-tls.yaml
@@ -70,16 +70,16 @@ images:
   newTag: 6344b5e30133eef1b3e7d0c6f4494c8e67b26022
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
-  newTag: da9c8aaed7af2a5e41da6993105026a9fe7cb51f
+  newTag: 3f705022043cd9f5ee3ac94fa6c8e288d22994f6
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
-  newTag: da9c8aaed7af2a5e41da6993105026a9fe7cb51f
+  newTag: 3f705022043cd9f5ee3ac94fa6c8e288d22994f6
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
-  newTag: da9c8aaed7af2a5e41da6993105026a9fe7cb51f
+  newTag: 3f705022043cd9f5ee3ac94fa6c8e288d22994f6
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
-  newTag: da9c8aaed7af2a5e41da6993105026a9fe7cb51f
+  newTag: 3f705022043cd9f5ee3ac94fa6c8e288d22994f6
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
-  newTag: da9c8aaed7af2a5e41da6993105026a9fe7cb51f
+  newTag: 3f705022043cd9f5ee3ac94fa6c8e288d22994f6
