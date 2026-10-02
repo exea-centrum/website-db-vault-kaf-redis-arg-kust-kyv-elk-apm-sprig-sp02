@@ -1,6 +1,6 @@
 # Davtro Apartments – platforma wynajmu krotkoterminowego
 
-Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01`
+Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
 Namespace: `davtro`
 
 ## Architektura
@@ -40,7 +40,7 @@ export GITHUB_PAT
 kubectl create secret generic davtro-github-repo \
 	-n argocd \
 	--from-literal=type=git \
-	--from-literal=url=https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01.git \
+	--from-literal=url=https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02.git \
 	--from-literal=username=exea-centrum \
 	--from-literal=password="$GITHUB_PAT" \
 	--dry-run=client -o yaml |

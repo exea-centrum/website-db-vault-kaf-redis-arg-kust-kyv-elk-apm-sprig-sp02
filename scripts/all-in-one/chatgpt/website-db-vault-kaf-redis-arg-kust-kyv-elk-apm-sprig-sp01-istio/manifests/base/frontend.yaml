@@ -15,7 +15,7 @@ spec:
       serviceAccountName: davtro-sa
       containers:
         - name: nginx
-          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-istio-frontend:latest
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-istio-frontend:latest
           imagePullPolicy: Always
           ports: [{ containerPort: 8080 }]
           readinessProbe:

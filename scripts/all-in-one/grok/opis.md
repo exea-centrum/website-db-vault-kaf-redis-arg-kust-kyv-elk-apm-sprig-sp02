@@ -23,7 +23,7 @@ istioctl install --set profile=default -y
 
 # 2. Generuj projekt
 bash setup-istio.sh
-cd website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01
+cd website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
 
 # 3. ArgoCD / kustomize
 kubectl apply -k manifests/overlays/production

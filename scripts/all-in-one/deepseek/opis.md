@@ -26,7 +26,7 @@ Poniżej **kompletny zrebuildowany plik** `#!binbash.txt` – przepisany tak, ab
 #!/bin/bash
 set -e
 
-PROJECT_NAME="website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01"
+PROJECT_NAME="website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02"
 NAMESPACE="davtro02"
 REPO="https://github.com/exea-centrum/${PROJECT_NAME}.git"
 
@@ -1932,7 +1932,7 @@ spec:
         - { name: vault-tls, secret: { secretName: vault-tls, optional: true } }
       containers:
         - name: fastapi
-          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01:latest
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02:latest
           ports: [{ containerPort: 8080 }]
           envFrom:
             - configMapRef: { name: fastapi-config }
@@ -1990,7 +1990,7 @@ spec:
       serviceAccountName: frontend-sa
       containers:
         - name: nginx
-          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-frontend:latest
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend:latest
           imagePullPolicy: Always
           ports: [{ containerPort: 8080 }]
           readinessProbe:
@@ -3160,7 +3160,7 @@ spec:
         - { name: vault-tls, secret: { secretName: vault-tls, optional: true } }
       containers:
         - name: message-processor
-          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-consumer:latest
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer:latest
           envFrom:
             - configMapRef: { name: fastapi-config }
             - secretRef: { name: davtro-secrets }
@@ -3202,7 +3202,7 @@ spec:
         - { name: vault-tls, secret: { secretName: vault-tls, optional: true } }
       containers:
         - name: spring-app
-          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spring:latest
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring:latest
           ports: [{ containerPort: 8081 }]
           envFrom:
             - secretRef: { name: davtro-secrets }
@@ -4253,20 +4253,20 @@ resources:
 - kyverno-policy.yaml
 
 images:
-- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01
-  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
   newTag: latest
-- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-consumer
-  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-consumer
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
   newTag: latest
-- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-frontend
-  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-frontend
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
   newTag: latest
-- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spark
-  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spark
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
   newTag: latest
-- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spring
-  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spring
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
   newTag: latest
 EOF
 
@@ -4304,7 +4304,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01.git
+    repoURL: https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02.git
     targetRevision: HEAD
     path: manifests/overlays/production
   destination:
@@ -4335,7 +4335,7 @@ provider "github" { token = var.github_token }
 variable "github_token" { type = string, sensitive = true }
 variable "ghcr_pat" { type = string, sensitive = true }
 resource "github_repository" "repo" {
-  name        = "website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01"
+  name        = "website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02"
   description = "Davtro Apartments - platforma wynajmu z Istio mTLS"
   visibility  = "private"
 }
@@ -4360,7 +4360,7 @@ on:
   workflow_dispatch:
 env:
   REGISTRY: ghcr.io
-  IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01
+  IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
 jobs:
   build-fastapi:
     if: github.event.head_commit.author.username != 'github-actions[bot]'

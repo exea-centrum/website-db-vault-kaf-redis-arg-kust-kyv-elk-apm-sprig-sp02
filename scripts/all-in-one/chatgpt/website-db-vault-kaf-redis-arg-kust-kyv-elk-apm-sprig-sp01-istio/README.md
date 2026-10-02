@@ -1,8 +1,8 @@
 # Davtro Apartments – platforma wynajmu krótkoterminowego (Full Open Source)
 
-Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01`
+Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
 Namespace docelowy: `davtro`
-KUSTOMIZE_IMAGE_ID: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01`
+KUSTOMIZE_IMAGE_ID: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
 KUSTOMIZE_PATH: `./manifests/production`
 
 ## Architektura przepływu rezerwacji
@@ -52,7 +52,7 @@ uvicorn app.main:app --reload --port 8080
 
 # Davtro Apartments – platforma wynajmu krotkoterminowego
 
-Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01`
+Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
 Namespace: `davtro`
 
 ## Architektura
@@ -92,7 +92,7 @@ export GITHUB_PAT
 kubectl create secret generic davtro-github-repo \
 	-n argocd \
 	--from-literal=type=git \
-	--from-literal=url=https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01.git \
+	--from-literal=url=https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02.git \
 	--from-literal=username=exea-centrum \
 	--from-literal=password="$GITHUB_PAT" \
 	--dry-run=client -o yaml |

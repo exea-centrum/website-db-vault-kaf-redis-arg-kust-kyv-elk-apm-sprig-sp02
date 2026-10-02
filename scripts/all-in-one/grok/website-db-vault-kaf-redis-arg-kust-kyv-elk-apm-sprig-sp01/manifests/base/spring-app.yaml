@@ -18,7 +18,7 @@ spec:
         # optional: cert vault-tls powstaje po starcie Vaulta (klero-wajka)
         - { name: vault-tls, secret: { secretName: vault-tls, optional: true } }      containers:
         - name: spring-app
-          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spring:latest
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring:latest
           ports: [{ containerPort: 8081 }]
           envFrom:
             - secretRef: { name: davtro-secrets }

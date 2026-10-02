@@ -63,7 +63,7 @@ Uruchomienie docelowo:
 chmod +x all-in-one-istio-final.sh
 ./all-in-one-istio-final.sh
 
-cd website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-istio
+cd website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-istio
 
 ./scripts/install-istio.sh
 ```

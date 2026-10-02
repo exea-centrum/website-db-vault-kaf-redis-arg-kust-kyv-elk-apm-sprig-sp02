@@ -25,7 +25,7 @@ spec:
         - { name: vault-tls, secret: { secretName: vault-tls, optional: true } }
       containers:
         - name: fastapi
-          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01:latest
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02:latest
           ports: [{ containerPort: 8080 }]
           envFrom:
             - configMapRef: { name: fastapi-config }

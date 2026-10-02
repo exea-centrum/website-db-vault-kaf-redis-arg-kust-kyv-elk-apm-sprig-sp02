@@ -21,7 +21,7 @@ spec:
         - { name: vault-tls, secret: { secretName: vault-tls, optional: true } }
       containers:
         - name: message-processor
-          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-consumer:latest
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer:latest
           envFrom:
             - configMapRef: { name: fastapi-config }
             - secretRef: { name: davtro-secrets }

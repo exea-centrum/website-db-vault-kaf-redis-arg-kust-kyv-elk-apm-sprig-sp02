@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-PROJECT_NAME="website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01"
+PROJECT_NAME="website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02"
 NAMESPACE="davtro"
 
 echo "=========================================================================="
@@ -1145,7 +1145,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: 'https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01.git'
+    repoURL: 'https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02.git'
     targetRevision: HEAD
     path: manifests/overlays/production
   destination:

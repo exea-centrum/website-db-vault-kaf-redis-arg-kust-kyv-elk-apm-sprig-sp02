@@ -444,7 +444,7 @@ Jeśli w środku jest `kubectl port-forward` — to znaczy, że to **nie jest sk
 Odpal po kolei:
 
 ```bash
-cd ~/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01
+cd ~/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
 
 # 1. Sprawdz, czy skrypt admina ma argumenty
 grep -c 'https-fastapi\|extract-tls\|serve\|diag' scripts/port-forward-without-an-argument-ing.sh
