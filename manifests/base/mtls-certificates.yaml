@@ -1,0 +1,67 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fastapi-mtls
+  namespace: davtro02
+spec:
+  secretName: fastapi-mtls
+  duration: 720h
+  renewBefore: 168h
+  commonName: fastapi-web-app.davtro02.svc
+  dnsNames:
+    - fastapi-web-app.davtro02.svc
+    - fastapi-web-app.davtro02.svc.cluster.local
+    - fastapi-web-app-svc.davtro02.svc
+    - fastapi-web-app-svc.davtro02.svc.cluster.local
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    name: vault-issuer-internal
+    kind: ClusterIssuer
+  usages: [digital signature, key encipherment, client auth, server auth]
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: message-processor-mtls
+  namespace: davtro02
+spec:
+  secretName: message-processor-mtls
+  duration: 720h
+  renewBefore: 168h
+  commonName: message-processor.davtro02.svc
+  dnsNames:
+    - message-processor.davtro02.svc
+    - message-processor.davtro02.svc.cluster.local
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    name: vault-issuer-internal
+    kind: ClusterIssuer
+  usages: [digital signature, key encipherment, client auth, server auth]
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: spring-app-mtls
+  namespace: davtro02
+spec:
+  secretName: spring-app-mtls
+  duration: 720h
+  renewBefore: 168h
+  commonName: spring-app.davtro02.svc
+  dnsNames:
+    - spring-app.davtro02.svc
+    - spring-app.davtro02.svc.cluster.local
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    name: vault-issuer-internal
+    kind: ClusterIssuer
+  usages: [digital signature, key encipherment, client auth, server auth]
