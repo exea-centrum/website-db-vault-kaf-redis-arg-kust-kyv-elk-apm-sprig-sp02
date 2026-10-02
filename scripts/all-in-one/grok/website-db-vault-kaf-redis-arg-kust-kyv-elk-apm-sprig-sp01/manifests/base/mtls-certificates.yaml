@@ -1,0 +1,27 @@
+# =============================================================================
+# ISTIO MIGRATION: aplikacyjne certy mTLS USUNIĘTE
+# =============================================================================
+# Wcześniej ten plik zawierał Certificate resources:
+#   - fastapi-mtls, message-processor-mtls, spring-app-mtls  (klient/server auth)
+#   - kafka-server-tls                                       (broker SSL :9094)
+#
+# Po przejściu na Istio:
+#   • mTLS App↔App, App↔Kafka, App↔Postgres, App↔Redis realizuje Envoy (STRICT)
+#   • certyfikaty rotowane automatycznie w pamięci RAM sidecarów (co ~24h)
+#   • aplikacje rozmawiają zwykłym HTTP/TCP (kafka-kraft:9092, redis:6379, ...)
+#
+# Zostawione puste (no-op) żeby nie łamać kustomization.yaml.
+# Możesz usunąć ten plik z resources w kustomization.yaml.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mtls-migration-note
+  namespace: davtro02
+  labels:
+    app: davtro
+    istio-migration: "true"
+data:
+  README: |
+    Aplikacyjne Certificate (fastapi-mtls, processor-mtls, spring-mtls, kafka-server-tls)
+    zostały usunięte. mTLS zapewnia Istio PeerAuthentication STRICT.

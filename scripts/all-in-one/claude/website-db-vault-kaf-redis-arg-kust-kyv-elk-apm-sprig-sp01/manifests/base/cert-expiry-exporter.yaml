@@ -1,0 +1,169 @@
+# KROK 7 (Certy TTL): eksporter dat wygasniecia certyfikatow.
+# Skanuje Secrety typu kubernetes.io/tls w namespace davtro02 (davtro-tls,
+# spark-tls, *-mtls) i wystawia metryki dla Prometheusa:
+#   davtro_cert_not_after_seconds{secret=...}  - unix ts wygasniecia
+#   davtro_cert_days_remaining{secret=...}     - dni do wygasniecia
+# Reguly alertow (cert-alerts w prometheus.yaml) ostrzegaja 14/7 dni przed TTL.
+# Certyfikaty i tak renewuje cert-manager + Vault PKI - to warstwa widocznosci.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-expiry-exporter
+  namespace: davtro02
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cert-expiry-reader
+  namespace: davtro02
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-expiry-reader
+  namespace: davtro02
+subjects:
+  - kind: ServiceAccount
+    name: cert-expiry-exporter
+    namespace: davtro02
+roleRef:
+  kind: Role
+  name: cert-expiry-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cert-expiry-exporter-script
+  namespace: davtro02
+data:
+  exporter.py: |
+    #!/usr/bin/env python3
+    # KROK 7: eksporter wygasania certyfikatow (stdlib only, bez zaleznosci).
+    import base64, json, os, ssl, tempfile, time, urllib.request
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from threading import Thread, Lock
+
+    NS = os.getenv("NAMESPACE", "davtro02")
+    PORT = int(os.getenv("PORT", "9887"))
+    REFRESH = int(os.getenv("REFRESH_SECONDS", "60"))
+    API = "https://%s:%s" % (os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc"),
+                             os.environ.get("KUBERNETES_SERVICE_PORT", "443"))
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount/"
+    TOKEN = open(SA + "token").read().strip()
+    CACERT = SA + "ca.crt"
+
+    def k8s_get(path):
+        ctx = ssl.create_default_context(cafile=CACERT)
+        req = urllib.request.Request(API + path, headers={"Authorization": "Bearer " + TOKEN})
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
+            return json.loads(r.read())
+
+    def not_after_epoch(pem):
+        # ssl._ssl._test_decode_cert - stdlib parser X.509 (bez bibliotek zewnetrznych)
+        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
+            f.write(pem)
+            path = f.name
+        try:
+            info = ssl._ssl._test_decode_cert(path)
+            return int(time.mktime(time.strptime(info["notAfter"], "%b %d %H:%M:%S %Y GMT")))
+        finally:
+            os.unlink(path)
+
+    _cache = {"body": "# eksporter sie rozgrzewa...\n"}
+    _lock = Lock()
+
+    def refresh_loop():
+        while True:
+            lines = ["# HELP davtro_cert_not_after_seconds Czas wygasniecia certyfikatu (unix).",
+                     "# TYPE davtro_cert_not_after_seconds gauge",
+                     "# HELP davtro_cert_days_remaining Dni do wygasniecia certyfikatu.",
+                     "# TYPE davtro_cert_days_remaining gauge"]
+            try:
+                data = k8s_get("/api/v1/namespaces/%s/secrets" % NS)
+                for item in data.get("items", []):
+                    if item.get("type") != "kubernetes.io/tls":
+                        continue
+                    name = item["metadata"]["name"]
+                    crt = item.get("data", {}).get("tls.crt")
+                    if not crt:
+                        continue
+                    try:
+                        ts = not_after_epoch(base64.b64decode(crt))
+                        days = int((ts - time.time()) // 86400)
+                        lines.append('davtro_cert_not_after_seconds{secret="%s"} %d' % (name, ts))
+                        lines.append('davtro_cert_days_remaining{secret="%s"} %d' % (name, days))
+                    except Exception as exc:
+                        print("cert decode error:", name, exc)
+            except Exception as exc:
+                print("k8s api error:", exc)
+            with _lock:
+                _cache["body"] = "\n".join(lines) + "\n"
+            time.sleep(REFRESH)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path not in ("/metrics", "/healthz"):
+                self.send_response(404); self.end_headers(); return
+            body = b"ok\n" if self.path == "/healthz" else _cache["body"].encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *a):
+            pass
+
+    Thread(target=refresh_loop, daemon=True).start()
+    print("cert-expiry-exporter nasluchuje na :%d (ns=%s, refresh=%ds)" % (PORT, NS, REFRESH))
+    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cert-expiry-exporter
+  namespace: davtro02
+  labels: { app: cert-expiry-exporter }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: cert-expiry-exporter } }
+  template:
+    metadata:
+      labels: { app: cert-expiry-exporter }
+    spec:
+      serviceAccountName: cert-expiry-exporter
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: exporter
+          image: python:3.12-slim
+          command: ["python3", "/app/exporter.py"]
+          ports: [{ containerPort: 9887 }]
+          env:
+            - { name: NAMESPACE, value: davtro02 }
+            - { name: PORT, value: "9887" }
+            - { name: REFRESH_SECONDS, value: "60" }
+          volumeMounts:
+            - { name: script, mountPath: /app }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9887 }
+            initialDelaySeconds: 3
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+      volumes:
+        - name: script
+          configMap: { name: cert-expiry-exporter-script }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cert-expiry-exporter
+  namespace: davtro02
+spec:
+  selector: { app: cert-expiry-exporter }
+  ports: [{ port: 9887, targetPort: 9887 }]

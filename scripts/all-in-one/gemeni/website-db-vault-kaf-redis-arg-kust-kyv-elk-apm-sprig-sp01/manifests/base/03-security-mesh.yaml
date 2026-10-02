@@ -1,0 +1,49 @@
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default-strict-mtls
+  namespace: davtro
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: postgres-l7-policy
+  namespace: davtro
+spec:
+  selector:
+    matchLabels:
+      app: postgres
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals:
+        - "cluster.local/ns/davtro/sa/fastapi-sa"
+        - "cluster.local/ns/davtro/sa/spring-app-sa"
+    to:
+    - operation:
+        ports: ["5432"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: kafka-l7-policy
+  namespace: davtro
+spec:
+  selector:
+    matchLabels:
+      app: kafka
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals:
+        - "cluster.local/ns/davtro/sa/fastapi-sa"
+        - "cluster.local/ns/davtro/sa/message-processor-sa"
+        - "cluster.local/ns/davtro/sa/spark-sa"
+    to:
+    - operation:
+        ports: ["9092"]

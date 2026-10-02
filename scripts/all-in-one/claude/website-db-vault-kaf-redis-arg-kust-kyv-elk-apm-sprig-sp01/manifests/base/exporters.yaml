@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-exporter
+  namespace: davtro02
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: postgres-exporter } }
+  template:
+    metadata: { labels: { app: postgres-exporter } }
+    spec:
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      containers:
+        - name: postgres-exporter
+          image: prometheuscommunity/postgres-exporter:v0.15.0
+          env:
+            # Credsy z sekretu generowanego przez ESO (external-secrets.yaml) - zero
+            # hasel w Git. HOST poprawiony: postgres-clusterip (Service); wczesniej
+            # wskazywal nieistniejacy 'postgres-db' i exporter nie mial polaczenia.
+            - name: DATA_SOURCE_URI
+              value: "postgres://postgres-clusterip:5432/davtro_rentals?sslmode=disable"
+            - name: DATA_SOURCE_USER
+              valueFrom: { secretKeyRef: { name: davtro-secrets, key: DB_USER } }
+            - name: DATA_SOURCE_PASS
+              valueFrom: { secretKeyRef: { name: davtro-secrets, key: DB_PASSWORD } }
+          ports: [{ containerPort: 9187 }]
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-exporter
+  namespace: davtro02
+spec:
+  selector: { app: postgres-exporter }
+  ports: [{ port: 9187, targetPort: 9187 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-exporter
+  namespace: davtro02
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: kafka-exporter } }
+  template:
+    metadata: { labels: { app: kafka-exporter } }
+    spec:
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      containers:
+        - name: kafka-exporter
+          image: danielqsj/kafka-exporter:v1.7.0
+          args: ["--kafka.server=kafka-kraft:9092"]
+          ports: [{ containerPort: 9308 }]
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-exporter
+  namespace: davtro02
+spec:
+  selector: { app: kafka-exporter }
+  ports: [{ port: 9308, targetPort: 9308 }]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: davtro02
+spec:
+  selector: { matchLabels: { app: node-exporter } }
+  template:
+    metadata: { labels: { app: node-exporter } }
+    spec:
+      hostNetwork: true
+      hostPID: true
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      containers:
+        - name: node-exporter
+          image: prom/node-exporter:v1.8.2
+          ports: [{ containerPort: 9100 }]
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+  namespace: davtro02
+spec:
+  selector: { app: node-exporter }
+  ports: [{ port: 9100, targetPort: 9100 }]

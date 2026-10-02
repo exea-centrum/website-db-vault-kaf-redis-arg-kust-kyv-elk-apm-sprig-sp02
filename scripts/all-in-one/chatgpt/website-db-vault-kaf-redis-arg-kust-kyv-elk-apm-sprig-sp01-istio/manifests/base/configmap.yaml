@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fastapi-config
+  namespace: davtro02
+data:
+  DB_HOST: "postgres-clusterip"
+  DB_PORT: "5432"
+  DB_NAME: "davtro_rentals"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka-kraft:9092"

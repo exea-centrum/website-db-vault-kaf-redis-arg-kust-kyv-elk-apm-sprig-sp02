@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-db
+  namespace: davtro02
+spec:
+  serviceName: postgres-clusterip
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres-db }
+  template:
+    metadata:
+      labels: { app: postgres-db }
+    spec:
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        # microk8s-hostpath nie stosuje fsGroup - katalog PV zostaje root:root,
+        # przez co initdb (uid 999) nie moze zrobic chmod. Ten initContainer
+        # (celowo jako root) nadaje wlasciciela przed startem postgres.
+        - name: fix-data-permissions
+          image: postgres:16-alpine
+          command: ["sh", "-c", "chown -R 999:999 /var/lib/postgresql/data"]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            # celowo root: nadpisuje runAsNonRoot z poziomu poda,
+            # inaczej kubelet odrzuca initContainer ("breaks non-root policy")
+            runAsNonRoot: false
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports: [{ containerPort: 5432 }]
+          env:
+            - name: POSTGRES_DB
+              value: davtro_rentals
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: davtro-secrets, key: DB_USER } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: davtro-secrets, key: DB_PASSWORD } }
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+  volumeClaimTemplates:
+    - metadata: { name: pgdata }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-clusterip
+  namespace: davtro02
+spec:
+  clusterIP: None
+  selector: { app: postgres-db }
+  ports: [{ port: 5432, targetPort: 5432 }]

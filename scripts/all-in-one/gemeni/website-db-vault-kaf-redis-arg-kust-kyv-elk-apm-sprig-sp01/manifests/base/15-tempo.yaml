@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: davtro
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempo
+  template:
+    metadata:
+      labels:
+        app: tempo
+    spec:
+      containers:
+      - name: tempo
+        image: grafana/tempo:2.1.1
+        ports:
+        - containerPort: 3200
+        - containerPort: 4317 # OTLP gRPC
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: davtro
+spec:
+  ports:
+  - port: 3200
+    name: tempo
+  - port: 4317
+    name: otlp-grpc
+  selector:
+    app: tempo

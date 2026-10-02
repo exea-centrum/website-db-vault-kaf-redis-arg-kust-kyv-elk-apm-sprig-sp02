@@ -1,0 +1,77 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: davtro-local-tls-cert
+  namespace: istio-system
+spec:
+  secretName: davtro-local-tls-cert
+  issuerRef:
+    name: vault-istio-ca-issuer
+    kind: ClusterIssuer
+  commonName: davtro.local
+  dnsNames:
+  - davtro.local
+  - "*.davtro.local"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: davtro-gateway
+  namespace: davtro
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "davtro.local"
+    redirect:
+      httpsRedirect: true
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: davtro-local-tls-cert
+    hosts:
+    - "davtro.local"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: davtro-virtualservice
+  namespace: davtro
+spec:
+  hosts:
+  - "davtro.local"
+  gateways:
+  - davtro-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /api/v1/messages
+    route:
+    - destination:
+        host: message-processor.davtro.svc.cluster.local
+        port:
+          number: 8080
+  - match:
+    - uri:
+        prefix: /api
+    route:
+    - destination:
+        host: fastapi-app.davtro.svc.cluster.local
+        port:
+          number: 8000
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: frontend-service.davtro.svc.cluster.local
+        port:
+          number: 80

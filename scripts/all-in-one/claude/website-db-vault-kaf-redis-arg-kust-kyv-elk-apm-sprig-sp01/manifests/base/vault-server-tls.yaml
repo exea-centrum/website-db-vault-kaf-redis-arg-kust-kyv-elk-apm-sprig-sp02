@@ -1,0 +1,61 @@
+# KROK 9 (Vault HTTPS): certyfikat SERWERA Vaulta NIE MOZE pochodzic z Vault PKI.
+#
+# Dlaczego: cert-manager podpisuje certyfikat przez Vault PKI (pki/sign/...), czyli
+# MUSI najpierw polaczyc sie z dzialajacym Vaultem. A Vault bez wlasnego certyfikatu
+# nie wstaje z listenerem TLS (:8203). Bladne kolo ("klero-wajka"):
+#   Vault z TLS -> potrzebuje certu -> cert z Vault PKI -> potrzebuje Vaulta.
+# Objaw na klastrze: ESO/klienci czekali na secret `vault-tls`, ktory nigdy nie
+# powstal, pody nie mogly sie zamontowac, a CALY sync ArgoCD byl Degraded/SyncError.
+#
+# Rozwiazanie (standardowy wzorzec bootstrapu TLS): male, WEWNETRZNE CA generowane
+# przez cert-manager BEZ udzialu Vaulta; cert serwera Vaulta podpisuje to CA.
+#   * `vault-tls` istnieje ZANIM Vault wystartuje -> zero blednego kola,
+#   * klienci ufaja `ca.crt` z sekretu `vault-tls` (ESO caProvider, transit_client,
+#     vault-snapshot) - nic nie trzeba zmieniac po stronie klientow,
+#   * CA jest TRWALE (osobny, dlugi TTL) - odnowienie liscia nie zmienia zaufania,
+#     wiec rotacja certu nie zrywa polaczen klientow.
+# UWAGA: to CA sluzy TYLKO certowi serwera Vaulta. Certy wewnetrznych uslug
+# (mTLS fastapi/spring, Ingress) dalej wystawia PKI Vaulta (pki/davtro-internal).
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: vault-selfsigned
+  namespace: davtro02
+spec:
+  selfSigned: {}
+---
+# Samopodpisana CA (10 lat) - sekret `vault-ca` z tls.crt/tls.key dla Issuer typu CA.
+# `rotationPolicy: Never` + dlugi TTL = stabilne zaufanie przez caly czas zycia.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-ca
+  namespace: davtro02
+spec:
+  secretName: vault-ca
+  isCA: true
+  commonName: davtro-vault-ca
+  duration: 87600h    # 10 lat
+  renewBefore: 8760h  # 1 rok
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Never
+  usages:
+    - digital signature
+    - cert sign
+    - crl sign
+  issuerRef:
+    name: vault-selfsigned
+    kind: Issuer
+    group: cert-manager.io
+---
+# Issuer typu CA - podpisuje cert serwera Vaulta (`Certificate vault-tls`).
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: vault-ca
+  namespace: davtro02
+spec:
+  ca:
+    secretName: vault-ca

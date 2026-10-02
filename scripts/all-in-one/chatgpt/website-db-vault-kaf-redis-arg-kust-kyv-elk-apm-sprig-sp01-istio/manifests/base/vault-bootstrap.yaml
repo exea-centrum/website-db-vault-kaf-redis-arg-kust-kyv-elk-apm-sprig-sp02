@@ -1,0 +1,420 @@
+# KROK 3.5 (v3): pelna automatyzacja bootstrapu Vaulta - Deployment z petla self-heal (60s).
+# Nie zawala syncu ArgoCD (zadnego hooka) i leczy stan po kazdym restarcie/cold-start:
+#   1. brak inicjalizacji -> vault operator init (1 key share); unseal_key + root_token
+#      na PVC /vault/data (plik bootstrap-keys, 600). Trade-off homelab: w produkcji
+#      auto-unseal (cloud KMS / transit).
+#   2. sealed -> unseal z pliku
+#   3. audit -> stdout (Loki), KV davtro/db (GENERUJE DB_PASSWORD jesli brak) + smtp
+#   4. auth kubernetes (+ ClusterRoleBinding system:auth-delegator) + policy/role
+#      davtro-apps (ESO) i davtro-snapshot (CronJob backupow)
+#   5. database engine + rola davtro-app-rw; jesli haslo davtro w KV nie pasuje do
+#      zywego Postgresa -> ALIGN: ALTER USER przez kubectl exec (local trust), czekanie
+#      az ESO odswiezy davtro-secrets, rollout restart pgadmin/exporter/spring
+# Wymaga: PVC vault-data-vault-0 na tym samym nodzie (RWO, microk8s single-node)
+# test.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-bootstrap-sql
+  namespace: davtro02
+data:
+  creation.sql: |
+    CREATE ROLE "{{name}}" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}' NOINHERIT;
+    GRANT USAGE, CREATE ON SCHEMA public TO "{{name}}";
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "{{name}}";
+    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "{{name}}";
+    GRANT "{{name}}" TO davtro WITH ADMIN OPTION;
+  revocation.sql: |
+    REASSIGN OWNED BY "{{name}}" TO davtro;
+    DROP OWNED BY "{{name}}";
+    DROP ROLE IF EXISTS "{{name}}";
+  davtro-apps.hcl: |
+    path "davtro/data/*" { capabilities = ["read"] }
+    path "database/creds/davtro-app-rw" { capabilities = ["read"] }
+  davtro-snapshot.hcl: |
+    # KROK 12 (snapshot faktycznie dzialajacy): `vault operator raft snapshot save`
+    # od Vault 1.x uzywa sciezki sys/STORAGE/raft/snapshot - nie istniejacej juz
+    # w 1.17 sciezki sys/raft/snapshot. Bez tego CronJob konczyl sie bledem:
+    #   Error making API request.
+    #   URL: .../v1/sys/storage/raft/snapshot   Code: 403 permission denied
+    # (GET = "czy trwa juz snapshot" -> read; PUT = zapis/odtworzenie
+    #  -> create/update + sudo). Stara sciezka zostaje dla zgodnosci wstecz.
+    path "sys/storage/raft/snapshot" { capabilities = ["read", "create", "update", "sudo"] }
+    path "sys/raft/snapshot" { capabilities = ["sudo", "read"] }
+  # KROK 6 (Transit): szyfrowanie danych aplikacyjnych (DEK/KEK).
+  # Aplikacje szyfrują wrażliwe dane (PII, numery telefonów, e-maile) przed zapisem do bazy.
+  # Vault zarządza kluczami szyfrującymi (KEK), aplikacje trzymają DEK w pamięci.
+  davtro-transit.hcl: |
+    path "transit/encrypt/davtro-app" { capabilities = ["update"] }
+    path "transit/decrypt/davtro-app" { capabilities = ["update"] }
+    path "transit/rewrap/davtro-app" { capabilities = ["update"] }
+    path "transit/datakey/davtro-app" { capabilities = ["update"] }
+    path "davtro/data/*" { capabilities = ["read"] }
+    path "database/creds/davtro-app-rw" { capabilities = ["read"] }
+  # KROK 6 (mTLS): certyfikaty klienta dla usług wewnętrznych.
+  # Usługi wzajemnie się autoryzują po TLS (mTLS) - wymagany cert client-cert.
+  davtro-mtls.hcl: |
+    path "davtro/data/*" { capabilities = ["read"] }
+    path "database/creds/davtro-app-rw" { capabilities = ["read"] }
+    path "transit/encrypt/davtro-app" { capabilities = ["update"] }
+    path "transit/decrypt/davtro-app" { capabilities = ["update"] }
+    path "transit/datakey/davtro-app" { capabilities = ["update"] }
+  # KROK 5 (PKI): CA davtro-internal + role certyfikatow.
+  # cert-manager (ClusterIssuer/vault-issuer, rola auth: cert-manager)
+  # podpisuje przez nie certy ingress + wewnetrzne.
+  pki-issuer.hcl: |
+    path "pki/sign/davtro-ingress" { capabilities = ["create", "update"] }
+    path "pki/issue/davtro-ingress" { capabilities = ["create", "update"] }
+  # KROK 6 (mTLS): policy dla certyfikatow wewnetrznych (davtro-internal).
+  # Używane przez vault-istio-ca-issuer do wystawiania certow client-cert.
+  pki-internal.hcl: |
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: davtro02-vault-tokenreview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: davtro-sa
+    namespace: davtro02
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vault-bootstrap
+  namespace: davtro02
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-bootstrap
+  namespace: davtro02
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vault-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: davtro-sa
+    namespace: davtro02
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault-bootstrap
+  namespace: davtro02
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: vault-bootstrap } }
+  template:
+    metadata:
+      labels: { app: vault-bootstrap }
+    spec:
+      serviceAccountName: davtro-sa
+      # Webhook mutujacy (Kyverno/PSA) wstrzykuje runAsNonRoot:true do poda,
+      # a obrazy sa domyslnie root - bez jawnego niezerowego runAsUser kubelet
+      # odrzuca kontenery (CreateContainerConfigError / obraz root). Vault i
+      # kubectl dzialaja na UID 100 (vault), fsGroup 1000 jak w vault.yaml.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: fetch-kubectl
+          # bitnami/kubectl:1.30 NIE istnieje na Docker Hub (Bitnami polecialo na ECR) ->
+          # ImagePullBackOff przez kilkadziesiat godzin. alpine/k8s jest na Docker Hub
+          # i pasuje do serwera microk8s v1.36.
+          image: docker.io/alpine/k8s:1.36.4
+          command: ["sh", "-c", "cp /usr/bin/kubectl /share/kubectl"]
+          volumeMounts:
+            - { name: tools, mountPath: /share }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+      containers:
+        - name: ensure
+          image: hashicorp/vault:1.17
+          env:
+            - name: VAULT_ADDR
+              value: "https://vault.davtro02.svc.cluster.local:8203"
+            - name: VAULT_CACERT
+              value: "/etc/vault-tls/ca.crt"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              KUBECTL=/share/kubectl
+              KEYS=/vault/data/bootstrap-keys
+              log() { echo "[bootstrap] $*"; }
+              vfield() { grep -o "$1" | grep -o '[a-z]*$'; }
+
+              # vault status zwraca exit 2 dla statusu "sealed" (to nie jest blad
+              # sieciowy). Petla uzywa exit code jako testu "Vault odpowiada", wiec
+              # kod 2 traktujemy jak sukces. Tylko brak odpowiedzi jest bledem.
+              read_status() {
+                STATUS_ERR=$(mktemp /tmp/vault-status.XXXXXX)
+                vault status -format=json >"$STATUS_ERR" 2>&1
+                STATUS_RC=$?
+                STATUS=$(cat "$STATUS_ERR" 2>/dev/null || printf '{}')
+                rm -f "$STATUS_ERR"
+                [ "$STATUS_RC" -eq 0 ] || [ "$STATUS_RC" -eq 2 ]
+              }
+
+              ensure_one() {
+                n=0
+                while ! read_status; do
+                  n=$((n + 1))
+                  if [ "$n" -ge 20 ]; then
+                    log "Vault nie odpowiada przez TLS (ostatni rc=$STATUS_RC): $STATUS"
+                    return 1
+                  fi
+                  sleep 3
+                done
+
+                INIT=$(echo "$STATUS" | vfield '"initialized": *[a-z]*')
+                SEALED=$(echo "$STATUS" | vfield '"sealed": *[a-z]*')
+                [ -n "$INIT" ] || { log "nieparsowalny status Vaulta: $STATUS"; return 1; }
+
+                if [ "$INIT" != "true" ]; then
+                  log "brak inicjalizacji -> vault operator init"
+                  INIT_JSON=$(vault operator init -key-shares=1 -key-threshold=1 -format=json) || { log "init nieudany - retry"; return 1; }
+                  # UWAGA: grep(-o) dziala linia-po-linii, a "unseal_keys_b64" jest tablica
+                  # wielolinijkowa (json.MarshalIndent) - wzorzec z "\[[^]]*\]" nigdy
+                  # nie lapal klucza. Sed: linia z kluczem -> nastepna linia -> zostaja
+                  # tylko znaki base64 (A-Za-z0-9+/=).
+                  UKEY=$(printf '%s\n' "$INIT_JSON" | sed -n '/"unseal_keys_b64"/{n;s/[^A-Za-z0-9+\/=]//g;p;q}')
+                  RTOKEN=$(echo "$INIT_JSON" | sed -n 's/.*"root_token": *"\([^"]*\)".*/\1/p')
+                  if [ -z "$UKEY" ] || [ -z "$RTOKEN" ]; then
+                    log "nie udalo sie wyciagnac kluczy z init - retry"
+                    return 1
+                  fi
+                  printf '%s\n%s\n' "$UKEY" "$RTOKEN" > "$KEYS"
+                  chmod 600 "$KEYS"
+                fi
+                [ -f "$KEYS" ] || { log "brak $KEYS (Vault inicjalizowany recznie) - patrz README: Jednorazowa migracja"; return 1; }
+
+                SEALED=$(echo "$STATUS" | vfield '"sealed": *[a-z]*')
+                if [ "$SEALED" = "true" ]; then
+                  log "unseal"
+                  vault operator unseal "$(head -n1 "$KEYS")" >/dev/null
+                fi
+                export VAULT_TOKEN="$(tail -n1 "$KEYS")"
+                if [ -z "$VAULT_TOKEN" ] || ! vault token lookup -format=json >/dev/null 2>&1; then
+                  log "root token z $KEYS jest pusty lub nieaktualny - konfiguracja wstrzymana"
+                  return 1
+                fi
+                n=0
+                until read_status && [ "$(echo "$STATUS" | vfield '"sealed": *[a-z]*')" = "false" ]; do
+                  n=$((n + 1)); [ "$n" -ge 30 ] && { log "vault nadal sealed - retry"; return 1; }
+                  sleep 2
+                  vault operator unseal "$(head -n1 "$KEYS")" >/dev/null 2>&1 || true
+                done
+
+                vault audit list 2>/dev/null | grep -q 'file/' || vault audit enable file file_path=stdout
+                vault secrets list 2>/dev/null | grep -q 'davtro/' || vault secrets enable -path=davtro kv-v2
+
+                ALIGN=0
+                if ! vault kv get davtro/db >/dev/null 2>&1; then
+                  PGPASS="$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)"
+                  [ -n "$PGPASS" ] || PGPASS="Davtro$(date +%s)x1"
+                  vault kv put davtro/db DB_USER=davtro DB_PASSWORD="$PGPASS"
+                  ALIGN=1
+                  log "wygenerowano DB_PASSWORD (KV davtro/db)"
+                fi
+                vault kv get davtro/smtp >/dev/null 2>&1 || vault kv put davtro/smtp SMTP_USER='' SMTP_PASSWORD=''
+                # KROK 5b (Auth): haslo admina panelu rezerwacji - GENEROWANE w Vault
+                # (KV davtro/auth), nigdy w repo. Jak DB_PASSWORD: gdy klucz istnieje,
+                # nie ruszamy go (to jedyna zrodlowa prawdy dla konta 'admin').
+                if ! vault kv get davtro/auth >/dev/null 2>&1; then
+                  ADMINPASS="$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 24)"
+                  [ -n "$ADMINPASS" ] || ADMINPASS="DavtroAdmin$(date +%s)x1"
+                  vault kv put davtro/auth ADMIN_PASSWORD="$ADMINPASS"
+                  log "wygenerowano ADMIN_PASSWORD (KV davtro/auth)"
+                fi
+
+                vault auth list 2>/dev/null | grep -q 'kubernetes/' || vault auth enable kubernetes
+                vault write auth/kubernetes/config \
+                  kubernetes_host="https://kubernetes.default.svc" \
+                  kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+                  disable_iss_validation=true >/dev/null
+                vault policy write davtro-apps /sql/davtro-apps.hcl >/dev/null
+                vault write auth/kubernetes/role/davtro-apps \
+                  bound_service_account_names=davtro-sa \
+                  bound_service_account_namespaces=davtro02 \
+                  policies=davtro-apps ttl=1h >/dev/null
+
+                DB_PASSWORD=$(vault kv get -field=DB_PASSWORD davtro/db)
+                vault secrets list 2>/dev/null | grep -q 'database/' || vault secrets enable database
+                if ! vault write database/config/davtro-postgresql \
+                    plugin_name=postgresql-database-plugin \
+                    allowed_roles=davtro-app-rw \
+                    connection_url="postgresql://{{username}}:{{password}}@postgres-clusterip.davtro02.svc.cluster.local:5432/davtro_rentals?sslmode=disable" \
+                    username=davtro password="$DB_PASSWORD" >/dev/null 2>&1; then
+                  log "database/config odrzucone - ALIGN hasla davtro do wartosci z KV"
+                  ALIGN=1
+                fi
+
+                if [ "$ALIGN" = "1" ]; then
+                  if $KUBECTL -n davtro02 exec postgres-db-0 -- psql -U davtro -d davtro_rentals -tAc \
+                      "ALTER USER davtro WITH PASSWORD '$DB_PASSWORD';" >/dev/null 2>&1; then
+                    log "haslo davtro w Postgresie zsynchronizowane z KV"
+                  else
+                    log "ALTER USER nieudany (postgres-db-0 nie gotowy?) - retry w nastepnej petli"
+                    return 1
+                  fi
+                  vault write database/config/davtro-postgresql \
+                    plugin_name=postgresql-database-plugin \
+                    allowed_roles=davtro-app-rw \
+                    connection_url="postgresql://{{username}}:{{password}}@postgres-clusterip.davtro02.svc.cluster.local:5432/davtro_rentals?sslmode=disable" \
+                    username=davtro password="$DB_PASSWORD" >/dev/null
+                  n=0
+                  until [ "$($KUBECTL -n davtro02 get secret davtro-secrets -o jsonpath='{.data.DB_PASSWORD}' 2>/dev/null | base64 -d)" = "$DB_PASSWORD" ]; do
+                    n=$((n + 1)); [ "$n" -ge 40 ] && break
+                    log "czekam az ESO odswiezy davtro-secrets ($n/40)"
+                    sleep 15
+                  done
+                  $KUBECTL -n davtro02 rollout restart deploy/pgadmin deploy/postgres-exporter deploy/spring-app-deployment >/dev/null 2>&1 || true
+                  log "restart pgadmin/postgres-exporter/spring (nowe haslo z ESO)"
+                fi
+
+                # KROK 5b (Auth): automatyczny ALTER schematu rezerwacji.
+                # Kolumny user_id/username sa wymagane przez logowanie rezerwujacych
+                # (powiazanie rezerwacji z kontem), a aplikacja laczy sie credsami
+                # z Vaulta BEZ praw ALTER - dlatego wykonuje je bootstrap jako
+                # wlasciciel bazy. Idempotentne (IF NOT EXISTS) - bezpieczne w petli
+                # self-heal i przy pelnym wdrozeniu z ArgoCD od zera.
+                if ! $KUBECTL -n davtro02 exec postgres-db-0 -- psql -U davtro -d davtro_rentals -tAc \
+                    "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS user_id INT;
+                     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS username VARCHAR(100);" >/dev/null 2>&1; then
+                  log "ALTER TABLE bookings nieudany (postgres-db-0 nie gotowy?) - retry w nastepnej petli"
+                  return 1
+                fi
+                log "schemat bookings: kolumny user_id/username potwierdzone (automat)"
+
+                # KROK 10: nie ma juz migracji z plain listenera. Secret
+                # vault-tls jest montowany jako wymagany, a ConfigMap ma tylko
+                # konfiguracje TLS :8203; nie wykonujemy dodatkowego restartu.
+
+                vault write database/roles/davtro-app-rw \
+                  db_name=davtro-postgresql \
+                  creation_statements=@/sql/creation.sql \
+                  revocation_statements=@/sql/revocation.sql \
+                  default_ttl=1h max_ttl=24h >/dev/null
+                vault policy write davtro-snapshot /sql/davtro-snapshot.hcl >/dev/null
+                vault write auth/kubernetes/role/davtro-snapshot \
+                  bound_service_account_names=davtro-sa \
+                  bound_service_account_namespaces=davtro02 \
+                  policies=davtro-snapshot ttl=1h >/dev/null
+                # --- KROK 5 (PKI): wewnetrzne CA davtro-internal (self-signed, homelab).
+                # W produkcji: root zewnetrzny podpisuje CSR (pki/intermediate/generate
+                # -> set-signed), nie self-sign. Idempotentne: za drugim razem tylko
+                # odswieza tune/role/policy (root/generate pomijane gdy CA juz istnieje).
+                if ! vault secrets list 2>/dev/null | grep -q '^pki/'; then
+                  log "PKI: wlaczam silnik pki (intermediate davtro-internal)"
+                  vault secrets enable -path=pki pki >/dev/null
+                fi
+                vault secrets tune -max-lease-ttl=87600h pki >/dev/null 2>&1 || true
+                if ! vault read pki/cert/ca >/dev/null 2>&1; then
+                  log "PKI: generuje self-signed root CA (homelab)"
+                  vault write -field=certificate pki/root/generate/internal \
+                    common_name="davtro-internal CA" \
+                    ttl=87600h key_type=rsa key_bits=2048 >/dev/null
+                fi
+                vault write pki/roles/davtro-ingress \
+                  allowed_domains="davtro.local,spark.davtro.local" \
+                  allow_subdomains=true allow_bare_domains=true \
+                  max_ttl=2160h key_type=rsa key_bits=2048 >/dev/null 
+                # Dedicated Vault signer used by cert-manager-istio-csr.
+                # It can issue SPIFFE URI SANs and a CA certificate.
+                vault write pki/roles/davtro-istio-ca \
+                  allow_any_name=true enforce_hostnames=false \
+                  allow_uri_sans=true allow_ip_sans=true \
+                  allow_subdomains=true allow_bare_domains=true \
+                  is_ca=true \
+                  max_ttl=8760h key_type=ec key_bits=256 >/dev/null
+                vault policy write pki-issuer /sql/pki-issuer.hcl >/dev/null
+                vault write auth/kubernetes/role/cert-manager \
+                  bound_service_account_names="cert-manager,cert-manager-vault" \
+                  bound_service_account_namespaces="cert-manager" \
+                  policies=pki-issuer ttl=1h >/dev/null
+                # KROK 6 (mTLS): osobny policy + rola auth dla certow wewnetrznych.
+                # vault-istio-ca-issuer uzywa tej roli do wystawiania certow client-cert.
+                vault policy write pki-internal /sql/pki-internal.hcl >/dev/null
+                vault write auth/kubernetes/role/cert-manager-internal \
+                  bound_service_account_names="cert-manager,cert-manager-vault" \
+                  bound_service_account_namespaces="cert-manager" \
+                  policies=pki-internal ttl=1h >/dev/null
+                # --- KROK 6 (Transit): silnik szyfrowania danych aplikacyjnych.
+                # Aplikacje szyfrują wrażliwe dane (PII, telefony, e-maile) przed zapisem.
+                # Vault zarządza KEK (Key Encryption Key), aplikacje trzymają DEK w pamięci.
+                if ! vault secrets list 2>/dev/null | grep -q '^transit/'; then
+                  log "Transit: wlaczam silnik transit"
+                  vault secrets enable transit >/dev/null
+                fi
+                if ! vault read transit/keys/davtro-app >/dev/null 2>&1; then
+                  log "Transit: tworze klucz szyfrujacy davtro-app"
+                  vault write -f transit/keys/davtro-app \
+                    type=aes256-gcm96 \
+                    auto_rotate_period=720h >/dev/null  # auto-rotacja co 30 dni
+                fi
+                vault policy write davtro-transit /sql/davtro-transit.hcl >/dev/null
+                vault write auth/kubernetes/role/davtro-transit \
+                  bound_service_account_names=davtro-sa \
+                  bound_service_account_namespaces=davtro02 \
+                  policies=davtro-transit ttl=1h >/dev/null
+                # --- KROK 6 (mTLS): certyfikaty klienta dla usług wewnętrznych.
+                # Usługi wzajemnie się autoryzują po TLS (mTLS) - wymagany cert client-cert.
+                vault policy write davtro-mtls /sql/davtro-mtls.hcl >/dev/null
+                vault write auth/kubernetes/role/davtro-mtls \
+                  bound_service_account_names=davtro-sa \
+                  bound_service_account_namespaces=davtro02 \
+                  policies=davtro-mtls ttl=1h >/dev/null
+                log "DONE - Vault skonfigurowany (Transit + mTLS aktywne)"
+                return 0
+              }
+
+              while true; do
+                if ensure_one; then
+                  log "OK - nastepny check za 60s"
+                else
+                  log "BLAD - retry za 60s"
+                fi
+                sleep 60
+              done
+          volumeMounts:
+            - { name: vault-data, mountPath: /vault/data }
+            - { name: sql, mountPath: /sql, readOnly: true }
+            - { name: tools, mountPath: /share, readOnly: true }
+            - { name: vault-tls, mountPath: /etc/vault-tls, readOnly: true }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+      volumes:
+        - name: vault-data
+          persistentVolumeClaim:
+            claimName: vault-data-vault-0
+        - name: sql
+          configMap:
+            name: vault-bootstrap-sql
+        - name: tools
+          emptyDir: {}
+        - name: vault-tls
+          secret: { secretName: vault-tls }
+

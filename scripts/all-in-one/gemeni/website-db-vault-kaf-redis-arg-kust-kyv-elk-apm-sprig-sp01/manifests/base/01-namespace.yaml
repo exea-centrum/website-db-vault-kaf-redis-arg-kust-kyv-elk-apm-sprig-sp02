@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: davtro
+  labels:
+    istio-injection: enabled
+    pod-security.kubernetes.io/enforce: baseline

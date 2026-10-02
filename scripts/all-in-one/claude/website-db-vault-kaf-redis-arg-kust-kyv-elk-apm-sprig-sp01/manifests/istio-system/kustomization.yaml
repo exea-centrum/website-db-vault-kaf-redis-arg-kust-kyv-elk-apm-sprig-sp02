@@ -1,0 +1,6 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Osobny katalog: obiekty w ns istio-system (overlay davtro02 nadpisalby im namespace).
+# Wymaga zainstalowanego Istio (ingress gateway) oraz cert-managera z ClusterIssuer/vault-issuer.
+resources:
+  - gateway-certificate.yaml

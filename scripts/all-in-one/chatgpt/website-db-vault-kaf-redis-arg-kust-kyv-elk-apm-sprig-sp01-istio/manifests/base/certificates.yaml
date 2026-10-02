@@ -1,0 +1,32 @@
+# External TLS certificates used by the Istio Ingress Gateway.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: davtro-tls
+  namespace: istio-system
+spec:
+  secretName: davtro-tls
+  duration: 2160h
+  renewBefore: 360h
+  commonName: davtro.local
+  dnsNames:
+    - davtro.local
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: spark-tls
+  namespace: istio-system
+spec:
+  secretName: spark-tls
+  duration: 2160h
+  renewBefore: 360h
+  commonName: spark.davtro.local
+  dnsNames:
+    - spark.davtro.local
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer

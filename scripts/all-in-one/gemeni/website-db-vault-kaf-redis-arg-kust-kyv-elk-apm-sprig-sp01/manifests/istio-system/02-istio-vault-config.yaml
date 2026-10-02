@@ -1,0 +1,30 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-istio-ca-issuer
+spec:
+  vault:
+    server: http://vault.davtro.svc.cluster.local:8200
+    path: pki_istio/sign/istio-ca
+    auth:
+      kubernetes:
+        mountPath: /v1/auth/kubernetes
+        role: cert-manager-istio
+        secretRef:
+          name: cert-manager-vault-token
+          key: token
+---
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  namespace: istio-system
+  name: istio-control-plane
+spec:
+  profile: default
+  values:
+    global:
+      trustDomain: cluster.local
+      caAddress: cert-manager-istio-csr.cert-manager.svc:443
+    pilot:
+      env:
+        ENABLE_CA_SERVER: "false"

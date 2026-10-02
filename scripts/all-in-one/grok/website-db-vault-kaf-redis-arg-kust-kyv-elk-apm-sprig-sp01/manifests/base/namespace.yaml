@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: davtro
+  labels:
+    app.kubernetes.io/part-of: davtro-platform
+    # ISTIO: automatyczny injection Envoy sidecara do wszystkich podów w ns
+    istio-injection: enabled

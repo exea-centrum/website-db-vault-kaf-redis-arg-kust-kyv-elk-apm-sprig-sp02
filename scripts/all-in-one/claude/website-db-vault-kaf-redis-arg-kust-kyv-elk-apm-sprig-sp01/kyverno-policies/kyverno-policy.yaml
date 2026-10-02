@@ -1,0 +1,38 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: davtro-baseline-policy-standalone
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-resource-requests-limits
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [davtro]
+      validate:
+        message: "Kazdy kontener musi miec requests/limits."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    cpu: "?*"
+                    memory: "?*"
+    - name: disallow-privileged
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [davtro]
+      validate:
+        message: "Privileged niedozwolone."
+        pattern:
+          spec:
+            =(securityContext):
+              =(privileged): "false"

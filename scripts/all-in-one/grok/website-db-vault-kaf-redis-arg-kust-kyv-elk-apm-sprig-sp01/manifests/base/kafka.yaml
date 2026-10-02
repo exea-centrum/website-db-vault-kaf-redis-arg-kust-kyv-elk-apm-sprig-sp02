@@ -1,0 +1,102 @@
+# =============================================================================
+# Kafka KRaft (bez Zookeepera) — ISTIO edition
+# =============================================================================
+# Usunięto dual listener (PLAINTEXT 9092 + mTLS 9094) i initContainer keystores.
+# mTLS App↔Kafka realizuje Istio Envoy (PeerAuthentication STRICT).
+# Broker nasłuchuje wyłącznie PLAINTEXT :9092; :9093 = controller KRaft.
+# =============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka-kraft
+  namespace: davtro02
+spec:
+  serviceName: kafka-kraft
+  replicas: 1
+  selector: { matchLabels: { app: kafka-kraft } }
+  template:
+    metadata:
+      labels: { app: kafka-kraft }
+      annotations:
+        # Wymuś injection sidecara (gdy namespace ma istio-injection=enabled)
+        sidecar.istio.io/inject: "true"
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: kafka
+          image: docker.io/apache/kafka:3.7.0
+          ports:
+            - { name: broker, containerPort: 9092 }
+            - { name: controller, containerPort: 9093 }
+          env:
+            - { name: KAFKA_NODE_ID, value: "0" }
+            - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
+            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
+            - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka-kraft:9092" }
+            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "0@kafka-kraft-0.kafka-kraft:9093" }
+            - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
+            - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "PLAINTEXT" }
+            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT" }
+            - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs" }
+            - { name: CLUSTER_ID, value: "MkU3OEVBNTcwNTJENDM2Qk" }
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { cpu: 1, memory: 1Gi }
+          volumeMounts:
+            - { name: kafka-data, mountPath: /tmp/kraft-combined-logs }
+  volumeClaimTemplates:
+    - metadata: { name: kafka-data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-kraft
+  namespace: davtro02
+spec:
+  clusterIP: None
+  selector: { app: kafka-kraft }
+  ports:
+    - { name: broker, port: 9092, targetPort: 9092 }
+    - { name: controller, port: 9093, targetPort: 9093 }
+---
+# Job tworzący topiki (PostSync hook ArgoCD) – bez zmian funkcjonalnych
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topic-job
+  namespace: davtro02
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "false"   # Job jednorazowy – bez sidecara
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: kafka-topics
+          image: docker.io/apache/kafka:3.7.0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              BOOTSTRAP=kafka-kraft:9092
+              for i in $(seq 1 30); do
+                /opt/kafka/bin/kafka-topics.sh --bootstrap-server $BOOTSTRAP --list && break
+                echo "czekam na kafke... ($i)"
+                sleep 5
+              done
+              for topic in bookings-created email-invoices marketing-actions; do
+                /opt/kafka/bin/kafka-topics.sh --bootstrap-server $BOOTSTRAP \
+                  --create --if-not-exists --topic $topic --partitions 3 --replication-factor 1
+                echo "topic $topic OK"
+              done

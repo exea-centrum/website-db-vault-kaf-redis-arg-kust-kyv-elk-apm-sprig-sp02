@@ -1,0 +1,40 @@
+# =============================================================================
+# ISTIO MIGRATION: NetworkPolicy L4 — mocno uproszczone
+# =============================================================================
+# PeerAuthentication STRICT + AuthorizationPolicy (istio-gateway.yaml) przejmują
+# kontrolę dostępu L7 (tożsamości SPIFFE, ścieżki HTTP, metody).
+#
+# Zostawiamy tylko default-deny + allow-intra-namespace jako obronę w głąb
+# (defense-in-depth) na wypadek, gdyby pod nie dostał sidecara.
+# Polityki allow-eso-to-vault / allow-certmanager-to-vault / allow-ingress
+# zostały usunięte — ruch zewnętrzny wchodzi przez Istio Ingress Gateway,
+# a ESO/cert-manager łączą się z Vaultem przez mTLS mesh (gdy mają sidecar)
+# lub przez NetworkPolicy w namespace istio-system (poza scope tego repo).
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: davtro02
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  namespace: davtro02
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: davtro02
+    # Ruch z Istio Ingress Gateway (ns istio-system)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system

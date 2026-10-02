@@ -1,0 +1,62 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# KROK 5 (PKI): Vault CA + cert-manager. AKTYWNE - cert-manager zainstalowany
+# na klastrze (CRD ClusterIssuer/Certificate istnieja, SA cert-manager-vault +
+# Secret cert-manager-vault-token gotowe). Kolejnosc celowa: issuer przed certami.
+resources:
+- namespace.yaml
+- serviceaccount.yaml
+- configmap.yaml
+- secret-store.yaml
+- external-secrets.yaml
+- external-secrets-db-dynamic.yaml
+- deployment.yaml
+- service.yaml
+- frontend.yaml
+- hpa.yaml
+- pdb.yaml
+- postgres.yaml
+- redis.yaml
+- vault.yaml
+- vault-snapshot.yaml
+- vault-bootstrap.yaml
+- kafka.yaml
+- message-processor.yaml
+- spring-app.yaml
+- spark.yaml
+- prometheus.yaml
+- cert-expiry-exporter.yaml
+- alertmanager.yaml
+- exporters.yaml
+- grafana.yaml
+- loki.yaml
+- promtail.yaml
+- tempo.yaml
+- pgadmin.yaml
+- kafka-ui.yaml
+- network-policies.yaml
+- istio-gateway.yaml
+- kyverno-policy.yaml
+- pki-issuer.yaml
+- vault-server-tls.yaml
+- certificates.yaml
+- mtls-certificates.yaml
+- transit-helpers.yaml
+
+images:
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01
+  newTag: 6093746ec4a15ca3da98588ce20d991d4e07907b
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-consumer
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-consumer
+  newTag: 6093746ec4a15ca3da98588ce20d991d4e07907b
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-frontend
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-frontend
+  newTag: 6093746ec4a15ca3da98588ce20d991d4e07907b
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spark
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spark
+  newTag: 6093746ec4a15ca3da98588ce20d991d4e07907b
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spring
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spring
+  newTag: 6093746ec4a15ca3da98588ce20d991d4e07907b

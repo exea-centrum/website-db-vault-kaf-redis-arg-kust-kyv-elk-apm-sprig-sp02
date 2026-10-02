@@ -1,0 +1,94 @@
+# CronJob: nocny snapshot rafta Vaulta -> PVC vault-backup (retencja 14 dni).
+# Token: logowanie do Vaulta przez kubernetes auth (rola davtro-snapshot, policy
+# sys/raft/snapshot z sudo) - konfiguruje to Job vault-bootstrap (vault-bootstrap.yaml).
+# Ręczne odtworzenie z backupu:
+#   vault operator raft snapshot restore /backup/snapshot-XXXX.snap
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vault-backup
+  namespace: davtro02
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # storageClassName MUSI byc podane jawnie: microk8s dopisuje je przy
+  # tworzeniu wolumenu (bound PVC), a ArgoCD probowalby je zresetowac do null
+  # przy kazdym selfHeal -> Kubernetes tego zabrania (spec jest immutable dla
+  # bound claims) i CALY sync aplikacji padal (SyncError).
+  storageClassName: microk8s-hostpath
+  resources: { requests: { storage: 2Gi } }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vault-snapshot
+  namespace: davtro02
+spec:
+  schedule: "0 3 * * *"
+  # KROK 12: backup ma byc WYLACZONY - CronJob byl wstrzymany recznie
+  # (suspend=true), a w repo tego nie bylo, wiec nikt tego nie widzial.
+  # Deklarujemy to jawnie, żeby wyłączenie backupu zostawiało ślad w Git.
+  suspend: false
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels: { app: vault-snapshot }
+        spec:
+          serviceAccountName: davtro-sa
+          restartPolicy: Never
+          # Webhook wstrzykuje runAsNonRoot:true; obraz jest domyslnie root,
+          # wiec MUSI byc jawny non-root (uid 100 = vault, gid 1000 + fsGroup =
+          # jak w vault.yaml). Bez tego kubelet: CreateContainerConfigError.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            runAsGroup: 1000
+            fsGroup: 1000
+          containers:
+            - name: snapshot
+              image: hashicorp/vault:1.17
+              # Obraz vault domyslnie startuje jako root -> runAsNonRoot z poziomu
+              # poda (wstrzykniete tez przez Kyverno) odrzuca kontener. Jawny
+              # UID 100 (vault) + GID 1000 jak w vault.yaml / vault-bootstrap.
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 100
+                runAsGroup: 1000
+                allowPrivilegeEscalation: false
+              env:
+                - name: VAULT_ADDR
+                  value: https://vault.davtro02.svc.cluster.local:8203
+                - name: VAULT_CACERT
+                  value: /etc/vault-tls/ca.crt
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+                  export VAULT_TOKEN="$(vault write -field=token auth/kubernetes/login jwt="$SA_TOKEN" role=davtro-snapshot)"
+                  STAMP=$(date +%Y%m%d-%H%M%S)
+                  vault operator raft snapshot save "/backup/snapshot-${STAMP}.snap"
+                  find /backup -name 'snapshot-*.snap' -mtime +14 -delete
+                  echo "OK: snapshot-${STAMP}.snap"
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                - name: vault-tls
+                  mountPath: /etc/vault-tls
+                  readOnly: true
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 200m, memory: 128Mi }
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: vault-backup
+            # UWAGA: mount 'vault-tls' MUSI miec odpowiadajacy wolumen, inaczej
+            # CronJob jest niepoprawny i ArgoCD wywala CALY sync (SyncError).
+            # optional: cert powstaje dopiero po starcie Vaulta (klero-wajka).
+            - name: vault-tls
+              secret: { secretName: vault-tls, optional: true }
+

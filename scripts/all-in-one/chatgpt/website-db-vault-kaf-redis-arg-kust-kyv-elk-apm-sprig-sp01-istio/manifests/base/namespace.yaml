@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: davtro02
+  labels:
+    app.kubernetes.io/part-of: davtro-platform
+    istio-injection: enabled
