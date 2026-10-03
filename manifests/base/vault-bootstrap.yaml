@@ -836,18 +836,25 @@ spec:
                 #
                 # Wykonujemy dopiero gdy PostgreSQL odpowiada.
                 #
+                # UWAGA BOOTSTRAPOWA: ten krok NIE moze blokowac calej petli.
+                # FastAPI tworzy tabele bookings/users sam (init_db), a ESO i
+                # silnik database musza ruszyc NIEZALEZNIE od istnienia tabel.
+                # Wczesniej `return 1` tutaj zatrzymywal bootstrap PRZED
+                # utworzeniem roli davtro-app-rw -> Unknown role: davtro-app-rw,
+                # ExternalSecret fastapi-db-creds/message-processor-db-creds
+                # nie powstawaly, pody Init, ArgoCD Degraded/OutOfSync.
                 if ! $KUBECTL -n davtro02 exec postgres-db-0 -- \
                   psql -U davtro -d davtro_rentals -tAc \
                   "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS user_id INT;
                    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS username VARCHAR(100);" \
                   >/dev/null 2>&1; then
 
-                  log "ALTER TABLE bookings nieudany."
-                  log "PostgreSQL jeszcze niegotowy."
-                  return 1
-                fi
+                  log "ALTER TABLE bookings nieudany (brak tabel?)."
+                  log "Nie blokuje bootstrapu - FastAPI utworzy schemat w init_db."
+                else
 
-                log "Schema bookings OK."
+                  log "Schema bookings OK."
+                fi
 
                 # ================================================================
                 # 19. Database dynamic role
