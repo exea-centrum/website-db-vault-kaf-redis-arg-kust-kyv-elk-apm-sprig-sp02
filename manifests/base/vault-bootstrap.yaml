@@ -583,13 +583,11 @@ spec:
                 if CA_B64=$($KUBECTL -n davtro02 get secret vault-ca \
                   -o jsonpath='{.data.ca\.crt}' 2>/dev/null) && [ -n "$CA_B64" ]; then
 
-                  CA_PEM=$(printf '%s' "$CA_B64" | base64 -d 2>/dev/null)
-                  # JSON-string z literalnymi \n (nowe linie w PEM).
-                  CA_JSON=$(printf '%s' "$CA_PEM" | awk 'BEGIN{ORS=""} NR>1{printf "\\n"} {printf "%s", $0}')
-
+                  # Pole caBundle ma format "byte" (CRD) -> API oczekuje
+                  # wartosci base64, dokladnie tak jak lezi w Secret.
                   if $KUBECTL patch clusterissuer vault-issuer vault-istio-ca-issuer \
                     --type merge \
-                    -p "{\"spec\":{\"vault\":{\"caBundle\":\"$CA_JSON\"}}}" \
+                    -p "{\"spec\":{\"vault\":{\"caBundle\":\"$CA_B64\"}}}" \
                     >/dev/null 2>&1; then
 
                     log "caBundle ClusterIssuerow wstrzykniety z Secret/vault-ca."
