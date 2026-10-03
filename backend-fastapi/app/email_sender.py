@@ -24,10 +24,17 @@ def _send(to_email: str, subject: str, body: str):
 
 
 def send_confirmation_email(to_email: str, guest_name: str, event: dict):
-    subject = f"Potwierdzenie rezerwacji nr {event['booking_id']}"
+    # FIX: producent (app/main.py) publikuje zdarzenie z kluczami check_in/check_out,
+    # a nie date_from/date_to - wcześniejszy bezpośredni dostęp event['date_from']
+    # rzucał KeyError i wywalał konsumenta przy każdej rezerwacji. Odczyt przez
+    # .get() z fallbackiem na starą nazwę + bezpieczne wartości domyślne.
+    booking_id = event.get("booking_id") or event.get("id") or "-"
+    check_in = event.get("check_in") or event.get("date_from") or ""
+    check_out = event.get("check_out") or event.get("date_to") or ""
+    subject = f"Potwierdzenie rezerwacji nr {booking_id}"
     body = (
         f"Cześć {guest_name},\n\n"
-        f"Twoja rezerwacja ({event['date_from']} - {event['date_to']}) została potwierdzona.\n"
+        f"Twoja rezerwacja ({check_in} - {check_out}) została potwierdzona.\n"
         f"W załączeniu (proforma) prosimy o dokonanie płatności przed przyjazdem.\n\n"
         f"Pozdrawiamy,\nDavtro Apartments"
     )

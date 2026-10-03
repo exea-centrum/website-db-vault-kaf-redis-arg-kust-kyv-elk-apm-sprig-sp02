@@ -13,6 +13,9 @@ spec:
       labels: { app: frontend }
     spec:
       serviceAccountName: davtro-sa
+      # Pakiety GHCR sa prywatne (401 anonimowo) - patrz deployment.yaml (imagePullSecrets).
+      imagePullSecrets:
+        - { name: ghcr-secret }
       containers:
         - name: nginx
           image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend:latest

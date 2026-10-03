@@ -51,23 +51,10 @@ resources:
 
 # UWAGA: kazda pozycja MUSI miec 'name', 'newName' i 'newTag'.
 # CI (kustomize edit set image) nadpisuje 'newTag' tagiem SHA commita.
-# Kolejnosc jest dowolna, ale utrzymujemy ja stala dla czytelnych diffow.
+# Wpisy dla obrazow z repo 'sp01' zostaly USUNIETE - zadna definicja w manifests/
+# nie odnosila sie do nich (pozostalosc po kopii repozytorium), a CI i tak
+# aktualizuje wylacznie obrazy 'sp02'.
 images:
-- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01
-  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01
-  newTag: 6344b5e30133eef1b3e7d0c6f4494c8e67b26022
-- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-consumer
-  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-consumer
-  newTag: 6344b5e30133eef1b3e7d0c6f4494c8e67b26022
-- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-frontend
-  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-frontend
-  newTag: 6344b5e30133eef1b3e7d0c6f4494c8e67b26022
-- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spark
-  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spark
-  newTag: 6344b5e30133eef1b3e7d0c6f4494c8e67b26022
-- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spring
-  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp01-spring
-  newTag: 6344b5e30133eef1b3e7d0c6f4494c8e67b26022
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
   newTag: b6f11235d1ec3f83b38f9505d0618e540da91f09

@@ -10,6 +10,9 @@ spec:
     metadata: { labels: { app: message-processor } }
     spec:
       serviceAccountName: davtro-sa
+      # Pakiety GHCR sa prywatne (401 anonimowo) - patrz deployment.yaml (imagePullSecrets).
+      imagePullSecrets:
+        - { name: ghcr-secret }
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000

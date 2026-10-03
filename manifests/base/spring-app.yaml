@@ -9,6 +9,10 @@ spec:
   template:
     metadata: { labels: { app: spring-app } }
     spec:
+      # GHCR pakiety sa prywatne (401 anonimowo); ten Deployment uzywa default SA,
+      # wiec imagePullSecrets ustawiamy wprost w podzie.
+      imagePullSecrets:
+        - { name: ghcr-secret }
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000

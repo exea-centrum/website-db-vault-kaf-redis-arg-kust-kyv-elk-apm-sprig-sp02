@@ -6,16 +6,10 @@ namespace: davtro02
 resources:
   - ../../base
 
-images:
-  - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
-    newTag: latest
-  - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
-    newTag: latest
-  - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
-    newTag: latest
-  - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
-    newTag: latest
-
+# Tagi obrazow pochodza z ../../base/kustomization.yaml i sa aktualizowane przez CI
+# (kustomize edit set image ... :<sha>). Overlay celowo NIE nadpisuje `newTag`
+# (wczesniej `newTag: latest` unieważniał pinowanie obrazu po SHA commita,
+# przez co ArgoCD ciągle wdrażał `latest` zamiast zbudowanego artefaktu).
 replicas:
   - name: fastapi-web-app
     count: 3

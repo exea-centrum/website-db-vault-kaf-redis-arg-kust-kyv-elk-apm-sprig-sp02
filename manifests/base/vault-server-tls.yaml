@@ -59,6 +59,8 @@
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
   name: vault-selfsigned
   namespace: davtro02
 spec:
@@ -80,6 +82,8 @@ spec:
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
   name: vault-ca
   namespace: davtro02
 spec:
@@ -119,6 +123,8 @@ spec:
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
   name: vault-ca
   namespace: davtro02
 spec:
@@ -150,6 +156,8 @@ spec:
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
   name: vault-tls
   namespace: davtro02
 spec:

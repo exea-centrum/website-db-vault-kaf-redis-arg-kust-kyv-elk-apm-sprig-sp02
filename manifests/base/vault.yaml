@@ -24,6 +24,8 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
   name: vault-config
   namespace: davtro02
 data:
@@ -72,6 +74,8 @@ data:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
   name: vault
   namespace: davtro02
 spec:
@@ -81,6 +85,21 @@ spec:
   template:
     metadata:
       labels: { app: vault }
+      annotations:
+        # FIX: Vault poza meshem Istio (bez sidecara).
+        #
+        # Dlaczego: port 8203 ma `portLevelMtls: DISABLE` (istio-security.yaml),
+        # bo ESO/cert-manager siedza poza meshem i lacza sie z Vaultem zwyklym TLS.
+        # Przy wyłączonym mTLS Envoy NIE zna tozsamosci zrodla (brak peer identity),
+        # a AuthorizationPolicy oparta o `from.source.namespaces`
+        # (allow-mesh-davtro, vault-external-clients) nie moze wtedy dopasowac
+        # reguly -> `rbac_access_denied` i zerwanie polaczenia. Klient dostawal:
+        #     Get https://vault.davtro02.svc.cluster.local:8203/v1/sys/seal-status: EOF
+        # co blokowalo caly bootstrap (unseal -> KV/K8s-auth -> sekrety ESO).
+        #
+        # Vault ma wlasne TLS + auth (token / kubernetes auth), wiec sidecar
+        # niczego nie wnosi - to zalecany wzorzec Istio dla uslug stanowych.
+        sidecar.istio.io/inject: "false"
     spec:
       serviceAccountName: davtro-sa
       securityContext:
@@ -163,6 +182,8 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
   name: vault
   namespace: davtro02
 spec:

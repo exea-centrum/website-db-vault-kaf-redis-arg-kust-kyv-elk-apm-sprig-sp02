@@ -1,9 +1,9 @@
 # Davtro Apartments – platforma wynajmu krótkoterminowego (Full Open Source)
 
 Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
-Namespace docelowy: `davtro`
+Namespace docelowy: `davtro02`
 KUSTOMIZE_IMAGE_ID: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
-KUSTOMIZE_PATH: `./manifests/production`
+KUSTOMIZE_PATH: `./manifests/overlays/production`
 
 ## Architektura przepływu rezerwacji
 1. Użytkownik rezerwuje termin na stronie (kalendarz w `app/templates/index.html`).
@@ -15,11 +15,11 @@ KUSTOMIZE_PATH: `./manifests/production`
 
 ## Struktura repo
 ```
-app/                  # FastAPI (web + API rezerwacji) + konsument Kafka + wysyłka e-mail
+backend-fastapi/      # FastAPI (web + API rezerwacji) + konsument Kafka + wysyłka e-mail
 java-app/             # Spring Boot – panel raportowy
 spark-jobs/           # Spark – analityka marketingowa
 manifests/base/       # Wszystkie zasoby K8s (Kustomize base)
-manifests/production/ # Overlay produkcyjny (namespace davtro, replicas)
+manifests/overlays/production/ # Overlay produkcyjny (namespace davtro02, replicas)
 kyverno-policies/     # Polityki Kyverno (kopiowane też do manifests/base)
 .github/workflows/    # CI: build obrazów -> GHCR -> aktualizacja Kustomize -> ArgoCD sync
 argocd/application.yaml
@@ -28,10 +28,10 @@ terraform/            # Terraform Cloud (workspace github-actions-terraform)
 
 ## Uruchomienie lokalnie (dev, bez K8s)
 ```bash
-cd app/.. 
+cd backend-fastapi
 python -m venv .venv && source .venv/bin/activate
-pip install -r app/requirements.txt
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/davtro
+pip install -r requirements.txt
+export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/davtro_rentals
 uvicorn app.main:app --reload --port 8080
 ```
 
@@ -53,7 +53,7 @@ uvicorn app.main:app --reload --port 8080
 # Davtro Apartments – platforma wynajmu krotkoterminowego
 
 Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
-Namespace: `davtro`
+Namespace: `davtro02`
 
 ## Architektura
 1. **Frontend** (SPA) → Nginx
@@ -69,7 +69,7 @@ Namespace: `davtro`
 cd backend-fastapi
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/davtro
+export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/davtro_rentals
 uvicorn app.main:app --reload --port 8080
 ```
 

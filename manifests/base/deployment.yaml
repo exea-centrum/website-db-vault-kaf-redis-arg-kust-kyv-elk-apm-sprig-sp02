@@ -13,6 +13,12 @@ spec:
       labels: { app: fastapi-web-app }
     spec:
       serviceAccountName: davtro-sa
+      # Pakiety GHCR sa PRYWATNE (anonimowy pull = 401) - pody musza wskazac
+      # pull secret z namespace (utworzony raz: kubectl -n davtro02 create secret
+      # docker-registry ghcr-secret --docker-server=ghcr.io ...). Bez tego kubelet
+      # konczy na ImagePullBackOff.
+      imagePullSecrets:
+        - { name: ghcr-secret }
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
