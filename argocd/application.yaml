@@ -25,3 +25,16 @@ spec:
       # co sie da, a reszta (vid. storageClassName w vault-snapshot.yaml)
       # jest utrzymywana zgodnie w manifestach.
       - CreateNamespace=true
+  ignoreDifferences:
+    # caBundle wstrzykuje dynamcznie vault-bootstrap z Secret/vault-ca
+    # (cert-manager 1.21 nie zna caProvider) - pola nie ma w manifestach.
+    - group: cert-manager.io
+      kind: ClusterIssuer
+      name: vault-issuer
+      jsonPointers:
+        - /spec/vault/caBundle
+    - group: cert-manager.io
+      kind: ClusterIssuer
+      name: vault-istio-ca-issuer
+      jsonPointers:
+        - /spec/vault/caBundle

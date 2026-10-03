@@ -144,6 +144,9 @@ jobs:
           curl --fail --silent --show-error \
             -H "Authorization: Bearer ${{ github.token }}" \
             "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          # Render-check: nie pozwalamy na push zepsutej konfiguracji kustomize
+          # (ArgoCD mialby zrodlo, ktore nie renderuje sie do zadzialajacych zasobow).
+          ./kustomize build manifests/overlays/production > /dev/null
           cd manifests/base
           ../../kustomize edit set image \
             ${{ env.IMAGE_BASE }}=${{ env.IMAGE_BASE }}:${{ github.sha }} \
@@ -157,4 +160,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add manifests/base/kustomization.yaml
           git diff --cached --quiet || git commit -m "ci: aktualizacja obrazow na ${{ github.sha }}"
+          # Rebase przed pushem, zeby bot nie nadpisywal rownoleglych
+          # zmian wyslanych na main w miedzyczasie (odrzucenie pusha).
+          git pull --rebase origin main
           git push

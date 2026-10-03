@@ -566,6 +566,41 @@ spec:
                 log "Root token OK."
 
                 # ================================================================
+                # 25a. caBundle dla ClusterIssuerow (cert-manager 1.21)
+                # ================================================================
+                #
+                # cert-manager 1.21 NIE zna pola spec.vault.caProvider (CRD
+                # odrzuca "unknown field"), a cainjector nie wstrzykuje
+                # caBundle do Issuerow. Bez wypelnionego caBundle weryfikacja
+                # TLS do Vaulta konczy sie "x509: certificate signed by
+                # unknown authority" -> CertificateRequest Pending ->
+                # davtro-tls/istio-ca/spark-tls nie powstaja -> ArgoCD czeka
+                # w nieskonczonosc na zdrowie tych zasobow (sync nie konczy).
+                #
+                # Sami wstrzykujemy caBundle z CA, ktore podpisuje Secret
+                # vault-tls (ten sam  lancuch uzywa Vault do HTTPS :8203).
+                #
+                if CA_B64=$($KUBECTL -n davtro02 get secret vault-ca \
+                  -o jsonpath='{.data.ca\.crt}' 2>/dev/null) && [ -n "$CA_B64" ]; then
+
+                  CA_PEM=$(printf '%s' "$CA_B64" | base64 -d 2>/dev/null)
+                  # JSON-string z literalnymi \n (nowe linie w PEM).
+                  CA_JSON=$(printf '%s' "$CA_PEM" | awk 'BEGIN{ORS=""} NR>1{printf "\\n"} {printf "%s", $0}')
+
+                  if $KUBECTL patch clusterissuer vault-issuer vault-istio-ca-issuer \
+                    --type merge \
+                    -p "{\"spec\":{\"vault\":{\"caBundle\":\"$CA_JSON\"}}}" \
+                    >/dev/null 2>&1; then
+
+                    log "caBundle ClusterIssuerow wstrzykniety z Secret/vault-ca."
+                  else
+
+                    log "Patch caBundle ClusterIssuerow nieudany (ponowienie za 60s)."
+                  fi
+                fi
+
+
+                # ================================================================
                 # 6. AUDIT
                 # ================================================================
                 if ! vault audit list 2>/dev/null | grep -q 'file/'; then
@@ -981,6 +1016,40 @@ spec:
                     log "Nie mozna utworzyc role cert-manager."
                     return 1
                   }
+
+                # ================================================================
+                # 25c. Secret cert-manager-vault-token (auth tokenowy)
+                # ================================================================
+                #
+                # ClusterIssuery uzywaja tokenSecretRef, a Secret z tokenem
+                # musi istniec w namespace cert-manager. Na swiezym klastrze
+                # nikt go nie tworzy - bez niego cert-manager nie podpisze
+                # zadnego certyfikatu. Tworzymy raz (jesli brak) i odnawiamy
+                # dopiero gdy Secret zniknie.
+                #
+                if ! $KUBECTL -n cert-manager get secret \
+                  cert-manager-vault-token >/dev/null 2>&1; then
+
+                  if CM_TOKEN=$(vault token create \
+                    -policy=pki-issuer \
+                    -ttl=8760h \
+                    -orphan \
+                    -field=token 2>/dev/null) && [ -n "$CM_TOKEN" ]; then
+
+                    if $KUBECTL -n cert-manager create secret generic \
+                      cert-manager-vault-token \
+                      --from-literal=token="$CM_TOKEN" >/dev/null 2>&1; then
+
+                      log "Secret cert-manager-vault-token utworzony."
+                    else
+
+                      log "Nie udalo sie utworzyc Secretu cert-manager-vault-token."
+                    fi
+                  else
+
+                    log "Nie udalo sie utworzyc tokena cert-manager (ponowienie za 60s)."
+                  fi
+                fi
 
                 # ================================================================
                 # 26. cert-manager internal / Istio policy
