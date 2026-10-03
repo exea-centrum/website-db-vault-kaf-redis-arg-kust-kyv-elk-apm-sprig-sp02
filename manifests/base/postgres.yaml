@@ -11,6 +11,17 @@ spec:
   template:
     metadata:
       labels: { app: postgres-db }
+      annotations:
+        # FIX: Postgres poza meshem Istio (bez sidecara) - tak jak Vault.
+        #
+        # Powod: engine `database` w Vaultie laczy sie z postgres-clusterip:5432.
+        # Vault jest bez sidecara (patrz vault.yaml), wiec nie ma tozsamosci
+        # źródła; a PeerAuthentication `default` wymaga STRICT mTLS, więc Envoy
+        # na 5432 zerwal polaczenie:
+        #   failed to connect ... read: connection reset by peer
+        # Bez tego Vault nie skonfiguruje silnika database -> brak dynamicznych
+        # credsyw (VaultDynamicSecret) -> fastapi/message-proctor nie wstaja.
+        sidecar.istio.io/inject: "false"
     spec:
       securityContext:
         runAsUser: 999
