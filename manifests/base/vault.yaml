@@ -24,8 +24,6 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  annotations:
-    argocd.argoproj.io/sync-wave: "-3"
   name: vault-config
   namespace: davtro02
 data:
@@ -74,8 +72,6 @@ data:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  annotations:
-    argocd.argoproj.io/sync-wave: "-3"
   name: vault
   namespace: davtro02
 spec:
@@ -182,8 +178,6 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  annotations:
-    argocd.argoproj.io/sync-wave: "-3"
   name: vault
   namespace: davtro02
 spec:

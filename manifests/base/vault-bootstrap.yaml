@@ -46,8 +46,6 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  annotations:
-    argocd.argoproj.io/sync-wave: "-2"
   name: vault-bootstrap-sql
   namespace: davtro02
 data:
@@ -193,8 +191,6 @@ data:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  annotations:
-    argocd.argoproj.io/sync-wave: "-2"
   name: davtro02-vault-tokenreview
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -209,8 +205,6 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  annotations:
-    argocd.argoproj.io/sync-wave: "-2"
   name: vault-bootstrap
   namespace: davtro02
 rules:
@@ -251,8 +245,6 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  annotations:
-    argocd.argoproj.io/sync-wave: "-2"
   name: vault-bootstrap
   namespace: davtro02
 roleRef:
@@ -268,8 +260,6 @@ subjects:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  annotations:
-    argocd.argoproj.io/sync-wave: "-2"
   name: vault-bootstrap
   namespace: davtro02
 spec:
