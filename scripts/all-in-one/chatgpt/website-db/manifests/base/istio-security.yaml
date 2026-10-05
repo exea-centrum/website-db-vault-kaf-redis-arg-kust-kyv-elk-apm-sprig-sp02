@@ -1,0 +1,76 @@
+# Mesh-wide transport security.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: davtro02
+spec:
+  mtls:
+    mode: STRICT
+---
+# Vault already exposes HTTPS :8203. External cert-manager/ESO clients are not
+# meshed, so Istio mTLS is disabled only on this Vault application port.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: vault-external-tls
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels:
+      app: vault
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    "8203":
+      mode: DISABLE
+---
+# Identity-based access replacing the former intra-namespace NetworkPolicy.
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-mesh-davtro
+  namespace: davtro02
+spec:
+  rules:
+    - from:
+        - source:
+            namespaces: ["davtro02"]
+        - source:
+            namespaces: ["istio-system"]
+---
+# Only cert-manager and ESO may call Vault from outside the mesh.
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: vault-external-clients
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels:
+      app: vault
+  rules:
+    - from:
+        - source:
+            namespaces: ["cert-manager", "external-secrets"]
+      to:
+        - operation:
+            ports: ["8203"]
+---
+# Explicit L7 policy for the FastAPI HTTP API.
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: fastapi-api
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels:
+      app: fastapi-web-app
+  rules:
+    - from:
+        - source:
+            namespaces: ["davtro02", "istio-system"]
+      to:
+        - operation:
+            methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]

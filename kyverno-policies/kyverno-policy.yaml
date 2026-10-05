@@ -11,7 +11,7 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [davtro02]
+              namespaces: [davtro]
       validate:
         message: "Kazdy kontener musi miec requests/limits."
         pattern:
@@ -29,7 +29,7 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [davtro02]
+              namespaces: [davtro]
       validate:
         message: "Privileged niedozwolone."
         pattern:

@@ -1,0 +1,33 @@
+# ISTIO: certyfikaty aplikacyjne mTLS (fastapi/message-processor/spring-app) oraz cert brokera Kafki
+# USUNIETE - tozsamosc i szyfrowanie ruchu wewnetrznego przejmuje Istio (SPIFFE + Envoy).
+# Zostaje wylacznie cert serwera Vault (TLS na :8203 - Vault jest zrodlem zaufania, nie klientem mesh).
+# KROK 9 (Vault HTTPS): certyfikat serwera Vault (TLS na :8203).
+# Podpisany przez DEDYKOWANE CA cert-managera (Issuer vault-ca z vault-server-tls.yaml),
+# a NIE przez Vault PKI - inaczej powstaloby bledne kolo (cert Vaulta wymagalby
+# dzialajacego Vaulta). cert-manager SAM odnawia lisc (renewBefore 7 dni), a zaufanie
+# jest stabilne, bo CA ma osobny, dlugi TTL. Sekret vault-tls zawiera tez ca.crt,
+# z ktorego korzystaja klienci (ESO caProvider, transit_client, snapshot, helpers).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: davtro02
+spec:
+  secretName: vault-tls
+  duration: 720h
+  renewBefore: 168h
+  commonName: vault.davtro02.svc
+  dnsNames:
+    - vault
+    - vault.davtro02
+    - vault.davtro02.svc
+    - vault.davtro02.svc.cluster.local
+    - vault-0.vault.davtro02.svc.cluster.local
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    name: vault-ca
+    kind: Issuer
+    group: cert-manager.io

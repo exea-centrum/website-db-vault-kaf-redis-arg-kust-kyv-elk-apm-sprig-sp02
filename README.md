@@ -1,9 +1,9 @@
 # Davtro Apartments – platforma wynajmu krótkoterminowego (Full Open Source)
 
 Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
-Namespace docelowy: `davtro02`
+Namespace docelowy: `davtro`
 KUSTOMIZE_IMAGE_ID: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
-KUSTOMIZE_PATH: `./manifests/overlays/production`
+KUSTOMIZE_PATH: `./manifests/production`
 
 ## Architektura przepływu rezerwacji
 1. Użytkownik rezerwuje termin na stronie (kalendarz w `app/templates/index.html`).
@@ -15,11 +15,11 @@ KUSTOMIZE_PATH: `./manifests/overlays/production`
 
 ## Struktura repo
 ```
-backend-fastapi/      # FastAPI (web + API rezerwacji) + konsument Kafka + wysyłka e-mail
+app/                  # FastAPI (web + API rezerwacji) + konsument Kafka + wysyłka e-mail
 java-app/             # Spring Boot – panel raportowy
 spark-jobs/           # Spark – analityka marketingowa
 manifests/base/       # Wszystkie zasoby K8s (Kustomize base)
-manifests/overlays/production/ # Overlay produkcyjny (namespace davtro02, replicas)
+manifests/production/ # Overlay produkcyjny (namespace davtro, replicas)
 kyverno-policies/     # Polityki Kyverno (kopiowane też do manifests/base)
 .github/workflows/    # CI: build obrazów -> GHCR -> aktualizacja Kustomize -> ArgoCD sync
 argocd/application.yaml
@@ -28,10 +28,10 @@ terraform/            # Terraform Cloud (workspace github-actions-terraform)
 
 ## Uruchomienie lokalnie (dev, bez K8s)
 ```bash
-cd backend-fastapi
+cd app/.. 
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/davtro_rentals
+pip install -r app/requirements.txt
+export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/davtro
 uvicorn app.main:app --reload --port 8080
 ```
 
@@ -53,7 +53,7 @@ uvicorn app.main:app --reload --port 8080
 # Davtro Apartments – platforma wynajmu krotkoterminowego
 
 Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
-Namespace: `davtro02`
+Namespace: `davtro`
 
 ## Architektura
 1. **Frontend** (SPA) → Nginx
@@ -69,7 +69,7 @@ Namespace: `davtro02`
 cd backend-fastapi
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/davtro_rentals
+export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/davtro
 uvicorn app.main:app --reload --port 8080
 ```
 
@@ -325,7 +325,7 @@ postgres / fastapi / message-processor / spring-app / pgadmin / postgres-exporte
 - **Ingress:** `davtro-ingress` (klasa `public`, host `davtro.local`) + `spark-ingress` (`spark.davtro.local`). Bez zainstalowanego kontrolera Ingress obiekty istnieją, ale nie dostają adresu — stan oczekiwany w tym środowisku (adnotacja `ignore-healthcheck`).
 - **Skalowanie:** `HPA fastapi-web-app-hpa` (2-8 replik przy CPU 70%), na produkcji bazowo 3 repliki API, 2 repliki frontendu i 2 workery Spark.
 - **Dostępność:** `PDB fastapi-web-app-pdb` (min. 1 dostępny przy pracach na węzłach).
-- **Sieć:** `Istio PeerAuthentication STRICT + AuthorizationPolicy` (domyślnie zamknij) + jawne otwarcia: ruch wewnątrz namespacu, ESO (`external-secrets`) do Vaulta (`:8200/:8201`), wejście do API i frontendu.
+- **Sieć:** `NetworkPolicy default-deny-ingress` (domyślnie zamknij) + jawne otwarcia: ruch wewnątrz namespacu, ESO (`external-secrets`) do Vaulta (`:8200/:8201`), wejście do API i frontendu.
 - **Ład:** `ClusterPolicy davtro-baseline-policy` (Kyverno, `Enforce`): obrazy z zaufanych rejestrów, wymagane `requests/limits`, zakaz kontenerów uprzywilejowanych. `ServiceMonitor`y są przygotowane, ale nieaktywne do czasu instalacji Prometheus Operatora.
 
 ## 8. GitOps w jednym zdaniu
@@ -373,7 +373,7 @@ postgres / fastapi / message-processor / spring-app / pgadmin / postgres-exporte
                                        |
                     +--------+---------+---------+--------+
                     | HPA fastapi 2-8 CPU70% | PDB minAvailable:1 |
-                    | Istio PeerAuthentication STRICT + AuthorizationPolicy | Kyverno Enforce |
+                    | NetworkPolicy deny+allow | Kyverno Enforce |
                     +--------------------------------------------+
 ```
 
@@ -619,7 +619,7 @@ postgres / fastapi / message-processor / spring-app / pgadmin / postgres-exporte
 | **vault-bootstrap** | `vault-bootstrap.yaml` | Automatyczna inicjalizacja Vault: init, unseal, konfiguracja KV/auth/database/PKI. Self-heal co 60s. |
 | **External Secrets Operator** | `secret-store.yaml`, `external-secrets.yaml`, `external-secrets-db-dynamic.yaml` | Most między Vault a Kubernetes: synchronizuje sekrety z Vault do K8s Secrets. |
 | **cert-manager** | `pki-issuer.yaml`, `certificates.yaml` | Zarządzanie certyfikatami TLS: zamawia z Vault PKI, automatycznie odnawia przed wygaśnięciem. |
-| **Ingress Controller** | `ingress.yaml`, `istio-security.yaml` | Reverse proxy: terminacja TLS, routing do usług (fastapi, frontend, grafana, spark). |
+| **Ingress Controller** | `ingress.yaml`, `network-policies.yaml` | Reverse proxy: terminacja TLS, routing do usług (fastapi, frontend, grafana, spark). |
 | **Kyverno** | `kyverno-policy.yaml` | Polityki bezpieczeństwa: wymagane requests/limits, zakaz kontenerów uprzywilejowanych, zaufane rejestry. |
 
 ### 9.6 Przepływ sekretów (Vault -> Aplikacja)
@@ -825,7 +825,7 @@ spec:
 | Zasób | Mechanizm rotacji | Lokalizacja | Częstotliwość |
 |-------|-------------------|-------------|---------------|
 | **Certyfikaty TLS** (davtro-tls, spark-tls) | cert-manager odnawia automatycznie `renewBefore: 360h (15d)` przed expiry | Secret: `davtro-tls`, `spark-tls` (ns davtro02) | Co 90 dni (auto) |
-| **Certyfikaty mTLS** (Istio workload certificate (FastAPI), Istio workload certificate (message-processor), Istio workload certificate (Spring)) | cert-manager odnawia automatycznie `renewBefore: 168h (7d)` przed expiry | Secret: `Istio workload certificate (FastAPI)`, `Istio workload certificate (message-processor)`, `Istio workload certificate (Spring)` (ns davtro02) | Co 30 dni (auto) |
+| **Certyfikaty mTLS** (fastapi-mtls, message-processor-mtls, spring-app-mtls) | cert-manager odnawia automatycznie `renewBefore: 168h (7d)` przed expiry | Secret: `fastapi-mtls`, `message-processor-mtls`, `spring-app-mtls` (ns davtro02) | Co 30 dni (auto) |
 | **Vault PKI Root CA** | Brak auto-rotacji (10 lat TTL). Rotacja ręczna: nowy CA + re-sign wszystkich certów | Vault PKI engine | Ręcznie (rocznie) |
 | **Vault PKI Root CA** | Brak auto-rotacji (10 lat TTL). Rotacja ręczna: nowy CA + re-sign wszystkich certów | Vault PKI engine | Ręcznie (rocznie) |
 | **Dynamiczne credsy DB** | Vault database engine generuje nowe przy każdym request. Stare TTL 1h -> automatycznie wygasa | Secret: `fastapi-db-creds`, `message-processor-db-creds` (ns davtro02) | Co 30 min (ESO refresh) |
@@ -851,9 +851,9 @@ PRZECHOWYWANIE SEKRETÓW
    message-processor-db-creds: username, password (dynamiczne)
    davtro-tls: tls.crt, tls.key (auto-rotowane)
    spark-tls: tls.crt, tls.key (auto-rotowane)
-   Istio workload certificate (FastAPI): tls.crt, tls.key (auto-rotowane, client/server auth)
-   Istio workload certificate (message-processor): tls.crt, tls.key (auto-rotowane, client/server auth)
-   Istio workload certificate (Spring): tls.crt, tls.key (auto-rotowane, client/server auth)
+   fastapi-mtls: tls.crt, tls.key (auto-rotowane, client/server auth)
+   message-processor-mtls: tls.crt, tls.key (auto-rotowane, client/server auth)
+   spring-app-mtls: tls.crt, tls.key (auto-rotowane, client/server auth)
 
   KUBERNETES SECRETS (namespace: cert-manager)
    cert-manager-vault-token: token (Vault auth dla cert-manager)
@@ -872,12 +872,12 @@ CERTYFIKATY:
 
 CLUSTERISSUER:
   vault-issuer: Ready=True (token auth)
-  vault-istio-ca-issuer: Ready=True (token auth, path pki/sign/davtro-internal)
+  vault-issuer-internal: Ready=True (token auth, path pki/sign/davtro-internal)
 
-CERTYFIKATY mTLS (issuer: vault-istio-ca-issuer):
-  Istio workload certificate (FastAPI):            Ready=True, CN=fastapi-web-app.davtro02.svc,    Issuer=vault-istio-ca-issuer, Expiry=2026-10-14
-  Istio workload certificate (message-processor):  Ready=True, CN=message-processor.davtro02.svc,  Issuer=vault-istio-ca-issuer, Expiry=2026-10-14
-  Istio workload certificate (Spring):         Ready=True, CN=spring-app.davtro02.svc,         Issuer=vault-istio-ca-issuer, Expiry=2026-10-14
+CERTYFIKATY mTLS (issuer: vault-issuer-internal):
+  fastapi-mtls:            Ready=True, CN=fastapi-web-app.davtro02.svc,    Issuer=vault-issuer-internal, Expiry=2026-10-14
+  message-processor-mtls:  Ready=True, CN=message-processor.davtro02.svc,  Issuer=vault-issuer-internal, Expiry=2026-10-14
+  spring-app-mtls:         Ready=True, CN=spring-app.davtro02.svc,         Issuer=vault-issuer-internal, Expiry=2026-10-14
 
 ARGODCD:
   davtro-website: SYNC=Synced, HEALTH=Healthy
@@ -1099,8 +1099,8 @@ Certy `davtro-tls` podpisuje Vault PKI przez cert-manager i sam je renewuje; w p
   - `vault.yaml` ma wyłącznie listener TLS `0.0.0.0:8203`; port `8200` nie jest już w ConfigMap, kontenerze ani Service.
   - Secret `vault-tls` jest wymaganym volumeMount. Bez niego kubelet nie uruchamia Vaulta, więc nie istnieje fallback HTTP.
   - Bootstrap łączy się przez `https://vault.davtro02.svc.cluster.local:8203` i używa `VAULT_CACERT=/etc/vault-tls/ca.crt`.
-  - `ClusterIssuer/vault-issuer` i `vault-istio-ca-issuer` używają HTTPS :8203 oraz `inject-ca-from-secret: davtro02/vault-ca`; cainjector aktualizuje `caBundle` po zmianie CA.
-  - AuthorizationPolicy zezwala ESO i cert-managerowi na Vault :8203.
+  - `ClusterIssuer/vault-issuer` i `vault-issuer-internal` używają HTTPS :8203 oraz `inject-ca-from-secret: davtro02/vault-ca`; cainjector aktualizuje `caBundle` po zmianie CA.
+  - NetworkPolicy przepuszcza do Vaulta tylko TCP 8203 dla ESO i cert-managera.
   - Dostęp lokalny: `./scripts/port-forward.sh https-vault 8243` (forward 8243 → 8203), z CA z `vault-tls`.
 ### Automatyczne odblokowanie po restarcie Vaulta
 
@@ -1118,7 +1118,7 @@ kubectl -n davtro02 logs deployment/vault-bootstrap -c ensure --tail=50
 W prawidłowym stanie log powinien zawierać `OK - nastepny check za 60s`. Plik `bootstrap-keys` ma pozostać na PVC `vault-data-vault-0`; nie należy go usuwać ani ponownie inicjalizować Vaulta.
 
 
-1. **AuthorizationPolicy `vault-external-clients` zezwala na TCP 8203** (`istio-security.yaml`).
+1. **NetworkPolicy `allow-eso-to-vault` musi przepuszczać TCP 8203** (`network-policies.yaml`).
    Po przełączeniu klientów na `:8203` samo `namespaceSelector` na `:8200/8201` było za mało —
    ESO dostawał `context deadline exceeded` (policy `default-deny` odrzucała połączenie), więc
    `davtro-secrets` nie powstawał i kaskada: pody postgres / alertmanager / pgadmin / spring-app /
@@ -1144,22 +1144,11 @@ kubectl -n davtro02 exec vault-0 -- vault status \
 
 
 
-# KROK 11 (Kafka mTLS) — dual listener i automatyczne certyfikaty
+# KROK 11 (Kafka) - wersja Istio
 
-Kafka działa równolegle na dwóch listenerach:
-
-- `kafka-kraft:9092` — PLAINTEXT, pozostawiony pomocniczo dla Kafka UI, eksportera i inicjalizacji topiców,
-- `kafka-kraft:9092` — mTLS dla FastAPI, Spring i message-processora.
-
-Port `9093` pozostaje wyłącznie listenerem controllera KRaft. Certyfikat brokera `Istio mTLS for Kafka` oraz istniejące certyfikaty klientów są wystawiane przez `vault-istio-ca-issuer` i odnawiane przez cert-manager. Broker wymaga certyfikatu klienta (`Istio STRICT mTLS`); aplikacje montują certyfikat i CA pod `istio-proxy`.
-
-Po wdrożeniu kolejność testu:
-
-1. sprawdzić `Certificate/Istio mTLS for Kafka` i Secret `Istio mTLS for Kafka`,
-2. sprawdzić, że `kafka-kraft-0` uruchomił się i ma port `9094`,
-3. potwierdzić topic na dotychczasowym `9092`,
-4. potwierdzić, że FastAPI/Spring/message-processor łączą się przez `9094`.
-
-Dopiero po potwierdzeniu pipeline można rozważyć usunięcie listenera PLAINTEXT `9092` oraz przełączenie narzędzi pomocniczych na mTLS.
+Kafka ma jeden listener klientów: `kafka-kraft:9092` (PLAINTEXT na poziomie aplikacji). Szyfrowanie i
+uwierzytelnianie zapewnia mesh: sidecary Envoy ustanawiają mTLS (TLS 1.3, tożsamość SPIFFE), a to, kto może
+rozmawiać z brokerem, określa `AuthorizationPolicy/kafka-allow`. Listener SSL `:9094`, keystore/truststore,
+initContainery `openssl`/`keytool` i certyfikat `kafka-server-tls` zostały usunięte. Szczegóły: `docs/ISTIO.md`.
 
 

@@ -11,6 +11,8 @@ def get_producer():
     if _producer is None:
         _producer = Producer({
             "bootstrap.servers": KAFKA_BOOTSTRAP,
+            # ISTIO: bez ssl.* - transport szyfruje mTLS sidecara (tozsamosc SPIFFE).
+            "security.protocol": "PLAINTEXT",
         })
     return _producer
 

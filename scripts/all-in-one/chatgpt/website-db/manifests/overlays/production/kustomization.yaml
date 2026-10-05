@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: davtro02
+
+resources:
+  - ../../base
+
+# Tagi obrazow pochodza z ../../base/kustomization.yaml i sa aktualizowane przez CI
+# (kustomize edit set image ... :<sha>). Overlay celowo NIE nadpisuje `newTag`
+# (wczesniej `newTag: latest` unieważniał pinowanie obrazu po SHA commita,
+# przez co ArgoCD ciągle wdrażał `latest` zamiast zbudowanego artefaktu).
+replicas:
+  - name: fastapi-web-app
+    count: 3

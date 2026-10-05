@@ -1,0 +1,35 @@
+# Vault PKI remains the CA for external TLS and the Istio mesh CA bridge.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-issuer
+spec:
+  vault:
+    server: https://vault.davtro02.svc.cluster.local:8203
+    path: pki/sign/davtro-ingress
+    # UWAGA: cert-manager v1.21 NIE zna pola caProvider (CRD odrzuca
+    # "unknown field"), a cainjector nie wstrzykuje caBundle do Issuerow.
+    # Bez caBundle weryfikacja TLS do Vaulta konczy sie "x509:
+    # certificate signed by unknown authority" i zadne certyfikaty
+    # (davtro-tls, istio-ca, spark-tls) nie powstaja.
+    # caBundle wstrzykuje vault-bootstrap patchem z Secret/vault-ca
+    # (krok 25a w zapewnieniu/ensure).
+    auth:
+      tokenSecretRef:
+        name: cert-manager-vault-token
+        key: token
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-istio-ca-issuer
+spec:
+  vault:
+    server: https://vault.davtro02.svc.cluster.local:8203
+    path: pki/sign/davtro-istio-ca
+    # Patrz uwaga wyzej - caProvider usuniete (cert-manager 1.21),
+    # caBundle wstrzykuje vault-bootstrap (krok 25a).
+    auth:
+      tokenSecretRef:
+        name: cert-manager-vault-token
+        key: token

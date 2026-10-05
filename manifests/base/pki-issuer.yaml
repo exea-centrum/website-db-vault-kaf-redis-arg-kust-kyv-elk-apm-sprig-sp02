@@ -1,4 +1,15 @@
-# Vault PKI remains the CA for external TLS and the Istio mesh CA bridge.
+# KROK 5 (PKI): cert-manager zamawia certy w Vault PKI, sam odnawia przed
+# wygasnieciem (renewBefore) i sklada je w Sekrety tls.crt/tls.key.
+# Wymaga na klastrze (raz, poza Gitem): microk8s enable ingress + cert-manager.
+# KROK 10: oba Issuery lacza sie z API Vaulta wylacznie po HTTPS :8203.
+# CA serwera Vaulta (`davtro-vault-ca`) NIE siedzi w Git - jest pobierana przez
+# `spec.vault.caProvider` z Sekretu `vault-tls` (klucz `ca.crt`), ktory tworzy
+# cert-manager (SelfSigned -> vault-ca -> vault-tls) w vault-server-tls.yaml.
+# UWAGA: adnotacja `cert-manager.io/inject-ca-from-secret` DZIALA TYLKO dla
+# issuerow ACME/CA. Dla issuera Vault jedynym wspieranym zrodlem CA jest
+# `caProvider` - bez niego `caBundle` jest pusty i cert-manager konczy bledem
+# "x509: certificate signed by unknown authority" (brak mozliwosci wystawienia
+# certyfikatow, m.in. kafka-server-tls, a w konsekwencji broker nie wstaje).
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -7,28 +18,55 @@ spec:
   vault:
     server: https://vault.davtro02.svc.cluster.local:8203
     path: pki/sign/davtro-ingress
-    # UWAGA: cert-manager v1.21 NIE zna pola caProvider (CRD odrzuca
-    # "unknown field"), a cainjector nie wstrzykuje caBundle do Issuerow.
-    # Bez caBundle weryfikacja TLS do Vaulta konczy sie "x509:
-    # certificate signed by unknown authority" i zadne certyfikaty
-    # (davtro-tls, istio-ca, spark-tls) nie powstaja.
-    # caBundle wstrzykuje vault-bootstrap patchem z Secret/vault-ca
-    # (krok 25a w zapewnieniu/ensure).
+    caProvider:
+      type: Secret
+      name: vault-tls
+      key: ca.crt
     auth:
       tokenSecretRef:
         name: cert-manager-vault-token
         key: token
 ---
+# KROK 6 (mTLS): ClusterIssuer dla certyfikatów wewnętrznych (davtro-internal).
+# Używany przez mtls-certificates.yaml do wystawiania certyfikatów client-cert.
+# Token auth (jak vault-issuer) - działa niezależnie od Kubernetes auth config.
+# HTTPS :8203 + cainjector zapewniają zgodne CA także po czystym namespace.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
-  name: vault-istio-ca-issuer
+  name: vault-issuer-internal
 spec:
   vault:
     server: https://vault.davtro02.svc.cluster.local:8203
-    path: pki/sign/davtro-istio-ca
-    # Patrz uwaga wyzej - caProvider usuniete (cert-manager 1.21),
-    # caBundle wstrzykuje vault-bootstrap (krok 25a).
+    # UWAGA: cert-manager wysyla CSR, wiec endpoint MUSI byc pki/sign (podpisuje
+    # CSR). pki/issue ignoruje CSR i generuje WLASNY klucz -> cert-manager
+    # odrzuca cert ("public key does not match the CSR", InvalidCertificate).
+    path: pki/sign/davtro-internal
+    # Bez caProvider cert-manager nie zweryfikuje TLS do Vaulta (brak caBundle
+    # w statusie Issuera) - patrz uwaga na górze pliku.
+    caProvider:
+      type: Secret
+      name: vault-tls
+      key: ca.crt
+    auth:
+      tokenSecretRef:
+        name: cert-manager-vault-token
+        key: token
+---
+# ISTIO (opcja B): issuer dla cert-manager-istio-csr - podpisuje certy workloadow mesh
+# (URI SAN spiffe://cluster.local/ns/<ns>/sa/<sa>) przez Vault PKI, rola pki/sign/davtro-mesh.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-issuer-mesh
+spec:
+  vault:
+    server: https://vault.davtro02.svc.cluster.local:8203
+    path: pki/sign/davtro-mesh
+    caProvider:
+      type: Secret
+      name: vault-tls
+      key: ca.crt
     auth:
       tokenSecretRef:
         name: cert-manager-vault-token

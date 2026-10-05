@@ -9,10 +9,6 @@ spec:
   template:
     metadata: { labels: { app: spring-app } }
     spec:
-      # GHCR pakiety sa prywatne (401 anonimowo); ten Deployment uzywa default SA,
-      # wiec imagePullSecrets ustawiamy wprost w podzie.
-      imagePullSecrets:
-        - { name: ghcr-secret }
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
@@ -36,7 +32,6 @@ spec:
             - { name: VAULT_TRANSIT_CA_FILE, value: "/etc/vault-tls/ca.crt" }
             - { name: VAULT_TRANSIT_KEY, value: "davtro-app" }
             - { name: VAULT_TRANSIT_AUTH_ROLE, value: "davtro-transit" }
-            # KROK 6 (mTLS): certyfikaty klienta
           volumeMounts:
             - { name: transit-helpers, mountPath: /usr/local/bin/transit, readOnly: true }
             - { name: vault-tls, mountPath: /etc/vault-tls, readOnly: true }
@@ -51,4 +46,4 @@ metadata:
   namespace: davtro02
 spec:
   selector: { app: spring-app }
-  ports: [{ port: 80, targetPort: 8081 }]
+  ports: [{ name: http, port: 80, targetPort: 8081 }]

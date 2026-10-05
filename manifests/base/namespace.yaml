@@ -4,4 +4,4 @@ metadata:
   name: davtro02
   labels:
     app.kubernetes.io/part-of: davtro-platform
-    istio-injection: enabled
+    istio-injection: enabled   # ISTIO: auto-wstrzykiwanie sidecara Envoy

@@ -48,6 +48,8 @@ def main():
         "bootstrap.servers": KAFKA_BOOTSTRAP,
         "group.id": "message-processor",
         "auto.offset.reset": "earliest",
+        # ISTIO: bez ssl.* - transport szyfruje mTLS sidecara (tozsamosc SPIFFE).
+        "security.protocol": "PLAINTEXT",
     })
     consumer.subscribe(["bookings-created", "marketing-actions"])
     print("message-processor: nasluchiwanie na bookings-created i marketing-actions...")

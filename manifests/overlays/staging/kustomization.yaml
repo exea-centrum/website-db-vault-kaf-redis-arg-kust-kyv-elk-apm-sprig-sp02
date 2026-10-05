@@ -6,8 +6,16 @@ namespace: davtro02-staging
 resources:
   - ../../base
 
-# Tagi obrazow pochodza z ../../base/kustomization.yaml (pinning po SHA z CI).
-# Overlay nie nadpisuje `newTag` - patrz komentarz w overlays/production.
+images:
+  - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+    newTag: staging
+  - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
+    newTag: staging
+  - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
+    newTag: staging
+  - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
+    newTag: staging
+
 replicas:
   - name: fastapi-web-app
     count: 1

@@ -10,9 +10,6 @@ spec:
     metadata: { labels: { app: message-processor } }
     spec:
       serviceAccountName: davtro-sa
-      # Pakiety GHCR sa prywatne (401 anonimowo) - patrz deployment.yaml (imagePullSecrets).
-      imagePullSecrets:
-        - { name: ghcr-secret }
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
@@ -38,7 +35,6 @@ spec:
             - { name: VAULT_TRANSIT_CA_FILE, value: "/etc/vault-tls/ca.crt" }
             - { name: VAULT_TRANSIT_KEY, value: "davtro-app" }
             - { name: VAULT_TRANSIT_AUTH_ROLE, value: "davtro-transit" }
-            # KROK 6 (mTLS): certyfikaty klienta
           volumeMounts:
             - { name: db-creds, mountPath: /etc/db-creds, readOnly: true }
             - { name: transit-helpers, mountPath: /usr/local/bin/transit, readOnly: true }

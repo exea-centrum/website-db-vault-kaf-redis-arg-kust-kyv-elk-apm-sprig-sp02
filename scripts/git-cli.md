@@ -3,7 +3,7 @@ git checkout --ours . && git add -A && GIT_EDITOR=true git rebase --continue && 
 
 git rebase --abort || true && git add -A && git commit -m "Team GitSecOps MLOps Marietta Julia Zosia Helena Istio 001 deepseek" && git fetch origin && git rebase -X ours origin/main && git push origin main
 
-
+cd /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02 && git add manifests/base/vault-bootstrap.yaml && git commit -m "fix: caBundle w formacie byte (base64) w kroku 25a bootstrapu" && git pull --rebase origin main && git push origin main && git log --oneline -2
 
 
  9104  [2026-10-02 16:25:09 CEST] kubectl delete namespace davtro02

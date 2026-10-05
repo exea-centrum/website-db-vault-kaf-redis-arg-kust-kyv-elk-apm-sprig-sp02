@@ -1,76 +1,127 @@
-# Mesh-wide transport security.
-apiVersion: security.istio.io/v1beta1
+# ISTIO: bezpieczenstwo sieci w namespace davtro02.
+# Zastepuje: certyfikaty *-mtls (cert-manager), keystore/truststore Kafki, SSL w kodzie aplikacji.
+# Zasady identycznosci: SPIFFE = cluster.local/ns/<ns>/sa/<serviceaccount>.
+# UWAGA: fastapi, message-processor, frontend, vault wspoldziela SA davtro-sa (role Vault Kubernetes-auth
+# sa przypiete do davtro-sa), a reszta uzywa SA default. Rozdzielenie SA = dodatkowa granularnosc, ale wymaga
+# zmiany bound_service_account_names w vault-bootstrap.yaml.
+apiVersion: security.istio.io/v1
 kind: PeerAuthentication
 metadata:
   name: default
   namespace: davtro02
 spec:
   mtls:
-    mode: STRICT
+    mode: STRICT          # tylko mTLS miedzy podami z sidecarem
 ---
-# Vault already exposes HTTPS :8203. External cert-manager/ESO clients are not
-# meshed, so Istio mTLS is disabled only on this Vault application port.
-apiVersion: security.istio.io/v1beta1
+# Vault: API na :8203 ma wlasny TLS i jest wolane takze spoza mesh (ESO, cert-manager, CronJob snapshotu),
+# wiec ten jeden port przyjmuje i mTLS mesh, i surowy TLS Vaulta. Reszta portow Vaulta - STRICT.
+apiVersion: security.istio.io/v1
 kind: PeerAuthentication
 metadata:
-  name: vault-external-tls
+  name: vault
   namespace: davtro02
 spec:
   selector:
-    matchLabels:
-      app: vault
+    matchLabels: { app: vault }
   mtls:
     mode: STRICT
   portLevelMtls:
-    "8203":
-      mode: DISABLE
+    8203:
+      mode: PERMISSIVE
 ---
-# Identity-based access replacing the former intra-namespace NetworkPolicy.
-apiVersion: security.istio.io/v1beta1
+# Postgres 5432: aplikacje, pgAdmin, exporter, Vault (database engine)
+apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
-  name: allow-mesh-davtro
-  namespace: davtro02
-spec:
-  rules:
-    - from:
-        - source:
-            namespaces: ["davtro02"]
-        - source:
-            namespaces: ["istio-system"]
----
-# Only cert-manager and ESO may call Vault from outside the mesh.
-apiVersion: security.istio.io/v1beta1
-kind: AuthorizationPolicy
-metadata:
-  name: vault-external-clients
+  name: postgres-allow
   namespace: davtro02
 spec:
   selector:
-    matchLabels:
-      app: vault
+    matchLabels: { app: postgres-db }
+  action: ALLOW
   rules:
     - from:
         - source:
-            namespaces: ["cert-manager", "external-secrets"]
+            principals:
+              - cluster.local/ns/davtro02/sa/davtro-sa
+              - cluster.local/ns/davtro02/sa/default
       to:
-        - operation:
-            ports: ["8203"]
+        - operation: { ports: ["5432"] }
 ---
-# Explicit L7 policy for the FastAPI HTTP API.
-apiVersion: security.istio.io/v1beta1
+# Kafka 9092: producenci/konsumenci, UI, exporter, Job tworzacy topiki
+apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
-  name: fastapi-api
+  name: kafka-allow
   namespace: davtro02
 spec:
   selector:
-    matchLabels:
-      app: fastapi-web-app
+    matchLabels: { app: kafka-kraft }
+  action: ALLOW
   rules:
     - from:
         - source:
-            namespaces: ["davtro02", "istio-system"]
+            principals:
+              - cluster.local/ns/davtro02/sa/davtro-sa
+              - cluster.local/ns/davtro02/sa/kafka-job-sa
+              - cluster.local/ns/davtro02/sa/default
       to:
-        - operation:
-            methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+        - operation: { ports: ["9092"] }
+---
+# Redis 6379: tylko fastapi + message-processor (SA davtro-sa)
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: redis-allow
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels: { app: redis }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/davtro02/sa/davtro-sa
+      to:
+        - operation: { ports: ["6379"] }
+---
+# FastAPI (L7): z gateway'a tylko /api/*; wewnatrz mesh (Prometheus, frontend) dowolna sciezka
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: fastapi-allow
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels: { app: fastapi-web-app }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account
+      to:
+        - operation: { paths: ["/api/*"] }
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/davtro02/sa/davtro-sa
+              - cluster.local/ns/davtro02/sa/default
+---
+# UI wystawione przez gateway: frontend, Grafana, pgAdmin, Kafka-UI - wejscie wylacznie przez Istio Ingress Gateway
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: ui-from-gateway-only
+  namespace: davtro02
+spec:
+  selector:
+    matchExpressions:
+      - { key: app, operator: In, values: [frontend, grafana, pgadmin, kafka-ui] }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account

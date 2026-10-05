@@ -30,6 +30,6 @@ resource "github_repository" "repo" {
 
 resource "github_actions_secret" "ghcr_pat" {
   repository      = github_repository.repo.name
-  secret_name     = "GHCR_PAT_02"
+  secret_name     = "GHCR_PAT"
   plaintext_value = var.ghcr_pat
 }

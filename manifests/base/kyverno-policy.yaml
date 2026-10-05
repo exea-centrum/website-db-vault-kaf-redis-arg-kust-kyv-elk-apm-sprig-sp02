@@ -11,19 +11,19 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [davtro02]
+              namespaces: [davtro]
       validate:
-        message: "Obrazy kontenerow w namespace 'davtro02' musza pochodzic z ghcr.io lub zaufanych rejestrow."
+        message: "Obrazy kontenerow w namespace 'davtro' musza pochodzic z ghcr.io lub zaufanych rejestrow."
         pattern:
           spec:
             containers:
-              - image: "ghcr.io/* | apache/* | postgres:* | postgres/* | redis:* | redis/* | grafana/* | prom/* | prometheuscommunity/* | hashicorp/* | dpage/* | provectuslabs/* | danielqsj/* | eclipse-temurin/* | python:* | docker.io/alpine/*"
+              - image: "ghcr.io/* | bitnami/* | postgres/* | redis/* | grafana/* | prom/* | hashicorp/* | dpage/* | provectuslabs/* | danielqsj/* | eclipse-temurin/* | python:* | docker.io/istio/* | istio/*"
     - name: require-resource-requests-limits
       match:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [davtro02]
+              namespaces: [davtro]
       validate:
         message: "Kazdy kontener musi miec zdefiniowane requests/limits."
         pattern:
@@ -41,7 +41,7 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [davtro02]
+              namespaces: [davtro]
       validate:
         message: "Kontenery uprzywilejowane sa niedozwolone."
         pattern:

@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: message-processor
+  namespace: davtro02
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: message-processor } }
+  template:
+    metadata: { labels: { app: message-processor } }
+    spec:
+      serviceAccountName: davtro-sa
+      # Pakiety GHCR sa prywatne (401 anonimowo) - patrz deployment.yaml (imagePullSecrets).
+      imagePullSecrets:
+        - { name: ghcr-secret }
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+        - { name: db-creds, secret: { secretName: message-processor-db-creds } }
+        - { name: transit-helpers, configMap: { name: transit-helpers } }
+        # optional: cert vault-tls powstaje po starcie Vaulta (klero-wajka)
+        - { name: vault-tls, secret: { secretName: vault-tls, optional: true } }
+      containers:
+        - name: message-processor
+          image: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer:latest
+          envFrom:
+            - configMapRef: { name: fastapi-config }
+            - secretRef: { name: davtro-secrets }
+          env:
+            # Dynamiczne credsy DB z Vaulta (database/creds/davtro-app-rw, rotowane co 30m);
+            # db.py przeladowuje silnik SQLAlchemy po wykryciu zmiany plikow.
+            - { name: DB_USER_FILE, value: /etc/db-creds/username }
+            - { name: DB_PASSWORD_FILE, value: /etc/db-creds/password }
+            # KROK 6 (Transit): szyfrowanie danych przez Vault Transit Engine
+            - { name: VAULT_TRANSIT_ADDR, value: "https://vault.davtro02.svc.cluster.local:8203" }
+            - { name: VAULT_TRANSIT_CA_FILE, value: "/etc/vault-tls/ca.crt" }
+            - { name: VAULT_TRANSIT_KEY, value: "davtro-app" }
+            - { name: VAULT_TRANSIT_AUTH_ROLE, value: "davtro-transit" }
+            # KROK 6 (mTLS): certyfikaty klienta
+          volumeMounts:
+            - { name: db-creds, mountPath: /etc/db-creds, readOnly: true }
+            - { name: transit-helpers, mountPath: /usr/local/bin/transit, readOnly: true }
+            - { name: vault-tls, mountPath: /etc/vault-tls, readOnly: true }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 300m, memory: 256Mi }

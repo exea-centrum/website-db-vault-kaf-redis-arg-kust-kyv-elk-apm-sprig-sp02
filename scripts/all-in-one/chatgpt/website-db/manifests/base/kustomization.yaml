@@ -1,0 +1,72 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# KROK 5 (PKI): Vault CA + cert-manager. AKTYWNE - cert-manager zainstalowany
+# na klastrze (CRD ClusterIssuer/Certificate istnieja, SA cert-manager-vault +
+# Secret cert-manager-vault-token gotowe). Kolejnosc celowa: issuer przed certami.
+#
+# UWAGA: namespace.yaml MUSI byc pierwszy - namespace tworzony przed reszta zasobow.
+
+# Istio zamiast Ingress / NetworkPolicy / aplikacyjnego mTLS
+
+resources:
+- namespace.yaml
+- serviceaccount.yaml
+- configmap.yaml
+- secret-store.yaml
+- external-secrets.yaml
+- external-secrets-db-dynamic.yaml
+- deployment.yaml
+- service.yaml
+- frontend.yaml
+- hpa.yaml
+- pdb.yaml
+- postgres.yaml
+- redis.yaml
+- vault.yaml
+- vault-snapshot.yaml
+- vault-bootstrap.yaml
+- kafka.yaml
+- message-processor.yaml
+- spring-app.yaml
+- spark.yaml
+- prometheus.yaml
+- cert-expiry-exporter.yaml
+- alertmanager.yaml
+- exporters.yaml
+- grafana.yaml
+- loki.yaml
+- promtail.yaml
+- tempo.yaml
+- pgadmin.yaml
+- kafka-ui.yaml
+- istio-csr-pki.yaml
+- istio-security.yaml
+- istio-gateway.yaml
+- kyverno-policy.yaml
+- pki-issuer.yaml
+- vault-server-tls.yaml
+- certificates.yaml
+- transit-helpers.yaml
+
+# UWAGA: kazda pozycja MUSI miec 'name', 'newName' i 'newTag'.
+# CI (kustomize edit set image) nadpisuje 'newTag' tagiem SHA commita.
+# Wpisy dla obrazow z repo 'sp01' zostaly USUNIETE - zadna definicja w manifests/
+# nie odnosila sie do nich (pozostalosc po kopii repozytorium), a CI i tak
+# aktualizuje wylacznie obrazy 'sp02'.
+images:
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+  newTag: fc1289ed544d1e547d038cddd49e751532e56942
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
+  newTag: fc1289ed544d1e547d038cddd49e751532e56942
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
+  newTag: fc1289ed544d1e547d038cddd49e751532e56942
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
+  newTag: fc1289ed544d1e547d038cddd49e751532e56942
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
+  newTag: fc1289ed544d1e547d038cddd49e751532e56942

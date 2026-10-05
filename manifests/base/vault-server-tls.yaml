@@ -1,61 +1,21 @@
-# KROK 9 — Bootstrap TLS dla Vault
+# KROK 9 (Vault HTTPS): certyfikat SERWERA Vaulta NIE MOZE pochodzic z Vault PKI.
 #
-# WAŻNE:
-# Ten plik NIE korzysta z Vault PKI do wystawienia pierwszego
-# certyfikatu Vaulta.
+# Dlaczego: cert-manager podpisuje certyfikat przez Vault PKI (pki/sign/...), czyli
+# MUSI najpierw polaczyc sie z dzialajacym Vaultem. A Vault bez wlasnego certyfikatu
+# nie wstaje z listenerem TLS (:8203). Bladne kolo ("klero-wajka"):
+#   Vault z TLS -> potrzebuje certu -> cert z Vault PKI -> potrzebuje Vaulta.
+# Objaw na klastrze: ESO/klienci czekali na secret `vault-tls`, ktory nigdy nie
+# powstal, pody nie mogly sie zamontowac, a CALY sync ArgoCD byl Degraded/SyncError.
 #
-# Vault PKI może zostać uruchomione dopiero po starcie Vaulta,
-# dlatego pierwszy certyfikat Vault HTTPS wystawia cert-manager
-# z lokalnego, samopodpisanego CA.
-#
-# Łańcuch bootstrapu:
-#
-#   cert-manager
-#       |
-#       +--> Issuer/vault-selfsigned
-#                 |
-#                 +--> Certificate/vault-ca
-#                           |
-#                           +--> Secret/vault-ca
-#                                   |
-#                                   +--> Issuer/vault-ca
-#                                             |
-#                                             +--> Certificate/vault-tls
-#                                                       |
-#                                                       +--> Secret/vault-tls
-#                                                               |
-#                                                               +--> Vault :8203 HTTPS
-#
-# Zasoby:
-#
-#   1. Issuer/vault-selfsigned
-#   2. Certificate/vault-ca
-#   3. Issuer/vault-ca
-#   4. Certificate/vault-tls
-#
-# Secret/vault-ca:
-#   - długowieczne CA bootstrapowe
-#
-# Secret/vault-tls:
-#   - tls.crt
-#   - tls.key
-#   - ca.crt
-#
-# Secret/vault-tls jest montowany przez Vault oraz vault-bootstrap.
-#
-# CA bootstrapowe służy WYŁĄCZNIE do uruchomienia HTTPS Vaulta.
-# Późniejsze certyfikaty aplikacyjne, Istio i mTLS mogą być
-# wystawiane przez właściwe PKI Vault po jego uruchomieniu.
-#
-# NIE USUWAĆ ręcznie:
-#
-#   Secret/vault-ca
-#   Secret/vault-tls
-#
-# podczas normalnej pracy cert-manager.
-#
-
----
+# Rozwiazanie (standardowy wzorzec bootstrapu TLS): male, WEWNETRZNE CA generowane
+# przez cert-manager BEZ udzialu Vaulta; cert serwera Vaulta podpisuje to CA.
+#   * `vault-tls` istnieje ZANIM Vault wystartuje -> zero blednego kola,
+#   * klienci ufaja `ca.crt` z sekretu `vault-tls` (ESO caProvider, transit_client,
+#     vault-snapshot) - nic nie trzeba zmieniac po stronie klientow,
+#   * CA jest TRWALE (osobny, dlugi TTL) - odnowienie liscia nie zmienia zaufania,
+#     wiec rotacja certu nie zrywa polaczen klientow.
+# UWAGA: to CA sluzy TYLKO certowi serwera Vaulta. Certy wewnetrznych uslug
+# (mTLS fastapi/spring, Ingress) dalej wystawia PKI Vaulta (pki/davtro-internal).
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -63,20 +23,9 @@ metadata:
   namespace: davtro02
 spec:
   selfSigned: {}
-
 ---
-# ============================================================
-# BOOTSTRAP CA DLA VAULT
-# ============================================================
-#
-# CA jest samopodpisane przez Issuer/vault-selfsigned.
-#
-# 87600h = 10 lat.
-#
-# rotationPolicy: Never
-# zapewnia, że klucz CA pozostaje stabilny podczas normalnego
-# odnawiania certyfikatu serwera Vault.
-#
+# Samopodpisana CA (10 lat) - sekret `vault-ca` z tls.crt/tls.key dla Issuer typu CA.
+# `rotationPolicy: Never` + dlugi TTL = stabilne zaufanie przez caly czas zycia.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -84,38 +33,24 @@ metadata:
   namespace: davtro02
 spec:
   secretName: vault-ca
-
   isCA: true
-
   commonName: davtro-vault-ca
-
-  duration: 87600h
-  renewBefore: 8760h
-
+  duration: 87600h    # 10 lat
+  renewBefore: 8760h  # 1 rok
   privateKey:
     algorithm: RSA
     size: 2048
     rotationPolicy: Never
-
   usages:
     - digital signature
     - cert sign
     - crl sign
-
   issuerRef:
     name: vault-selfsigned
     kind: Issuer
     group: cert-manager.io
-
 ---
-# ============================================================
-# ISSUER CA DLA CERTYFIKATU VAULT
-# ============================================================
-#
-# Ten Issuer używa Secret/vault-ca jako CA.
-#
-# Certificate/vault-tls zostanie podpisany przez to CA.
-#
+# Issuer typu CA - podpisuje cert serwera Vaulta (`Certificate vault-tls`).
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -124,82 +59,3 @@ metadata:
 spec:
   ca:
     secretName: vault-ca
-
----
-# ============================================================
-# CERTYFIKAT HTTPS DLA VAULT
-# ============================================================
-#
-# Po wystawieniu cert-manager utworzy:
-#
-#   Secret/vault-tls
-#
-# zawierający:
-#
-#   tls.crt
-#   tls.key
-#   ca.crt
-#
-# Certyfikat obejmuje wszystkie nazwy DNS używane przez:
-#
-#   Vault Service
-#   Vault StatefulSet
-#   vault-bootstrap
-#   diagnostykę localhost
-#
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: vault-tls
-  namespace: davtro02
-spec:
-  secretName: vault-tls
-
-  isCA: false
-
-  commonName: vault.davtro02.svc.cluster.local
-
-  duration: 2160h
-  renewBefore: 360h
-
-  privateKey:
-    algorithm: RSA
-    size: 2048
-    rotationPolicy: Always
-
-  usages:
-    - digital signature
-    - key encipherment
-    - server auth
-
-  dnsNames:
-
-    # ========================================================
-    # VAULT SERVICE
-    # ========================================================
-
-    - vault
-    - vault.davtro02
-    - vault.davtro02.svc
-    - vault.davtro02.svc.cluster.local
-
-    # ========================================================
-    # VAULT STATEFULSET
-    # ========================================================
-
-    - vault-0.vault.davtro02.svc
-    - vault-0.vault.davtro02.svc.cluster.local
-
-    # ========================================================
-    # LOCAL / DIAGNOSTYKA
-    # ========================================================
-
-    - localhost
-
-  ipAddresses:
-    - 127.0.0.1
-
-  issuerRef:
-    name: vault-ca
-    kind: Issuer
-    group: cert-manager.io

@@ -2,7 +2,7 @@
 set -e
 
 PROJECT_NAME="website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02"
-NAMESPACE="davtro"
+NAMESPACE="davtro02"
 REPO="https://github.com/exea-centrum/${PROJECT_NAME}.git"
 
 echo "=== DavTro Rentals - All-in-One Setup (Istio service mesh edition) ==="

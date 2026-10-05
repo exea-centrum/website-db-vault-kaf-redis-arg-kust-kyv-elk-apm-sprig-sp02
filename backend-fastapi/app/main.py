@@ -204,7 +204,7 @@ async def startup():
     user, password = db_creds()
     db_pool = await create_db_pool(user, password)
     redis_pool = aioredis.from_url(f"redis://{REDIS_HOST}:{REDIS_PORT}", decode_responses=True)
-    # KROK 11: klient mTLS (confluent-kafka) na listenerze Kafka 9094.
+    # ISTIO: klient Kafka na PLAINTEXT :9092 - szyfrowanie (mTLS) robi sidecar Envoy.
     kafka_producer = get_producer()
     asyncio.create_task(watch_db_creds())
     await init_db()
