@@ -1,0 +1,26 @@
+# Wariant B: Vault PKI jako root/intermediate CA mesh przez cert-manager-istio-csr.
+# Kolejnosc: patrz docs/ISTIO.md (sekcja "Wariant B").
+#   istioctl install -f istio/istio-operator-vault-ca.yaml
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: davtro-istio
+  namespace: istio-system
+spec:
+  profile: default
+  meshConfig:
+    accessLogFile: /dev/stdout
+    outboundTrafficPolicy:
+      mode: ALLOW_ANY
+  values:
+    global:
+      caAddress: cert-manager-istio-csr.cert-manager.svc:443   # sidecary biora certy z istio-csr, nie z istiod
+  components:
+    pilot:
+      k8s:
+        env:
+          - name: ENABLE_CA_SERVER      # istiod nie jest juz CA
+            value: "false"
+    ingressGateways:
+      - name: istio-ingressgateway
+        enabled: true

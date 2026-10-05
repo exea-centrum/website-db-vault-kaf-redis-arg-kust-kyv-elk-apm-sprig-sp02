@@ -15,7 +15,7 @@ Vault (Transit PII, dynamiczne hasła DB, KV), External Secrets Operator, cert-m
 issuer mesh), Vault PKI, Kyverno, `default-deny-ingress` i `allow-intra-namespace` (druga warstwa obrony - sidecar da się ominąć).
 
 ## Instalacja (kolejność)
-1. Zainstaluj Istio (>= 1.22, API `networking.istio.io/v1`):
+1. Zainstaluj Istio (manifesty używają API `v1beta1`, działa od ok. 1.20; na starszych CRD nie ma `v1`):
    `istioctl install -f istio/istio-operator.yaml`   (Wariant A, własne CA Istio)
 2. `kubectl apply -k manifests/istio-system`   (certyfikat dla Gateway)
 3. `kubectl apply -k manifests/overlays/production`  albo ArgoCD (`argocd/application.yaml`, `argocd/application-istio.yaml`)

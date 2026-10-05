@@ -1,0 +1,21 @@
+# helm upgrade -i -n cert-manager cert-manager-istio-csr jetstack/cert-manager-istio-csr -f istio/istio-csr-values.yaml
+# Wymaga: ClusterIssuer/vault-issuer-mesh (pki-issuer.yaml) + Secret istio-root-ca w ns istio-system (klucz ca.pem).
+app:
+  certmanager:
+    issuer:
+      name: vault-issuer-mesh
+      kind: ClusterIssuer
+      group: cert-manager.io
+  tls:
+    rootCAFile: /var/run/secrets/istio-csr/ca.pem
+    certificateDNSNames:
+      - cert-manager-istio-csr.cert-manager.svc
+  server:
+    maxCertificateDuration: 24h
+volumeMounts:
+  - name: root-ca
+    mountPath: /var/run/secrets/istio-csr
+volumes:
+  - name: root-ca
+    secret:
+      secretName: istio-root-ca

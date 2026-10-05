@@ -1,7 +1,7 @@
 # ISTIO: zastepuje ingress-nginx (Ingress davtro-ingress + spark-ingress).
 # TLS terminuje Istio Ingress Gateway (istio-system) certem z cert-managera (Secret davtro-gateway-tls,
 # patrz manifests/istio-system/). Routing - te same sciezki co w dawnym Ingressie.
-apiVersion: networking.istio.io/v1
+apiVersion: networking.istio.io/v1beta1
 kind: Gateway
 metadata:
   name: davtro-gateway
@@ -21,7 +21,7 @@ spec:
         credentialName: davtro-gateway-tls
         minProtocolVersion: TLSV1_2
 ---
-apiVersion: networking.istio.io/v1
+apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: davtro-routes
@@ -41,7 +41,7 @@ spec:
       route: [{ destination: { host: pgadmin, port: { number: 80 } } }]
     - route: [{ destination: { host: frontend-svc, port: { number: 80 } } }]
 ---
-apiVersion: networking.istio.io/v1
+apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: spark-routes

@@ -5143,7 +5143,7 @@ cat > ${PROJECT_NAME}/manifests/base/istio-gateway.yaml << 'EOF'
 # ISTIO: zastepuje ingress-nginx (Ingress davtro-ingress + spark-ingress).
 # TLS terminuje Istio Ingress Gateway (istio-system) certem z cert-managera (Secret davtro-gateway-tls,
 # patrz manifests/istio-system/). Routing - te same sciezki co w dawnym Ingressie.
-apiVersion: networking.istio.io/v1
+apiVersion: networking.istio.io/v1beta1
 kind: Gateway
 metadata:
   name: davtro-gateway
@@ -5163,7 +5163,7 @@ spec:
         credentialName: davtro-gateway-tls
         minProtocolVersion: TLSV1_2
 ---
-apiVersion: networking.istio.io/v1
+apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: davtro-routes
@@ -5183,7 +5183,7 @@ spec:
       route: [{ destination: { host: pgadmin, port: { number: 80 } } }]
     - route: [{ destination: { host: frontend-svc, port: { number: 80 } } }]
 ---
-apiVersion: networking.istio.io/v1
+apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: spark-routes
@@ -5202,7 +5202,7 @@ cat > ${PROJECT_NAME}/manifests/base/istio-security.yaml << 'EOF'
 # UWAGA: fastapi, message-processor, frontend, vault wspoldziela SA davtro-sa (role Vault Kubernetes-auth
 # sa przypiete do davtro-sa), a reszta uzywa SA default. Rozdzielenie SA = dodatkowa granularnosc, ale wymaga
 # zmiany bound_service_account_names w vault-bootstrap.yaml.
-apiVersion: security.istio.io/v1
+apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
   name: default
@@ -5213,7 +5213,7 @@ spec:
 ---
 # Vault: API na :8203 ma wlasny TLS i jest wolane takze spoza mesh (ESO, cert-manager, CronJob snapshotu),
 # wiec ten jeden port przyjmuje i mTLS mesh, i surowy TLS Vaulta. Reszta portow Vaulta - STRICT.
-apiVersion: security.istio.io/v1
+apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
   name: vault
@@ -5228,7 +5228,7 @@ spec:
       mode: PERMISSIVE
 ---
 # Postgres 5432: aplikacje, pgAdmin, exporter, Vault (database engine)
-apiVersion: security.istio.io/v1
+apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
   name: postgres-allow
@@ -5247,7 +5247,7 @@ spec:
         - operation: { ports: ["5432"] }
 ---
 # Kafka 9092: producenci/konsumenci, UI, exporter, Job tworzacy topiki
-apiVersion: security.istio.io/v1
+apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
   name: kafka-allow
@@ -5267,7 +5267,7 @@ spec:
         - operation: { ports: ["9092"] }
 ---
 # Redis 6379: tylko fastapi + message-processor (SA davtro-sa)
-apiVersion: security.istio.io/v1
+apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
   name: redis-allow
@@ -5285,7 +5285,7 @@ spec:
         - operation: { ports: ["6379"] }
 ---
 # FastAPI (L7): z gateway'a tylko /api/*; wewnatrz mesh (Prometheus, frontend) dowolna sciezka
-apiVersion: security.istio.io/v1
+apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
   name: fastapi-allow
@@ -5308,7 +5308,7 @@ spec:
               - cluster.local/ns/davtro02/sa/default
 ---
 # UI wystawione przez gateway: frontend, Grafana, pgAdmin, Kafka-UI - wejscie wylacznie przez Istio Ingress Gateway
-apiVersion: security.istio.io/v1
+apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
   name: ui-from-gateway-only
@@ -5465,7 +5465,7 @@ Vault (Transit PII, dynamiczne hasła DB, KV), External Secrets Operator, cert-m
 issuer mesh), Vault PKI, Kyverno, `default-deny-ingress` i `allow-intra-namespace` (druga warstwa obrony - sidecar da się ominąć).
 
 ## Instalacja (kolejność)
-1. Zainstaluj Istio (>= 1.22, API `networking.istio.io/v1`):
+1. Zainstaluj Istio (manifesty używają API `v1beta1`, działa od ok. 1.20; na starszych CRD nie ma `v1`):
    `istioctl install -f istio/istio-operator.yaml`   (Wariant A, własne CA Istio)
 2. `kubectl apply -k manifests/istio-system`   (certyfikat dla Gateway)
 3. `kubectl apply -k manifests/overlays/production`  albo ArgoCD (`argocd/application.yaml`, `argocd/application-istio.yaml`)

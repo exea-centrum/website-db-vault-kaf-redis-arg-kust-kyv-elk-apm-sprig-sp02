@@ -1,0 +1,167 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: davtro02
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    rule_files:
+      - /etc/prometheus/cert-alerts.yml
+      - /etc/prometheus/vault-alerts.yml
+    alerting:
+      alertmanagers:
+        - static_configs: [{ targets: ["alertmanager:9093"] }]
+    scrape_configs:
+      - job_name: fastapi
+        static_configs: [{ targets: ["fastapi-web-app-svc:80"] }]
+      - job_name: postgres-exporter
+        static_configs: [{ targets: ["postgres-exporter:9187"] }]
+      - job_name: kafka-exporter
+        static_configs: [{ targets: ["kafka-exporter:9308"] }]
+      - job_name: node-exporter
+        static_configs: [{ targets: ["node-exporter:9100"] }]
+      - job_name: cert-expiry-exporter
+        static_configs: [{ targets: ["cert-expiry-exporter:9887"] }]
+      # KROK 12 (Vault metrics): telemetry jest wlaczone w vault.yaml
+      # (telemetry { prometheus_retention = "12h" }), ale nikt tych metryk nie
+      # scrapowal - service-monitors.yaml czeka na Prometheus Operator, ktorego
+      # na tym klastrze nie ma. Stad statyczny job po HTTPS z CA z sekretu
+      # `vault-tls` (ten sam plik co uzywa ESO/transit_client).
+      # /v1/sys/metrics wymaga tokenu, wiec w vault.yaml wlaczone jest
+      # `unauthenticated_metrics_access` - wystawia tylko metryki, zero sekretow.
+      - job_name: vault
+        scheme: https
+        # Vault NIE wystawia metryk pod /metrics - endpoint to /v1/sys/metrics.
+        # Bez metrics_path Prometheus dostaje w odpowiedzi "<" (redirect/error UI)
+        # i konczy bledem: expected a valid start token ... ("INVALID").
+        metrics_path: /v1/sys/metrics
+        tls_config:
+          ca_file: /etc/prometheus-vault-tls/ca.crt
+          server_name: vault.davtro02.svc.cluster.local
+        static_configs: [{ targets: ["vault:8203"] }]
+  cert-alerts.yml: |
+    # KROK 7 (Certy TTL): alerty - bez Alertmanagera widoczne w Prometheus UI (/alerts);
+    # gdy dodasz Alertmanagera, rusza tez powiadomienia (Slack/mail).
+    groups:
+      - name: cert-expiry
+        rules:
+          - alert: DavtroCertExpiringSoon
+            expr: davtro_cert_days_remaining < 14
+            for: 1h
+            labels: { severity: warning }
+            annotations:
+              summary: 'Certyfikat {{ $labels.secret }} wygasa za {{ $value }} dni'
+              description: 'cert-manager + Vault PKI powinny renewowac automatycznie (renewBefore); sprawdz `kubectl -n davtro02 get certificate`.'
+          - alert: DavtroCertExpiringCritical
+            expr: davtro_cert_days_remaining < 3
+            for: 15m
+            labels: { severity: critical }
+            annotations:
+              summary: 'Certyfikat {{ $labels.secret }} wygasa za {{ $value }} dni (krytycznie)'
+              description: 'Renew sie nie wydarzyl na czas - sprawdz cert-manager i Vault PKI (pki/issue davtro-internal / pki/sign).'
+          - alert: DavtroCertExpired
+            expr: davtro_cert_days_remaining <= 0
+            for: 5m
+            labels: { severity: critical }
+            annotations:
+              summary: 'Certyfikat {{ $labels.secret }} WYGASL'
+              description: 'Natychmiastowa akcja - TLS przestanie dzialac.'
+      - name: target-health
+        rules:
+          - alert: DavtroTargetDown
+            expr: up{job=~"cert-expiry-exporter|fastapi|postgres-exporter|kafka-exporter|node-exporter|vault"} == 0
+            for: 5m
+            labels: { severity: warning }
+            annotations:
+              summary: 'Scrape target {{ $labels.job }} nieosiagalny ({{ $labels.instance }})'
+              description: 'Prometheus nie widziec targetu od 5 minut - sprawdz pody/usluge.'
+  vault-alerts.yml: |
+    # KROK 12 (Vault): stany krytyczne sejfu. Bez tych alertow zapieczetowany
+    # Vault wygladal po prostu jak "brak metryk" - a do tego czasu nikt nie
+    # scrape'owal /v1/sys/metrics w ogole (job `vault` w prometheus.yml).
+    # Metryki: vault_status_sealed, vault_raft_peer_is_raft_leader,
+    #          vault_mount_status, vault_raft_committed_index/raft_applied_index.
+    groups:
+      - name: vault-health
+        rules:
+          - alert: DavtroVaultSealed
+            expr: vault_status_sealed == 1
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: 'Vault jest ZAPIEKETOWONY - aplikacje nie dostaną sekretów ani nie odszyfrują PII'
+              description: 'Auto-unseal robi `vault-bootstrap` (petla co 60 s). Sprawdz `kubectl -n davtro02 logs deploy/vault-bootstrap -c ensure --tail=50` oraz `vault-0`.'
+          - alert: DavtroVaultRaftNoLeader
+            expr: max(vault_raft_peer_is_raft_leader) < 1
+            for: 5m
+            labels: { severity: critical }
+            annotations:
+              summary: 'Brak ledera Raft - zapis do Vaulta wstrzymany'
+              description: 'Sprawdz logi `vault-0` (utrata dysku/quorum, restart).'
+          - alert: DavtroVaultRaftLag
+            expr: (max(vault_raft_committed_index) - max(vault_raft_applied_index)) > 1000
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: 'Raft: committed-applied > 1000 (opoznienie zapisu)'
+              description: 'Zwykle dysk/PVC pod `vault-data-vault-0` jest wolny albo walczy o IO.'
+          - alert: DavtroVaultMountNotMounted
+            expr: vault_mount_status{status!="mounted"} == 1
+            for: 5m
+            labels: { severity: critical }
+            annotations:
+              summary: 'Mount {{ $labels.path }} nie jest zamontowany (status={{ $labels.status }})'
+              description: 'Sprawdz `vault secrets list` oraz logi `vault-0` - brak silnika blokuje sekrety/Transit/PKI.'
+          - alert: DavtroVaultTransitStale
+            expr: time() - vault_transit_last_rotation_time > 86400 * 35
+            for: 1h
+            labels: { severity: warning }
+            annotations:
+              summary: 'Klucz Transit nie był rotowany > 35 dni (auto_rotate_period=30 dni)'
+              description: 'Sprawdz `vault read transit/keys/davtro-app` - po rotacji warto przepuścić wiersze przez `transit/rewrap`.'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: davtro02
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: prometheus } }
+  template:
+    metadata: { labels: { app: prometheus } }
+    spec:
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.54.1
+          args: ["--config.file=/etc/prometheus/prometheus.yml"]
+          ports: [{ containerPort: 9090 }]
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus }
+            # KROK 12: CA bootstrapowego CA Vaulta (dla scrape https://vault:8203).
+            # Ten sam sekret montuja fastapi/ESO/transit_client - jeden plik CA.
+            - { name: vault-tls, mountPath: /etc/prometheus-vault-tls, readOnly: true }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 300m, memory: 256Mi }
+      volumes:
+        - name: config
+          configMap: { name: prometheus-config }
+        - name: vault-tls
+          secret: { secretName: vault-tls }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: davtro02
+spec:
+  selector: { app: prometheus }
+  ports: [{ port: 9090, targetPort: 9090 }]
+

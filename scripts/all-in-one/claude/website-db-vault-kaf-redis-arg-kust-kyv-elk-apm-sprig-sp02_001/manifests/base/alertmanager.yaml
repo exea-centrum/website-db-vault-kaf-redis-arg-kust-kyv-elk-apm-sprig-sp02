@@ -1,0 +1,103 @@
+# KROK 8 (Alertmanager): powiadomienia z alertow Prometheus (cert-expiry + targety).
+# Config alertmanager.yml jest TEMPLATEM - SMTP_USER/SMTP_PASSWORD (z Vaulta przez
+# ESO, Secret davtro-secrets) podstawia start.sh przy starcie poda. Zero sekretow
+# w ConfigMapie i w repo.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: davtro02
+data:
+  alertmanager.yml.tpl: |
+    global:
+      resolve_timeout: 5m
+      smtp_from: '__FROM__'
+      smtp_smarthost: '__SMTPHOST__'
+      smtp_auth_username: '__SMTPUSER__'
+      smtp_auth_password: '__SMTPPASS__'
+      smtp_require_tls: true
+    route:
+      receiver: email-default
+      group_by: ['alertname', 'secret']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - matchers:
+            - severity = "critical"
+          receiver: email-critical
+    receivers:
+      - name: email-default
+        email_configs:
+          - to: '__TO__'
+            send_resolved: true
+      - name: email-critical
+        email_configs:
+          - to: '__TO__'
+            send_resolved: true
+  start.sh: |
+    #!/bin/sh
+    # Podstawia sekrety SMTP do template'u i startuje Alertmanager.
+    # Bez SMTP_HOST (SMTP nie skonfigurowany) pisze na blackhole 127.0.0.1:25 -
+    # alerty widoczne w UI Alertmanagera, dostarczenie email dopiero po sekretach.
+    set -eu
+    HOST="${SMTP_HOST:-127.0.0.1}"
+    PORT="${SMTP_PORT:-25}"
+    USER="${SMTP_USER:-x}"
+    PASS="${SMTP_PASSWORD:-x}"
+    FROM="${FROM_EMAIL:-admin@davtro.local}"
+    TO="${ALERT_EMAIL_TO:-$FROM}"
+    [ -n "${SMTP_HOST:-}" ] || echo "UWAGA: brak SMTP_HOST - alerty nie wysylaja email (widoczne w UI :9093)"
+    sed -e "s|__FROM__|$FROM|g" \
+        -e "s|__SMTPHOST__|$HOST:$PORT|g" \
+        -e "s|__SMTPUSER__|$USER|g" \
+        -e "s|__SMTPPASS__|$PASS|g" \
+        -e "s|__TO__|$TO|g" \
+        /etc/alertmanager/alertmanager.yml.tpl > /tmp/alertmanager.yml
+    exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: davtro02
+  labels: { app: alertmanager }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: alertmanager } }
+  template:
+    metadata:
+      labels: { app: alertmanager }
+    spec:
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.27.0
+          command: ["/bin/sh", "/etc/alertmanager/start.sh"]
+          ports: [{ containerPort: 9093 }]
+          # Sekrety SMTP z Vaulta (ESO -> davtro-secrets) + SMTP_HOST/PORT z configmapy FastAPI
+          envFrom:
+            - secretRef: { name: davtro-secrets }
+            - configMapRef: { name: fastapi-config }
+          env:
+            # Odbiorca alertow (ustawione na zyczenie uzytkownika)
+            - { name: ALERT_EMAIL_TO, value: "trojanowski.david@gmail.com" }
+          volumeMounts:
+            - { name: config, mountPath: /etc/alertmanager }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: 9093 }
+            initialDelaySeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+      volumes:
+        - name: config
+          configMap: { name: alertmanager-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: davtro02
+spec:
+  selector: { app: alertmanager }
+  ports: [{ port: 9093, targetPort: 9093 }]
