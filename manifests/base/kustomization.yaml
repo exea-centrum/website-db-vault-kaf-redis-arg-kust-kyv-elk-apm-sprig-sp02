@@ -46,10 +46,11 @@ resources:
 - transit-helpers.yaml
 
 # --- ISTIO: patche pod-template (sidecar) ---
-patches:
 # aplikacje lacza sie z siecia od razu przy starcie -> czekaj az Envoy bedzie gotowy
-- target: { kind: Deployment, name: fastapi-web-app }
-  patch: |-
+# Vault: probe HTTPS idzie prosto na :8203 (port PERMISSIVE) - bez przepisywania probe przez pilot-agenta
+# poza mesh: Spark (losowe porty RPC/Netty) i CronJob snapshotu Vaulta (Job bez sidecara; TLS do :8203 przechodzi PERMISSIVE)
+patches:
+- patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -59,8 +60,10 @@ patches:
         metadata:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
-- target: { kind: Deployment, name: message-processor }
-  patch: |-
+  target:
+    kind: Deployment
+    name: fastapi-web-app
+- patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -70,8 +73,10 @@ patches:
         metadata:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
-- target: { kind: Deployment, name: spring-app-deployment }
-  patch: |-
+  target:
+    kind: Deployment
+    name: message-processor
+- patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -81,8 +86,10 @@ patches:
         metadata:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
-- target: { kind: Deployment, name: vault-bootstrap }
-  patch: |-
+  target:
+    kind: Deployment
+    name: spring-app-deployment
+- patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -92,8 +99,10 @@ patches:
         metadata:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
-- target: { kind: Job, name: kafka-topic-job }
-  patch: |-
+  target:
+    kind: Deployment
+    name: vault-bootstrap
+- patch: |-
     apiVersion: batch/v1
     kind: Job
     metadata:
@@ -103,9 +112,10 @@ patches:
         metadata:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
-# Vault: probe HTTPS idzie prosto na :8203 (port PERMISSIVE) - bez przepisywania probe przez pilot-agenta
-- target: { kind: StatefulSet, name: vault }
-  patch: |-
+  target:
+    kind: Job
+    name: kafka-topic-job
+- patch: |-
     apiVersion: apps/v1
     kind: StatefulSet
     metadata:
@@ -117,9 +127,10 @@ patches:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
             sidecar.istio.io/rewriteAppHTTPProbers: "false"
             traffic.sidecar.istio.io/excludeInboundPorts: "8203"
-# poza mesh: Spark (losowe porty RPC/Netty) i CronJob snapshotu Vaulta (Job bez sidecara; TLS do :8203 przechodzi PERMISSIVE)
-- target: { kind: Deployment, name: spark-master }
-  patch: |-
+  target:
+    kind: StatefulSet
+    name: vault
+- patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -129,8 +140,10 @@ patches:
         metadata:
           labels:
             sidecar.istio.io/inject: "false"
-- target: { kind: Deployment, name: spark-worker }
-  patch: |-
+  target:
+    kind: Deployment
+    name: spark-master
+- patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -140,8 +153,10 @@ patches:
         metadata:
           labels:
             sidecar.istio.io/inject: "false"
-- target: { kind: CronJob, name: vault-snapshot }
-  patch: |-
+  target:
+    kind: Deployment
+    name: spark-worker
+- patch: |-
     apiVersion: batch/v1
     kind: CronJob
     metadata:
@@ -153,20 +168,23 @@ patches:
             metadata:
               labels:
                 sidecar.istio.io/inject: "false"
+  target:
+    kind: CronJob
+    name: vault-snapshot
 
 images:
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
-  newTag: 46dd9b3b5da6f016d752f4643ff76d05f2e32079
+  newTag: 9cf1d97582fa4404b28682651a06f98cdfa423d5
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
-  newTag: 46dd9b3b5da6f016d752f4643ff76d05f2e32079
+  newTag: 9cf1d97582fa4404b28682651a06f98cdfa423d5
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
-  newTag: 46dd9b3b5da6f016d752f4643ff76d05f2e32079
+  newTag: 9cf1d97582fa4404b28682651a06f98cdfa423d5
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
-  newTag: 46dd9b3b5da6f016d752f4643ff76d05f2e32079
+  newTag: 9cf1d97582fa4404b28682651a06f98cdfa423d5
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
   newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
-  newTag: 46dd9b3b5da6f016d752f4643ff76d05f2e32079
+  newTag: 9cf1d97582fa4404b28682651a06f98cdfa423d5
