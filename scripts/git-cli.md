@@ -26,3 +26,14 @@ cd /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
  9121  [2026-10-02 16:35:10 CEST] kubectl delete clusterissuer vault-issuer vault-issuer-internal --ignore-not-found
  9122  [2026-10-02 16:35:10 CEST] kubectl delete clusterrolebinding davtro02-vault-tokenreview --ignore-not-found
  9123  [2026-10-02 16:35:10 CEST] kubectl get pv -o name | grep -iE 'davtro|vault|pgdata|kafka-data' | while read pv; do   kubectl patch "$pv" -p '{"metadata":{"finalizers":null}}' --type=merge;   kubectl delete "$pv"; done
+
+
+
+
+kubectl -n davtro02 describe pod frontend-5f95c949d8-5wp4s | sed -n '/Events:/,$p'
+
+
+kubectl -n davtro02 get pods
+kubectl -n davtro02 logs deploy/vault-bootstrap -c vault-bootstrap --tail=40
+kubectl -n davtro02 describe pod vault-0 | sed -n '/Events:/,$p'
+kubectl -n davtro02 get secretstore,externalsecret

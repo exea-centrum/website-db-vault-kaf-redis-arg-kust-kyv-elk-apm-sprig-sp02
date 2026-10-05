@@ -125,3 +125,16 @@ spec:
         - source:
             principals:
               - cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: vault-own-tls
+  namespace: davtro02
+spec:
+  host: vault.davtro02.svc.cluster.local
+  trafficPolicy:
+    portLevelSettings:
+      - port: { number: 8203 }
+        tls:
+          mode: DISABLE
