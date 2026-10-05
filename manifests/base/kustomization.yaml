@@ -46,11 +46,10 @@ resources:
 - transit-helpers.yaml
 
 # --- ISTIO: patche pod-template (sidecar) ---
-# aplikacje lacza sie z siecia od razu przy starcie -> czekaj az Envoy bedzie gotowy
-# Vault: probe HTTPS idzie prosto na :8203 (port PERMISSIVE) - bez przepisywania probe przez pilot-agenta
-# poza mesh: Spark (losowe porty RPC/Netty) i CronJob snapshotu Vaulta (Job bez sidecara; TLS do :8203 przechodzi PERMISSIVE)
 patches:
-- patch: |-
+# aplikacje lacza sie z siecia od razu przy starcie -> czekaj az Envoy bedzie gotowy
+- target: { kind: Deployment, name: fastapi-web-app }
+  patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -60,10 +59,8 @@ patches:
         metadata:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
-  target:
-    kind: Deployment
-    name: fastapi-web-app
-- patch: |-
+- target: { kind: Deployment, name: message-processor }
+  patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -73,10 +70,8 @@ patches:
         metadata:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
-  target:
-    kind: Deployment
-    name: message-processor
-- patch: |-
+- target: { kind: Deployment, name: spring-app-deployment }
+  patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -86,10 +81,8 @@ patches:
         metadata:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
-  target:
-    kind: Deployment
-    name: spring-app-deployment
-- patch: |-
+- target: { kind: Deployment, name: vault-bootstrap }
+  patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -99,10 +92,8 @@ patches:
         metadata:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
-  target:
-    kind: Deployment
-    name: vault-bootstrap
-- patch: |-
+- target: { kind: Job, name: kafka-topic-job }
+  patch: |-
     apiVersion: batch/v1
     kind: Job
     metadata:
@@ -112,10 +103,9 @@ patches:
         metadata:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
-  target:
-    kind: Job
-    name: kafka-topic-job
-- patch: |-
+# Vault: probe HTTPS idzie prosto na :8203 (port PERMISSIVE) - bez przepisywania probe przez pilot-agenta
+- target: { kind: StatefulSet, name: vault }
+  patch: |-
     apiVersion: apps/v1
     kind: StatefulSet
     metadata:
@@ -127,10 +117,9 @@ patches:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
             sidecar.istio.io/rewriteAppHTTPProbers: "false"
             traffic.sidecar.istio.io/excludeInboundPorts: "8203"
-  target:
-    kind: StatefulSet
-    name: vault
-- patch: |-
+# poza mesh: Spark (losowe porty RPC/Netty) i CronJob snapshotu Vaulta (Job bez sidecara; TLS do :8203 przechodzi PERMISSIVE)
+- target: { kind: Deployment, name: spark-master }
+  patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -140,10 +129,8 @@ patches:
         metadata:
           labels:
             sidecar.istio.io/inject: "false"
-  target:
-    kind: Deployment
-    name: spark-master
-- patch: |-
+- target: { kind: Deployment, name: spark-worker }
+  patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -153,10 +140,8 @@ patches:
         metadata:
           labels:
             sidecar.istio.io/inject: "false"
-  target:
-    kind: Deployment
-    name: spark-worker
-- patch: |-
+- target: { kind: CronJob, name: vault-snapshot }
+  patch: |-
     apiVersion: batch/v1
     kind: CronJob
     metadata:
@@ -168,9 +153,6 @@ patches:
             metadata:
               labels:
                 sidecar.istio.io/inject: "false"
-  target:
-    kind: CronJob
-    name: vault-snapshot
 
 images:
 - name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02

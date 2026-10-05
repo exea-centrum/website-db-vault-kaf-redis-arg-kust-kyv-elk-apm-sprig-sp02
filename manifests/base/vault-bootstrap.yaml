@@ -300,6 +300,10 @@ spec:
                   log "restart pgadmin/postgres-exporter/spring (nowe haslo z ESO)"
                 fi
 
+                # FIX (swieza baza): tabele tworzy FastAPI (init_db) dopiero po otrzymaniu credsow z roli
+                # database/roles/davtro-app-rw, ktora bootstrap tworzy PONIZEJ. Bez "IF EXISTS" ALTER na
+                # nieistniejacej tabeli konczyl petle (return 1) i powstawal martwy cykl bootstrap <-> FastAPI.
+                # Na starej bazie ALTER dziala jak dotad; na swiezej tabela dostanie kolumny z CREATE TABLE.
                 # KROK 5b (Auth): automatyczny ALTER schematu rezerwacji.
                 # Kolumny user_id/username sa wymagane przez logowanie rezerwujacych
                 # (powiazanie rezerwacji z kontem), a aplikacja laczy sie credsami
@@ -307,8 +311,8 @@ spec:
                 # wlasciciel bazy. Idempotentne (IF NOT EXISTS) - bezpieczne w petli
                 # self-heal i przy pelnym wdrozeniu z ArgoCD od zera.
                 if ! $KUBECTL -n davtro02 exec postgres-db-0 -- psql -U davtro -d davtro_rentals -tAc \
-                    "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS user_id INT;
-                     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS username VARCHAR(100);" >/dev/null 2>&1; then
+                    "ALTER TABLE IF EXISTS bookings ADD COLUMN IF NOT EXISTS user_id INT;
+                     ALTER TABLE IF EXISTS bookings ADD COLUMN IF NOT EXISTS username VARCHAR(100);" >/dev/null 2>&1; then
                   log "ALTER TABLE bookings nieudany (postgres-db-0 nie gotowy?) - retry w nastepnej petli"
                   return 1
                 fi

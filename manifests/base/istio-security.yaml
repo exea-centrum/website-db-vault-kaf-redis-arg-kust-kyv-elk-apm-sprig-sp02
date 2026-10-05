@@ -13,8 +13,12 @@ spec:
   mtls:
     mode: STRICT          # tylko mTLS miedzy podami z sidecarem
 ---
-# Vault: API na :8203 ma wlasny TLS i jest wolane takze spoza mesh (ESO, cert-manager, CronJob snapshotu),
-# wiec ten jeden port przyjmuje i mTLS mesh, i surowy TLS Vaulta. Reszta portow Vaulta - STRICT.
+# Vault: API na :8203 ma WLASNY TLS i jest wolane takze spoza mesh (ESO, cert-manager, CronJob snapshotu)
+# oraz przez kubelet (probe httpGet HTTPS na IP poda). Envoy przechwytujacy ten port zamykal polaczenia
+# przed handshake'iem (Vault: "TLS handshake error from 127.0.0.6: EOF", probe EOF, restarty poda),
+# dlatego port 8203 jest wylaczony z przechwytywania sidecara (traffic.sidecar.istio.io/excludeInboundPorts
+# w patchu StatefulSet/vault w kustomization.yaml), a DestinationRule nizej wylacza Istio-mTLS po stronie klientow.
+# Pozostale porty Vaulta (8201 raft) zostaja w mesh - STRICT.
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
@@ -28,6 +32,21 @@ spec:
   portLevelMtls:
     "8203":   # klucz MUSI byc stringiem - kustomize (ArgoCD) odrzuca int jako klucz mapy
       mode: PERMISSIVE
+---
+# Klienci w mesh (fastapi, spring, message-processor, vault-bootstrap) lacza sie z Vaultem po jego wlasnym TLS.
+# Bez tej reguly auto-mTLS Istio probowalby mTLS do portu, na ktorym Vault mowi czystym TLS (handshake fail).
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: vault-own-tls
+  namespace: davtro02
+spec:
+  host: vault.davtro02.svc.cluster.local
+  trafficPolicy:
+    portLevelSettings:
+      - port: { number: 8203 }
+        tls:
+          mode: DISABLE
 ---
 # Postgres 5432: aplikacje, pgAdmin, exporter, Vault (database engine)
 apiVersion: security.istio.io/v1beta1
@@ -125,16 +144,3 @@ spec:
         - source:
             principals:
               - cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account
----
-apiVersion: networking.istio.io/v1beta1
-kind: DestinationRule
-metadata:
-  name: vault-own-tls
-  namespace: davtro02
-spec:
-  host: vault.davtro02.svc.cluster.local
-  trafficPolicy:
-    portLevelSettings:
-      - port: { number: 8203 }
-        tls:
-          mode: DISABLE

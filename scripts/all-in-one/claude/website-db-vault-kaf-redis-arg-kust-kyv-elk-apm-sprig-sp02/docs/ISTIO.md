@@ -40,6 +40,7 @@ a port `:8203` jest PERMISSIVE. Zacznij od wariantu A i przejdź na B, gdy mesh 
 - **Spark** jest poza mesh (`sidecar.istio.io/inject: "false"`) - losowe porty RPC; UI idzie przez Gateway jako plaintext w klastrze.
 - **Prometheus** jest w mesh, więc scrapuje mTLS-em; `node-exporter` (hostNetwork) i Spark są poza mesh - Istio użyje plaintextu (auto-mTLS).
 - **Vault -> Postgres** (database engine, `sslmode=disable`) idzie przez sidecar Vaulta, więc Postgres w STRICT go przyjmuje.
+- **Vault :8203** ma własny TLS: port jest wyłączony z przechwytywania sidecara (`excludeInboundPorts`), a `DestinationRule/vault-own-tls` wyłącza Istio-mTLS po stronie klientów. Bez tego probe kubeleta i klienci dostają `EOF`, a Vault jest restartowany przez liveness.
 - **Tożsamości**: fastapi/message-processor/frontend/vault współdzielą SA `davtro-sa` (role Vault są do niego przypięte).
   Chcesz rozróżniać je w AuthorizationPolicy - rozdziel SA i zmień `bound_service_account_names` w vault-bootstrap.yaml.
 - **Kyverno** musi przepuszczać `docker.io/istio/*` (dodane). Jeśli klaster wymusza PSA `restricted`, użyj Istio CNI zamiast `istio-init`.

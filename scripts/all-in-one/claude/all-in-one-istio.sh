@@ -2451,6 +2451,10 @@ spec:
                   log "restart pgadmin/postgres-exporter/spring (nowe haslo z ESO)"
                 fi
 
+                # FIX (swieza baza): tabele tworzy FastAPI (init_db) dopiero po otrzymaniu credsow z roli
+                # database/roles/davtro-app-rw, ktora bootstrap tworzy PONIZEJ. Bez "IF EXISTS" ALTER na
+                # nieistniejacej tabeli konczyl petle (return 1) i powstawal martwy cykl bootstrap <-> FastAPI.
+                # Na starej bazie ALTER dziala jak dotad; na swiezej tabela dostanie kolumny z CREATE TABLE.
                 # KROK 5b (Auth): automatyczny ALTER schematu rezerwacji.
                 # Kolumny user_id/username sa wymagane przez logowanie rezerwujacych
                 # (powiazanie rezerwacji z kontem), a aplikacja laczy sie credsami
@@ -2458,8 +2462,8 @@ spec:
                 # wlasciciel bazy. Idempotentne (IF NOT EXISTS) - bezpieczne w petli
                 # self-heal i przy pelnym wdrozeniu z ArgoCD od zera.
                 if ! $KUBECTL -n davtro02 exec postgres-db-0 -- psql -U davtro -d davtro_rentals -tAc \
-                    "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS user_id INT;
-                     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS username VARCHAR(100);" >/dev/null 2>&1; then
+                    "ALTER TABLE IF EXISTS bookings ADD COLUMN IF NOT EXISTS user_id INT;
+                     ALTER TABLE IF EXISTS bookings ADD COLUMN IF NOT EXISTS username VARCHAR(100);" >/dev/null 2>&1; then
                   log "ALTER TABLE bookings nieudany (postgres-db-0 nie gotowy?) - retry w nastepnej petli"
                   return 1
                 fi
@@ -4736,6 +4740,7 @@ patches:
           annotations:
             proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
             sidecar.istio.io/rewriteAppHTTPProbers: "false"
+            traffic.sidecar.istio.io/excludeInboundPorts: "8203"
 # poza mesh: Spark (losowe porty RPC/Netty) i CronJob snapshotu Vaulta (Job bez sidecara; TLS do :8203 przechodzi PERMISSIVE)
 - target: { kind: Deployment, name: spark-master }
   patch: |-
@@ -5211,8 +5216,12 @@ spec:
   mtls:
     mode: STRICT          # tylko mTLS miedzy podami z sidecarem
 ---
-# Vault: API na :8203 ma wlasny TLS i jest wolane takze spoza mesh (ESO, cert-manager, CronJob snapshotu),
-# wiec ten jeden port przyjmuje i mTLS mesh, i surowy TLS Vaulta. Reszta portow Vaulta - STRICT.
+# Vault: API na :8203 ma WLASNY TLS i jest wolane takze spoza mesh (ESO, cert-manager, CronJob snapshotu)
+# oraz przez kubelet (probe httpGet HTTPS na IP poda). Envoy przechwytujacy ten port zamykal polaczenia
+# przed handshake'iem (Vault: "TLS handshake error from 127.0.0.6: EOF", probe EOF, restarty poda),
+# dlatego port 8203 jest wylaczony z przechwytywania sidecara (traffic.sidecar.istio.io/excludeInboundPorts
+# w patchu StatefulSet/vault w kustomization.yaml), a DestinationRule nizej wylacza Istio-mTLS po stronie klientow.
+# Pozostale porty Vaulta (8201 raft) zostaja w mesh - STRICT.
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
@@ -5226,6 +5235,21 @@ spec:
   portLevelMtls:
     "8203":   # klucz MUSI byc stringiem - kustomize (ArgoCD) odrzuca int jako klucz mapy
       mode: PERMISSIVE
+---
+# Klienci w mesh (fastapi, spring, message-processor, vault-bootstrap) lacza sie z Vaultem po jego wlasnym TLS.
+# Bez tej reguly auto-mTLS Istio probowalby mTLS do portu, na ktorym Vault mowi czystym TLS (handshake fail).
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: vault-own-tls
+  namespace: davtro02
+spec:
+  host: vault.davtro02.svc.cluster.local
+  trafficPolicy:
+    portLevelSettings:
+      - port: { number: 8203 }
+        tls:
+          mode: DISABLE
 ---
 # Postgres 5432: aplikacje, pgAdmin, exporter, Vault (database engine)
 apiVersion: security.istio.io/v1beta1
@@ -5490,6 +5514,7 @@ a port `:8203` jest PERMISSIVE. Zacznij od wariantu A i przejdź na B, gdy mesh 
 - **Spark** jest poza mesh (`sidecar.istio.io/inject: "false"`) - losowe porty RPC; UI idzie przez Gateway jako plaintext w klastrze.
 - **Prometheus** jest w mesh, więc scrapuje mTLS-em; `node-exporter` (hostNetwork) i Spark są poza mesh - Istio użyje plaintextu (auto-mTLS).
 - **Vault -> Postgres** (database engine, `sslmode=disable`) idzie przez sidecar Vaulta, więc Postgres w STRICT go przyjmuje.
+- **Vault :8203** ma własny TLS: port jest wyłączony z przechwytywania sidecara (`excludeInboundPorts`), a `DestinationRule/vault-own-tls` wyłącza Istio-mTLS po stronie klientów. Bez tego probe kubeleta i klienci dostają `EOF`, a Vault jest restartowany przez liveness.
 - **Tożsamości**: fastapi/message-processor/frontend/vault współdzielą SA `davtro-sa` (role Vault są do niego przypięte).
   Chcesz rozróżniać je w AuthorizationPolicy - rozdziel SA i zmień `bound_service_account_names` w vault-bootstrap.yaml.
 - **Kyverno** musi przepuszczać `docker.io/istio/*` (dodane). Jeśli klaster wymusza PSA `restricted`, użyj Istio CNI zamiast `istio-init`.
