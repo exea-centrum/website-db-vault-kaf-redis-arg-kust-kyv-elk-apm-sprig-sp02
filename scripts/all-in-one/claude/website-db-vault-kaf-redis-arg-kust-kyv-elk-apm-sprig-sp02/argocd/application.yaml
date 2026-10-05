@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: davtro-website
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02.git
+    targetRevision: HEAD
+    path: manifests/overlays/production
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: davtro02
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # UWAGA: celowo BEZ Replace=true. Tryb Replace podmienia cala definicje
+      # obiektu, a Kubernetes zabrania updatu immutable fields istniejacych
+      # zasobow (bound PersistentVolumeClaims, spec StatefulSetow poza
+      # dozwolonymi polami) -> kazdy taki dryf zawalal CALY sync aplikacji
+      # (SyncError, retry x5). Bez Replace ArgoCD aktualizuje w miejscu to,
+      # co sie da, a reszta (vid. storageClassName w vault-snapshot.yaml)
+      # jest utrzymywana zgodnie w manifestach.
+      - CreateNamespace=true

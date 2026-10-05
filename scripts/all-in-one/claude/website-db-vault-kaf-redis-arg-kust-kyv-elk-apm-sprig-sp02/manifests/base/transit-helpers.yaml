@@ -1,0 +1,129 @@
+# KROK 6 (Transit): helper scripts dla szyfrowania danych aplikacyjnych.
+# Aplikacje używają: transit_encrypt.sh / transit_decrypt.sh
+# Vault Agent (lub aplikacja) szyfruje dane przed zapisem do bazy.
+# Wymaga: vault-cli w kontenerze aplikacji (albo Vault Agent sidecar).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: transit-helpers
+  namespace: davtro02
+data:
+  transit_encrypt: |
+    #!/bin/bash
+    # Szyfruje dane przez Vault Transit Engine
+    # Użycie: echo "dane" | transit_encrypt
+    # Zwraca: vault:v1:base64-ciphertext
+    
+    set -e
+    export VAULT_ADDR="https://vault.davtro02.svc.cluster.local:8203"
+    export VAULT_CACERT="/etc/vault-tls/ca.crt"
+    
+    # Pobierz token K8s
+    TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    export VAULT_TOKEN=$(vault write -field=token auth/kubernetes/login jwt="$TOKEN" role=davtro-transit 2>/dev/null)
+    
+    # Szyfruj
+    DATA=$(cat)
+    PLAINTEXT=$(echo -n "$DATA" | base64 -w0)
+    CIPHERTEXT=$(vault write -field=ciphertext transit/encrypt/davtro-app plaintext="$PLAINTEXT" 2>/dev/null)
+    
+    echo "$CIPHERTEXT"
+  
+  transit_decrypt: |
+    #!/bin/bash
+    # Deszyfruje dane z Vault Transit Engine
+    # Użycie: echo "vault:v1:..." | transit_decrypt
+    # Zwraca: odszyfrowane dane
+    
+    set -e
+    export VAULT_ADDR="https://vault.davtro02.svc.cluster.local:8203"
+    export VAULT_CACERT="/etc/vault-tls/ca.crt"
+    
+    # Pobierz token K8s
+    TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    export VAULT_TOKEN=$(vault write -field=token auth/kubernetes/login jwt="$TOKEN" role=davtro-transit 2>/dev/null)
+    
+    # Deszyfruj
+    CIPHERTEXT=$(cat)
+    PLAINTEXT=$(vault write -field=plaintext transit/decrypt/davtro-app ciphertext="$CIPHERTEXT" 2>/dev/null)
+    echo "$PLAINTEXT" | base64 -d
+  
+  transit_datakey: |
+    #!/bin/bash
+    # Generuje Data Encryption Key (DEK) dla lokalnego szyfrowania
+    # Użycie: transit_datakey
+    # Zwraca: vault:v1:wrapped-key (do przechowania razem z danymi)
+    
+    set -e
+    export VAULT_ADDR="https://vault.davtro02.svc.cluster.local:8203"
+    export VAULT_CACERT="/etc/vault-tls/ca.crt"
+    
+    # Pobierz token K8s
+    TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    export VAULT_TOKEN=$(vault write -field=token auth/kubernetes/login jwt="$TOKEN" role=davtro-transit 2>/dev/null)
+    
+    # Generuj DEK (wrapped)
+    KEY=$(vault write -field=wrapped_key transit/datakey/wrapped/davtro-app 2>/dev/null)
+    echo "$KEY"
+  
+  vault_agent_config.hcl: |
+    # Vault Agent konfiguracja dla sidecar injection
+    # Użycie: vault agent -config=vault_agent_config.hcl
+    
+    vault {
+      address = "https://vault.davtro02.svc.cluster.local:8203"
+      tls_skip_verify = false
+      retry {
+        num_retries = 5
+      }
+    }
+    
+    auto_auth {
+      method "kubernetes" {
+        mount_path = "auth/kubernetes"
+        config = {
+          role = "davtro-transit"
+        }
+      }
+      sink "file" {
+        config = {
+          path = "/vault/.vault-token"
+        }
+      }
+    }
+    
+    template {
+      destination = "/etc/transit/credentials"
+      contents = <<EOT
+    {{ with secret "transit/datakey/davtro-app" }}
+    VAULT_TRANSIT_KEY={{ .Data.wrapped_key }}
+    {{ end }}
+    EOT
+    }
+---
+# KROK 6 (Transit): ExternalSecret dla rotacji Vault token (cert-manager-vault-token alternatywa)
+# Używa Vault Agent Auto-Auth do automatycznej rotacji tokena
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: vault-transit
+  namespace: davtro02
+spec:
+  provider:
+    vault:
+      server: "https://vault.davtro02.svc.cluster.local:8203"
+      version: "v2"
+      # KROK 9 (Vault HTTPS): bez caProvider store nie ufa self-signed
+      # vault-ca -> 'x509: certificate signed by unknown authority'
+      # i SecretStore vault-transit stawal Degraded (blokowal sync ArgoCD).
+      caProvider:
+        type: Secret
+        name: vault-tls
+        key: ca.crt
+      auth:
+        kubernetes:
+          mountPath: "kubernetes"
+          role: "davtro-transit"
+          serviceAccountRef:
+            name: "davtro-sa"
+

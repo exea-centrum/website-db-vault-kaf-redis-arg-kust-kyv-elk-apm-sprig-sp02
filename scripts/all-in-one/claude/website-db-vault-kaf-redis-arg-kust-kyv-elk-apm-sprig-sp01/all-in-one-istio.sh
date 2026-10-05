@@ -5224,7 +5224,7 @@ spec:
   mtls:
     mode: STRICT
   portLevelMtls:
-    "8203":   # klucz MUSI byc stringiem - kustomize (ArgoCD) odrzuca int jako klucz mapy
+    8203:
       mode: PERMISSIVE
 ---
 # Postgres 5432: aplikacje, pgAdmin, exporter, Vault (database engine)

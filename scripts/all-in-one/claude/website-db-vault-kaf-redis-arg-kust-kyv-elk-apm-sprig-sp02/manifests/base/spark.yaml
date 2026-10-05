@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+  namespace: davtro02
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: spark-master } }
+  template:
+    metadata: { labels: { app: spark-master } }
+    spec:
+      securityContext:
+        runAsUser: 185
+        runAsGroup: 0
+        fsGroup: 0
+      containers:
+        - name: spark-master
+          image: apache/spark:3.5.0
+          command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "0.0.0.0", "--port", "7077", "--webui-port", "8082"]
+          ports: [{ containerPort: 7077 }, { containerPort: 8082 }]
+          volumeMounts:
+            - { name: spark-logs, mountPath: /opt/spark/logs }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 768Mi }
+      volumes:
+        - { name: spark-logs, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master-svc
+  namespace: davtro02
+spec:
+  selector: { app: spark-master }
+  ports:
+    - { name: rpc, port: 7077, targetPort: 7077 }
+    - { name: ui, port: 8082, targetPort: 8082 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker
+  namespace: davtro02
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: spark-worker } }
+  template:
+    metadata: { labels: { app: spark-worker } }
+    spec:
+      securityContext:
+        runAsUser: 185
+        runAsGroup: 0
+        fsGroup: 0
+      containers:
+        - name: spark-worker
+          image: apache/spark:3.5.0
+          command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master-svc:7077"]
+          volumeMounts:
+            - { name: spark-logs, mountPath: /opt/spark/logs }
+          env:
+            - { name: SPARK_WORKER_CORES, value: "1" }
+            - { name: SPARK_WORKER_MEMORY, value: "1g" }
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { cpu: 500m, memory: 1Gi }
+      volumes:
+        - { name: spark-logs, emptyDir: {} }

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-web-app-svc
+  namespace: davtro02
+spec:
+  selector: { app: fastapi-web-app }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

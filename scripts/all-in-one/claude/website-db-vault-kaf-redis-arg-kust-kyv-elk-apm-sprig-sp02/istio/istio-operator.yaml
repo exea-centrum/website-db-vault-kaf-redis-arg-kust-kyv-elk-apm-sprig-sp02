@@ -1,0 +1,17 @@
+# Wariant A (domyslny, najprostszy): wlasne CA Istio (istiod) - certy workloadow rotowane co 24h w pamieci sidecarow.
+#   istioctl install -f istio/istio-operator.yaml
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: davtro-istio
+  namespace: istio-system
+spec:
+  profile: default
+  meshConfig:
+    accessLogFile: /dev/stdout
+    outboundTrafficPolicy:
+      mode: ALLOW_ANY        # egress do API K8s, SMTP itp. bez ServiceEntry; potem zaostrz do REGISTRY_ONLY
+  components:
+    ingressGateways:
+      - name: istio-ingressgateway
+        enabled: true

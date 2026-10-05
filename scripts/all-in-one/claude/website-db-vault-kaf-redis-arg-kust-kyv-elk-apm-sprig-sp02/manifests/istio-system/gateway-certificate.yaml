@@ -1,0 +1,18 @@
+# Certyfikat TLS dla Istio Ingress Gateway - zostaje cert-manager + Vault PKI (ClusterIssuer vault-issuer).
+# Secret MUSI lezec w namespace gateway'a (istio-system). Zastepuje Certificate davtro-tls i spark-tls.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: davtro-gateway-tls
+  namespace: istio-system
+spec:
+  secretName: davtro-gateway-tls
+  duration: 2160h   # 90d
+  renewBefore: 360h # 15d
+  commonName: davtro.local
+  dnsNames:
+    - davtro.local
+    - spark.davtro.local
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer

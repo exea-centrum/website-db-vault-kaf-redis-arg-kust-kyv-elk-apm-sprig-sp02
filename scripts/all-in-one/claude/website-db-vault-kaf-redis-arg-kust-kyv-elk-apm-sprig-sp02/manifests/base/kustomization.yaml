@@ -1,0 +1,171 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ISTIO: mTLS/Ingress przez Istio (istio-gateway.yaml, istio-security.yaml, patche nizej).
+# KROK 5 (PKI): Vault CA + cert-manager. AKTYWNE - cert-manager zainstalowany
+# na klastrze (CRD ClusterIssuer/Certificate istnieja, SA cert-manager-vault +
+# Secret cert-manager-vault-token gotowe). Kolejnosc celowa: issuer przed certami.
+resources:
+- namespace.yaml
+- serviceaccount.yaml
+- configmap.yaml
+- secret-store.yaml
+- external-secrets.yaml
+- external-secrets-db-dynamic.yaml
+- deployment.yaml
+- service.yaml
+- frontend.yaml
+- hpa.yaml
+- pdb.yaml
+- postgres.yaml
+- redis.yaml
+- vault.yaml
+- vault-snapshot.yaml
+- vault-bootstrap.yaml
+- kafka.yaml
+- message-processor.yaml
+- spring-app.yaml
+- spark.yaml
+- prometheus.yaml
+- cert-expiry-exporter.yaml
+- alertmanager.yaml
+- exporters.yaml
+- grafana.yaml
+- loki.yaml
+- promtail.yaml
+- tempo.yaml
+- pgadmin.yaml
+- kafka-ui.yaml
+- network-policies.yaml
+- istio-gateway.yaml
+- istio-security.yaml
+- kyverno-policy.yaml
+- pki-issuer.yaml
+- vault-server-tls.yaml
+- vault-tls-certificate.yaml
+- transit-helpers.yaml
+
+# --- ISTIO: patche pod-template (sidecar) ---
+patches:
+# aplikacje lacza sie z siecia od razu przy starcie -> czekaj az Envoy bedzie gotowy
+- target: { kind: Deployment, name: fastapi-web-app }
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: fastapi-web-app
+    spec:
+      template:
+        metadata:
+          annotations:
+            proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+- target: { kind: Deployment, name: message-processor }
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: message-processor
+    spec:
+      template:
+        metadata:
+          annotations:
+            proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+- target: { kind: Deployment, name: spring-app-deployment }
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: spring-app-deployment
+    spec:
+      template:
+        metadata:
+          annotations:
+            proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+- target: { kind: Deployment, name: vault-bootstrap }
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: vault-bootstrap
+    spec:
+      template:
+        metadata:
+          annotations:
+            proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+- target: { kind: Job, name: kafka-topic-job }
+  patch: |-
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: kafka-topic-job
+    spec:
+      template:
+        metadata:
+          annotations:
+            proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+# Vault: probe HTTPS idzie prosto na :8203 (port PERMISSIVE) - bez przepisywania probe przez pilot-agenta
+- target: { kind: StatefulSet, name: vault }
+  patch: |-
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: vault
+    spec:
+      template:
+        metadata:
+          annotations:
+            proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+            sidecar.istio.io/rewriteAppHTTPProbers: "false"
+# poza mesh: Spark (losowe porty RPC/Netty) i CronJob snapshotu Vaulta (Job bez sidecara; TLS do :8203 przechodzi PERMISSIVE)
+- target: { kind: Deployment, name: spark-master }
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: spark-master
+    spec:
+      template:
+        metadata:
+          labels:
+            sidecar.istio.io/inject: "false"
+- target: { kind: Deployment, name: spark-worker }
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: spark-worker
+    spec:
+      template:
+        metadata:
+          labels:
+            sidecar.istio.io/inject: "false"
+- target: { kind: CronJob, name: vault-snapshot }
+  patch: |-
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: vault-snapshot
+    spec:
+      jobTemplate:
+        spec:
+          template:
+            metadata:
+              labels:
+                sidecar.istio.io/inject: "false"
+
+images:
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+  newTag: 6093746ec4a15ca3da98588ce20d991d4e07907b
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-consumer
+  newTag: 6093746ec4a15ca3da98588ce20d991d4e07907b
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-frontend
+  newTag: 6093746ec4a15ca3da98588ce20d991d4e07907b
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spark
+  newTag: 6093746ec4a15ca3da98588ce20d991d4e07907b
+- name: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
+  newName: ghcr.io/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02-spring
+  newTag: 6093746ec4a15ca3da98588ce20d991d4e07907b
