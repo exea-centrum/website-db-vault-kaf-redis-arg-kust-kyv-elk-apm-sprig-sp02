@@ -244,6 +244,319 @@ Nie poddałem — mam pełen obraz z repo (na tym środowisku nie ma `kubectl`, 
 - brak AuthorizationPolicy dla grafana/loki/tempo/promtail/spring-app (te są tylko za mTLS + NetworkPolicy);
 - README bywa niezgodny z `docs/ISTIO.md` (jeszcze opisuje stare certy `fastapi-mtls` i checklistę „Kafka listener SSL" – relikt sprzed migracji na Istio);
 - SPIFFE w `istio-security.yaml` sztywno wpisuje ns `davtro02` – staging overlay tego nie nadpisuje.
+# wyjaśnienie
+# Wyjaśnienie: co oznaczają te „luki” w Twoim Istio
+
+To jest **lista rzeczy, których brakuje** w Twoim wdrożeniu Istio — czyli miejsca, gdzie można by jeszcze podnieść bezpieczeństwo, ale **nie są to błędy**. Twoje wdrożenie **działa**, tylko nie wykorzystuje **wszystkich możliwości** Istio.
+
+Rozbiorę każde po kolei, po ludzku.
+
+## 1. Brak `RequestAuthentication` (JWT)
+
+### Co to jest
+
+**`RequestAuthentication`** to obiekt Istio, który mówi: „Ten endpoint wymaga tokenu JWT w nagłówku `Authorization: Bearer ...`, i ten token musi być podpisany przez konkretnego wystawcę (np. Keycloak, Auth0, Google)”.
+
+### Jak jest teraz u Ciebie
+
+Używasz **własnego logowania** w FastAPI (PBKDF2, sesje w Redis). To znaczy:
+
+1. Użytkownik loguje się przez `POST /api/auth/login` → FastAPI weryfikuje hasło → wystawia **własny token** (random string).
+2. Token trafia do Redis (`session:<token>`).
+3. Kolejne requesty niosą `Authorization: Bearer <token>` → FastAPI sprawdza, czy token istnieje w Redis.
+
+**Cała weryfikacja** dzieje się **w kodzie FastAPI**, nie w Istio.
+
+### Co mógłbyś zrobić z `RequestAuthentication`
+
+Istio mogłoby **weryfikować JWT zanim request doleci do FastAPI**. Wtedy:
+
+- FastAPI nie musiałoby w ogóle sprawdzać tokenów.
+- Requesty bez ważnego JWT byłyby odrzucane **na brzegu mesh** (przez Envoy), a nie w kodzie.
+- Mógłbyś podłączyć **zewnętrznego dostawcę tożsamości** (Keycloak, Google, GitHub OAuth).
+
+### Kiedy to ma sens
+
+Tylko wtedy, gdy chcesz **przenieść uwierzytelnianie z aplikacji do infrastruktury**. W Twoim przypadku — nie, bo:
+
+- Masz już działające uwierzytelnianie w FastAPI.
+- Migracja na JWT z Keycloak to **duży projekt** (nowe konto, nowe endpointy, migracja użytkowników).
+- Twoje obecne rozwiązanie (sesje w Redis) **jest bezpieczne** (SPIFFE mTLS chroni transport, PBKDF2 chroni hasła).
+
+**Wniosek:** „luka” tylko w sensie „mógłbyś mieć więcej”, ale **nie jest to problem**.
+
+## 2. `outboundTrafficPolicy: ALLOW_ANY` (brak kontroli egress)
+
+### Co to jest
+
+**Egress** to ruch **wychodzący** z Twoich Podów **do świata zewnętrznego** (np. FastAPI woła `api.github.com`).
+
+Istio ma dwa tryby:
+
+| Tryb | Co robi |
+|---|---|
+| `ALLOW_ANY` | Pody mogą wołać **cokolwiek** (np. `google.com`, `1.1.1.1`) — Istio nie blokuje |
+| `REGISTRY_ONLY` | Pody mogą wołać **tylko usługi zarejestrowane w Istio** (znane w mesh) — reszta zablokowana |
+
+### Jak jest teraz u Ciebie
+
+`ALLOW_ANY` — czyli **każdy Pod może wołać dowolny adres w internecie**. W praktyce:
+
+```bash
+# Możesz zrobić z Poda:
+kubectl exec -n davtro02 deploy/fastapi-web-app -- curl https://google.com
+# Działa
+```
+
+### Co mógłbyś zrobić z `REGISTRY_ONLY`
+
+Zablokować cały ruch wychodzący **poza znane usługi**:
+
+```bash
+# Po zmianie na REGISTRY_ONLY:
+kubectl exec -n davtro02 deploy/fastapi-web-app -- curl https://google.com
+# Nie działa (403)
+
+# Ale to działa:
+kubectl exec -n davtro02 deploy/fastapi-web-app -- curl http://postgres-clusterip:5432
+# OK, bo Postgres jest w mesh
+```
+
+### Zaleta
+
+**Bezpieczeństwo** — jeśli ktoś przejmie kontrolę nad Podem (np. przez exploit), **nie może wysłać danych na zewnątrz** (exfiltracja).
+
+### Wada
+
+**Trzeba zdefiniować każdą zewnętrzną usługę** przez `ServiceEntry`:
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: github-api
+spec:
+  hosts:
+    - api.github.com
+  ports:
+    - number: 443
+      name: https
+      protocol: HTTPS
+  resolution: DNS
+  location: MESH_EXTERNAL
+```
+
+Bez tego **nic nie wyjdzie** — nawet `apt update` w kontenerze nie zadziała.
+
+### Kiedy to ma sens
+
+W **produkcji bankowej** albo gdy masz **wymogi compliance**. W Twoim projekcie — **miło by było**, ale:
+
+- Twoje Pody **nie wołają** zewnętrznych usług (poza GitHub Actions, ale to CI, nie Pod).
+- Włączenie `REGISTRY_ONLY` bez `ServiceEntry` **zepsuje CI/CD** (jeśli używasz egress do GHCR).
+
+**Wniosek:** „luka” tylko w sensie „nie masz twardej polityki egress”. W praktyce **nie jest to problem** — Twoje Pody nie potrzebują internetu.
+
+## 3. Brak `AuthorizationPolicy` dla grafana/loki/tempo/promtail/spring-app
+
+### Co to jest
+
+**`AuthorizationPolicy`** to reguła L7 (na poziomie HTTP): „Kto może wołać **jaki endpoint** na **jakim Podzie**”.
+
+### Jak jest teraz u Ciebie
+
+Masz `AuthorizationPolicy` dla:
+- `frontend` — tylko Ingress Gateway może wejść.
+- `fastapi-web-app` — tylko Ingress Gateway + frontend-sa.
+- `postgres` — tylko fastapi-sa, message-processor-sa, spring-app-sa, pgadmin-sa, vault-bootstrap-sa.
+- `redis` — tylko fastapi-sa, message-processor-sa.
+- `kafka` — tylko fastapi-sa, message-processor-sa, spring-app-sa, kafka-job-sa, itd.
+
+**Ale NIE masz** dla:
+- `grafana`
+- `loki`
+- `tempo`
+- `promtail`
+- `spring-app`
+
+### Co to znaczy w praktyce
+
+**Każdy Pod w mesh** (który ma sidecar) **może wołać** te usługi. To znaczy:
+
+```bash
+# Z dowolnego Poda z sidecarem możesz:
+kubectl exec -n davtro02 deploy/fastapi-web-app -c fastapi -- \
+  curl http://grafana:3000
+
+# I to zadziała, bo nie ma AuthorizationPolicy
+```
+
+**Ale** — i tu ważne — **istnieje PeerAuthentication STRICT** w całym namespace. Więc **i tak** musisz mieć ważny cert SPIFFE. To znaczy:
+
+- ✅ Z **innego Poda w mesh** — możesz wołać Grafanę.
+- ❌ Z **zewnątrz mesh** (np. `curl` z Twojego laptopa) — **NIE możesz** (bo mTLS blokuje).
+
+### Kiedy to jest problem
+
+**Scenariusz ataku:** Jeśli ktoś przejmie kontrolę nad Twoim `frontend` Podem (np. przez exploit w NGINX), **może** z niego wołać Grafanę, Loki, Tempo — czyli **czytać logi, metryki, trace'y**. To potencjalnie wrażliwe dane (choć nie PII).
+
+### Co mógłbyś zrobić
+
+Dodać `AuthorizationPolicy` dla każdej z tych usług:
+
+```yaml
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-only-prometheus-to-grafana
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels:
+      app: grafana
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/davtro02/sa/prometheus-sa"
+      to:
+        - operation:
+            methods: ["GET", "POST"]
+```
+
+I tak dalej dla każdej usługi.
+
+### Kiedy to ma sens
+
+**W produkcji** — tak, **warto dodać**, bo to tania ochrona (5 linii YAML per usługa).
+
+W Twoim projekcie — **nice to have**, ale:
+
+- Twoje Pody **nie są publicznie dostępne** (oprócz Ingress Gateway).
+- Do przejęcia Poda trzeba by **osobnego exploitu**.
+- To **defense in depth** — kolejna warstwa, ale **nie pierwsza**.
+
+**Wniosek:** „luka” realna, ale **niski priorytet**. Można dodać później.
+
+## 4. README niezgodny z `docs/ISTIO.md`
+
+### Co to jest
+
+**README.md** to główna dokumentacja projektu. **`docs/ISTIO.md`** to dokumentacja migracji na Istio.
+
+**Problem:** README **wciąż opisuje starą wersję** (mTLS certy typu `fastapi-mtls`, Kafka z SSL), a `docs/ISTIO.md` opisuje **nową** (Istio mTLS, Kafka bez SSL).
+
+### Dlaczego to problem
+
+Nowy developer, który wejdzie do repo:
+
+1. Czyta **README** — myśli, że Kafka ma SSL na poziomie brokera.
+2. Patrzy w kod — nie widzi `KAFKA_SSL_*`.
+3. **Zamieszanie.**
+
+### Co mógłbyś zrobić
+
+Zaktualizować README:
+
+```bash
+# Znajdź fragmenty do zmiany
+grep -n 'fastapi-mtls\|kafka-server-tls\|KAFKA_SSL\|listener SSL' README.md
+```
+
+I zastąpić je opisem Istio.
+
+**Wniosek:** to **realny problem** — dokumentacja jest nieaktualna. Warto poprawić, bo **wprowadza w błąd**.
+
+## 5. SPIFFE w `istio-security.yaml` sztywno wpisuje ns `davtro02`
+
+### Co to jest
+
+W `istio-authz.yaml` masz:
+
+```yaml
+principals:
+  - "cluster.local/ns/davtro02/sa/fastapi-sa"
+```
+
+**`davtro02`** jest wpisany **na sztywno** — to znaczy, że ta polityka **działa tylko w namespace `davtro02`**.
+
+### Dlaczego to problem
+
+Masz **overlay `staging`** z namespace `davtro02-staging`:
+
+```yaml
+# manifests/overlays/staging/kustomization.yaml
+namespace: davtro02-staging
+```
+
+Ale **polityki bezpieczeństwa nie są nadpisywane** — dalej mówią o `davtro02`, nie `davtro02-staging`.
+
+### Skutek
+
+W środowisku **staging**:
+
+- `AuthorizationPolicy` mówi: „tylko `cluster.local/ns/davtro02/sa/fastapi-sa` może wołać Postgresa”.
+- Ale w staging **nie ma** SA `fastapi-sa` w `davtro02` — jest w `davtro02-staging`.
+- **Wszystkie requesty do Postgresa są blokowane** → aplikacja nie działa.
+
+### Co mógłbyś zrobić
+
+**Opcja A: Kustomize `replacements`** — dynamicznie podstaw namespace:
+
+```yaml
+# manifests/base/kustomization.yaml
+replacements:
+  - source:
+      kind: Namespace
+      name: davtro02
+      fieldPath: metadata.name
+    targets:
+      - select:
+          kind: AuthorizationPolicy
+        fieldPaths:
+          - spec.rules.*.from.*.source.principals.*
+        options:
+          delimiter: "/"
+          index: 2
+```
+
+**Opcja B: Użyj `cluster.local/ns/*/sa/fastapi-sa`** — wildcard (mniej bezpieczne, ale działa w obu):
+
+```yaml
+principals:
+  - "cluster.local/ns/*/sa/fastapi-sa"
+```
+
+**Opcja C: Dwa overlaye** — `staging` z własną wersją `istio-authz.yaml`:
+
+```
+manifests/overlays/staging/istio-authz-patch.yaml
+```
+
+### Kiedy to problem
+
+**Teraz** — jeśli używasz staging. Jeśli nie — **nie jest problemem**.
+
+**Wniosek:** „luka” istotna, jeśli **faktycznie wdrażasz staging**. Warto naprawić.
+
+---
+
+## Podsumowanie — co z tym zrobić?
+
+| Luka | Priorytet | Trudność | Warto? |
+|---|---|---|---|
+| Brak `RequestAuthentication` (JWT) | Niski | Wysoka | Nie — masz własne auth |
+| `outboundTrafficPolicy: ALLOW_ANY` | Niski | Średnia | Nie — Pody nie potrzebują internetu |
+| Brak `AuthorizationPolicy` dla grafana/loki/tempo | **Średni** | **Niska** | **Tak** — 15 min roboty |
+| README niezgodny z docs | **Wysoki** | **Niska** | **Tak** — 30 min roboty |
+| SPIFFE sztywne `davtro02` | **Wysoki** | Średnia | **Tak, jeśli wdrażasz staging** |
+
+**Moja rekomendacja:** Zacznij od **README** (najszybciej) i **SPIFFE** (jeśli używasz staging). `AuthorizationPolicy` dla monitoring — dodaj, gdy masz czas.
+
+**Ale pamiętaj:** to wszystko **nie blokuje działania**. Twój projekt **działa** — te luki to **optymalizacje**, nie błędy.
+
+
 
 ## 2. Mapa TLS/mTLS per usługa
 
@@ -322,3 +635,59 @@ Gotowe — README uzupełniony i zweryfikowany (1442 linie, licznik bloków kodu
 **4. Aktualizacja nieaktualnej sekcji na górze README** („Wdrożenie na MicroK8s przez ArgoCD") — było: `microk8s enable ingress` i jeden plik application.yaml; jest: kolejność operatorów, Istio Gateway zamiast ingress-nginx, obie aplikacje ArgoCD, odsyłacz do nowej sekcji.
 
 Uwaga: sekcja 9.8 i 9.9 niżej w README nadal opisują stare Ingress/nginx i mity z certyfikatami `*-mtls` (relikty sprzed migracji) — zgodnie z analizą to znane rozbieżności; jeśli chcesz, mogę je też zaktualizować do wersji Istio.
+
+Gotowe — poprawiłem oba pozostałe nieaktualne schematy. Weryfikacja: bloki ``` nadal parzyste (86), nigdzie nie została już stara grafika z nginx.
+
+## Co zmieniłem
+
+**Schemat 9.1 (Diagram przepływu Full Stack):**
+- **ArgoCD box**: teraz pokazuje obie aplikacje — `davtro-website` (→ `manifests/overlays/production`, ns `davtro02`) i `davtro-istio-gateway` (→ `manifests/istio-system`, cert Gateway); usunięta stara ścieżka `../../base`
+- **EDGE LAYER**: „Ingress Controller (nginx, microk8s enable ingress)" + „Secrets: davtro-tls, spark-tls" → **Istio Ingress Gateway (ns istio-system)**: Gateway + VirtualService, `:80 → httpsRedirect`, `:443 TLS 1.2+ SIMPLE` z `davtro-gateway-tls` (cert-manager × Vault PKI), IP z MetalLB
+- **trasy**: `/spark -> spark` (stare, przez Ingress) → osobna linia `spark.davtro.local -> spark-master :8082 (poza mesh, plaintext)`; dodane `/kafka-ui`, `/pgadmin`
+- **nowa ramka MESH Istio**: sidecar Envoy, mTLS STRICT, `AuthorizationPolicy: fastapi-allow | ui-from-gateway-only`, NetworkPolicy jako 2. warstwa (L4)
+
+**Schemat 9.7 (Przepływ certyfikatów):**
+- tytuł: `Vault PKI -> Ingress` → `Vault PKI -> Istio Ingress Gateway`
+- `ClusterIssuer vault-issuer`: `server: http://...:8200` → **`https://...:8203` + `caProvider: Secret vault-tls`** (zgodne z `pki-issuer.yaml` po migracji na TLS-only)
+- certyfikaty: `davtro-tls` + `spark-tls` → **`davtro-gateway-tls` (ns istio-system)** + informacja o `vault-tls` (bootstrapowe CA, nie z Vault PKI)
+- konsumpcja: `Ingress spec.tls.secretName` / `Ingress Controller (nginx)` → **`Gateway spec.tls.credentialName` / `Istio Ingress Gateway (:443, SIMPLE, TLS 1.2+)`**
+
+Jedyna pozostała wzmianka o `microk8s enable ingress` jest teraz intencjonalna (w sekcji 9.8 jako „nie trzeba już") i w checkliście jako `microk8s disable ingress`.
+
+Nie ruszałem sekcji 9.11–9.13, bo tam stare certy `davtro-tls`/`*-mtls` opisują historyczny stan „stan aktualny" — jeśli mają być spójne z Istio, też mogę je zaktualizować.
+
+
+Zrobione — README oczyszczony z reliktów sprzed migracji na Istio. Kontrola końcowa: 84 bloki kodu (parzyste → Markdown spójny), zero wystąpień `ingress.yaml`, `Ingress Controller`, `certificates.yaml`, `davtro-tls`, `spark-tls` jako aktywne elementy.
+
+## Podsumowanie wszystkich poprawek w tym kroku
+
+**9.10 (zewnętrzne certyfikaty):**
+- Opcja B: Secret `davtro-tls` (ns davtro02) → `davtro-gateway-tls` (ns istio-system), instrukcja zamiast nieistniejącego `ingress.yaml` → `gateway-certificate.yaml` / `credentialName` w `istio-gateway.yaml`
+
+**9.11 (rotacja):**
+- usunięty zdublowany wiersz „Vault PKI Root CA"
+- `davtro-tls`/`spark-tls` → certyfikat `davtro-gateway-tls` (co 90d, Vault PKI)
+- stare certy `*-mtls` (cert-manager, co 30d) → **certy mTLS mesh w RAM sidecara (SPIFFE, rotacja co 24h)**
+- dodany wiersz: certy serwera Vaulta `vault-tls` (bootstrapowe CA, `rotationPolicy: Never`)
+
+**9.12 (magazyn sekretów):**
+- usunięte 5 nieistniejących sekretów (`davtro-tls`, `spark-tls`, 3× `*-mtls`)
+- dodane: `vault-tls`/`vault-ca` (ns davtro02), `davtro-gateway-tls` (ns istio-system), sekcja „MESH ISTIO (brak Secretów)" — certy w pamięci Envoy
+
+**9.13 (stan aktualny):**
+- certyfikaty: `davtro-gateway-tls` + `vault-tls`/`vault-ca` zamiast `davtro-tls`/`spark-tls`
+- issuery: dodany `vault-issuer-mesh`, doprecyzowane `https :8203 + caProvider`
+- nowa sekcja **MESH ISTIO** (PeerAuthentication, 5 AuthorizationPolicy, Gateway+VirtualServices)
+- ArgoCD: obie aplikacje; pody: adnotacja o sidecarach i `inject=false` dla Sparka
+
+**Pozostałe nieaktualne miejsca naprawione przy okazji:**
+- **duplikat całej sekcji 9.3** (Secrets Layer był wklejony dwukrotnie) — usunięty drugi egzemplarz
+- schemat 9.3 i 9.6: `server: http://...:8200` → `https://...:8203 + caProvider`; certy `davtro-tls`/`spark-tls` → `davtro-gateway-tls` + `vault-tls`
+- schemat 9.4: NetworkPolicy `vault:8200` → `vault:8203`
+- 9.5 (tabela odpowiedzialności): **„Ingress Controller / ingress.yaml" → wiersz „Istio"** (mTLS, Gateway, AuthzPolicy); ArgoCD z obiema aplikacjami; cert-manager z poprawnymi plikami
+- nagłówek Vault: `:8200/:8201` → `:8203 TLS / :8201 Raft`; ASCII-flow `vault-0 :8200` → `:8203`
+- sekcja port-forward: komentarze „Ingress, davtro-tls" → „Istio Gateway"; dopisane, że docelowy dostęp to `https://davtro.local` przez IP MetalLB
+- Roadmapa TLS: `[ ] Kafka listener SSL` → `[x]` z opisem rozwiązania przez Istio mTLS
+- zaktualizowany punkt o rozbieżnościach README ↔ `docs/ISTIO.md` (już nieaktualny)
+
+Świadomie zostawiłem historyczne wzmianki `:8200` w notkach o migracji („listener TLS :8203, bez HTTP :8200") — tam kontekst jest poprawny.
