@@ -36,10 +36,13 @@ uvicorn app.main:app --reload --port 8080
 ```
 
 ## Wdrożenie na MicroK8s przez ArgoCD
-1. Włącz ingress: `microk8s enable ingress`
-2. Utwórz sekrety realne (nie commituj!) lub skonfiguruj Vault + ArgoCD Vault Plugin.
-3. Zastosuj `argocd/application.yaml`: `kubectl apply -f argocd/application.yaml -n argocd`
-4. Push do `main` -> GitHub Actions zbuduje obrazy i zaktualizuje tagi w `manifests/base/kustomization.yaml` -> ArgoCD (auto-sync) wdroży zmiany.
+> **Pełna, aktualna instrukcja (schematy + kolejność instalacji):** sekcja na końcu README
+> „# Schematy i auto-wdrożenie przez ArgoCD" oraz `docs/ISTIO.md`.
+
+1. Zainstaluj komponenty zewnątrzne w tej kolejności: cert-manager, External Secrets Operator, Kyverno (CRD przed synciem), potem Istio (`istioctl install -f istio/istio-operator.yaml`) i ArgoCD.
+2. Sekret repo GitHub dla ArgoCD (`davtro-github-repo`, patrz „Dostep ArgoCD do prywatnego repozytorium" niżej) + secret `GHCR_PAT_02` w GitHub Actions + pakiety GHCR na PUBLIC.
+3. Zastosuj aplikacje: `kubectl apply -f argocd/application.yaml` i `kubectl apply -f argocd/application-istio.yaml`.
+4. Push do `main` -> GitHub Actions buduje 5 obrazów i wysyła je do GHCR -> aktualizuje tagi w `manifests/base/kustomization.yaml` -> ArgoCD (auto-sync) wdroży zmiany. Wejście: **Istio Ingress Gateway** (nie ingress-nginx).
 
 ## WAŻNE – rzeczy do dopracowania przed produkcją
 - ~~sekrety w repo~~ ZROBIONE: Vault (raft na PVC) + ESO generują `davtro-secrets`; Job `vault-bootstrap` automatyzuje init/unseal/KV/auth/database po każdym syncu.
@@ -1151,4 +1154,289 @@ uwierzytelnianie zapewnia mesh: sidecary Envoy ustanawiają mTLS (TLS 1.3, tożs
 rozmawiać z brokerem, określa `AuthorizationPolicy/kafka-allow`. Listener SSL `:9094`, keystore/truststore,
 initContainery `openssl`/`keytool` i certyfikat `kafka-server-tls` zostały usunięte. Szczegóły: `docs/ISTIO.md`.
 
+
+# Istio – stopień wdrożenia, szyfrowanie (TLS/mTLS) i wykorzystanie Vaulta
+
+> Analiza na podstawie manifestów w repo (w tym środowisku nie było `kubectl`, więc nie dotyczy żywego klastra).
+> Instalacja mesh krok po kroku: `docs/ISTIO.md`. Schematy i checklista instalacji: sekcje niżej.
+
+## 1. Stopień wdrożenia Istio — stan: **zaawansowany (kompletne manifesty + GitOps), ale wariant domylny to własne CA Istio**
+
+**Co jest przygotowane:**
+
+| Element | Plik | Status |
+|---|---|---|
+| Instalacja Istio (Wariant A – CA istiod) | `istio/istio-operator.yaml` | gotowy, `istioctl install -f` (ręczny krok) |
+| Wariant B – Vault PKI jako CA mesh | `istio/istio-operator-vault-ca.yaml` + `istio/istio-csr-values.yaml` (cert-manager-istio-csr) | gotowy, ale **opcjony** – wymagaVaulta działającego przed mesh (opisany w `docs/ISTIO.md`) |
+| Namespace z iniekcją | `manifests/base/namespace.yaml` → `istio-injection: enabled` | tak (overlay zmienia ns na `davtro02`) |
+| Gateway + routing (zastąpił ingress-nginx) | `manifests/base/istio-gateway.yaml` – `Gateway` + 2 `VirtualService` | tak |
+| Bezpieczeństwo mesh | `manifests/base/istio-security.yaml` | 2× PeerAuthentication, 1× DestinationRule, 5× AuthorizationPolicy |
+| Patche sidecarów | `manifests/base/kustomization.yaml` | `holdApplicationUntilProxyStarts` dla fastapi, message-processor, spring, vault-bootstrap, vault, kafka-topic-job |
+| Cert dla Gateway | `manifests/istio-system/gateway-certificate.yaml` + `argocd/application-istio.yaml` | tak, ArgoCD auto-sync |
+| Dokumentacja | `docs/ISTIO.md` | bardzo szczegółowa (pułapki, kolejność, weryfikacja) |
+
+**Czego NIE ma (luki):**
+- brak `RequestAuthentication` (JWT/authn na gwiazdzie) – tylko tożsamości SPIFFE;
+- `outboundTrafficPolicy: ALLOW_ANY` (nie REGISTRY_ONLY) – brak kontroli egress, brak `Sidecar`/`ServiceEntry`;
+- brak AuthorizationPolicy dla grafana/loki/tempo/promtail/spring-app (te są tylko za mTLS + NetworkPolicy);
+- README bywa niezgodny z `docs/ISTIO.md` (jeszcze opisuje stare certy `fastapi-mtls` i checklistę „Kafka listener SSL" – relikt sprzed migracji na Istio);
+- SPIFFE w `istio-security.yaml` sztywno wpisuje ns `davtro02` – staging overlay tego nie nadpisuje.
+
+## 2. Mapa TLS/mTLS per usługa
+
+**Wewnątrz klastra (między podami):**
+
+| Usługa | W mesh? | Szyfrowanie wewnątrz |
+|---|---|---|
+| **fastapi (api)** | ✅ sidecar | **mTLS STRICT** (Envoy, SPIFFE); app → PLAINTEXT |
+| **frontend** | ✅ | **mTLS STRICT** |
+| **spring** | ✅ | **mTLS STRICT** |
+| **message-processor** | ✅ | **mTLS STRICT** |
+| **postgresql** | ✅ | **mTLS STRICT** + `AuthorizationPolicy/postgres-allow` (SA `davtro-sa`, `default`); Postgres bez własnego SSL |
+| **redis** | ✅ | **mTLS STRICT** + `AuthorizationPolicy/redis-allow` (tylko `davtro-sa`); brak własnego TLS Redis |
+| **kafka** | ✅ | **mTLS STRICT** – broker celowo `PLAINTEXT://:9092`, szyfruje Envoy (usunięto listener SSL 9094) + `kafka-allow` |
+| **vault** | ⚠️ częściowo | port **8203 API = własne TLS** (cert-manager, bootstrap CA `vault-tls`), **bez sidecara** (`excludeInboundPorts: 8203`, `PeerAuthentication/vault` → portLevelMtls PERMISSIVE, `DestinationRule/vault-own-tls` = DISABLE). Port **8201 raft = mTLS STRICT** mesh |
+| **pgadmin, kafka-ui, grafana** | ✅ | **mTLS STRICT** + polityka `ui-from-gateway-only` (tylko z ingress gateway) |
+| **loki, tempo, prometheus, promtail, eksportery** | ✅ (poza `node-exporter`) | **mTLS STRICT** (auto-mTLS), własne TLS nieszyfrowane w manifestach |
+| **spark (master/worker)** | ❌ `sidecar.istio.io/inject: "false"` | **brak TLS/plaintext** – losowe porty RPC |
+| **vault-snapshot CronJob** | ❌ inject=false | **własny TLS** do :8203 (PERMISSIVE) |
+| **ESO, cert-manager** (poza ns) | ❌ | **własny TLS** HTTPS :8203 do Vaulta |
+| **node-exporter** (hostNetwork) | ❌ | plaintext (auto-mTLS obniża do TLS bez mTLS) |
+
+**Z zewnątrz (north-south):**
+- **Jedyne wejście: Istio Ingress Gateway** – port 80 → `httpsRedirect: true`, port 443 **TLS SIMPLE (bez mTLS)**, `minProtocolVersion: TLSV1_2`, certyfikat `davtro-gateway-tls` (cert-manager podpisany przez **Vault PKI**). Certyfikat wystawia serwis w ns `istio-system`, nie `davtro02`.
+- Gateway → backend: ruch wewnątrz przechodzi mTLS mesh (gateway jest w mesh), dodatkowo warstwa NetworkPolicy (`allow-istio-gateway-to-ui`, `allow-ingress-controller-to-*`).
+- Podsumowując: **zewnętrznie = TLS (serwer), wewnętrznie = mTLS**; client-side mTLS na zewnątrz nie występuje (nikt nie ma cliente certs do Gateway).
+
+## 3. Kto korzysta z Vaulta
+
+| Konsument | Co pobiera | Ścieżka |
+|---|---|---|
+| **External Secrets Operator** (`secret-store.yaml`) | KV `davtro/*` → Secret `davtro-secrets` (DB_USER/DB_PASSWORD, `davtro/auth/ADMIN_PASSWORD`) | HTTPS :8203, Kubernetes auth |
+| **ESO dynamic** (`external-secrets-db-dynamic.yaml`) | `VaultDynamicSecret` – `database/creds/davtro-app-rw` (rotowane credsy PG) | HTTPS :8203 |
+| **fastapi** | Transit PII (`transit/encrypt|decrypt/davtro-app`, k8s auth rola `davtro-transit`) + dynamiczne credsy DB z plików ESO + hasło admina | `transit_client.py`, CA `/etc/vault-tls/ca.crt` |
+| **message-processor** | Transit (szyfrowanie wiadomości/PII), credsy DB (`message-processor-db-creds`) | env `VAULT_TRANSIT_*` |
+| **spring-app** | Transit (KROK 6), `envFrom: davtro-secrets` | env `VAULT_TRANSIT_*` |
+| **cert-manager** (`pki-issuer.yaml`) | `vault-issuer` (certy Gateway), `vault-issuer-internal` (certy serwisów), `vault-issuer-mesh` (Wariant B) | HTTPS :8203, token auth |
+| **Prometheus** | scrap metryk `vault:8203` + alerty (`DavtroVaultTransitStale` itd.) | TLS z `vault-tls/ca.crt` |
+| **vault-bootstrap** | konfiguruje silniki: KV, Transit, database, PKI, roles/policies Kubernetes auth | Job w mesh |
+| **vault-snapshot** CronJob | snapshot storage | HTTPS :8203 (bez sidecara) |
+| **Vault → PostgreSQL** | database engine, `sslmode=disable` (szyfruje sidecar Vaulta, Postgres w STRICT to akceptuje) | przez mesh |
+| **transit-helpers** (ConfigMap) | skrypty `transit_encrypt/decrypt/datakey` | HTTPS :8203 |
+| ❌ **Nie używają Vaulta** | grafana, loki, tempo, promtail, spark, frontend (dostaje dane przez API), pgadmin, kafka-ui | – |
+
+## Podsumowanie stopnia wdrożenia
+- **Definicje: ~90%** – pełen mesh mTLS STRICT, Gateway zamiast ingress, polityki L7 dla kluczowych serwisów, GitOps (ArgoCD), dokumentacja.
+- **Świadome wyłączenia:** Spark (poza mesh), Vault :8203 (własny TLS), vault-snapshot/ESO/cert-manager (poza mesh, własne TLS) – to **celowe i udokumentowane**, nie braki.
+- **Realne luki:** brak JWT (`RequestAuthentication`), brak kontroli egress (ALLOW_ANY), brak authz dla obserwowalności (grafana/loki/tempo), nieaktualne fragmenty README, wariant B (Vault jako CA mesh) tylko przygotowany.
+
+---
+
+# Schematy i auto-wdrożenie przez ArgoCD (obrazy z GitHub / GHCR)
+
+## Schemat 1 – Pipeline auto-wdrożenia (GitOps)
+
+```
+ Developer                GitHub (main)              GitHub Container Registry
+    │                          │                              ▲
+    │ git push                 │                              │ push 5 obrazów
+    ▼                          ▼                              │ (:latest + :<sha>)
+ ┌──────────────────────────────────────────────┐   ┌─────────┴──────────┐
+ │ .github/workflows/ci-cd.yaml                 │──►│ ghcr.io/<owner>/   │
+ │  1. build: api, consumer, frontend,          │   │  ...-sp02          │
+ │     spring, spring->mvn, spark->sbt          │   │  ...-sp02-frontend │
+ │  2. kustomize edit set image                 │   │  ...-sp02-consumer │
+ │     -> tagi SHA w manifests/base/kustomization│  │  ...-sp02-spring   │
+ │  3. git commit + push (github-actions[bot])  │   │  ...-sp02-spark    │
+ └──────────────────────────────────────────────┘   └────────────────────┘
+    │                          │
+    │ webhook / poll (3 min)   │
+    ▼                          ▼
+ ┌───────────────────────────────────────────────────────────────────────┐
+ │ ARGOCD (ns argocd) – 2 Application (auto-sync, prune, selfHeal)       │
+ │                                                                       │
+ │  davtro-website            -> manifests/overlays/production  (ns      │
+ │                               davtro02: aplikacje + mesh polityki)    │
+ │  davtro-istio-gateway      -> manifests/istio-system        (ns       │
+ │                               istio-system: cert dla Gateway)         │
+ │  źródło: repo GitHub (sekret davtro-github-repo, PAT Contents:Read)   │
+ └───────────────────────────────┬───────────────────────────────────────┘
+                                 │ kustomize build -> apply
+                                 ▼
+ ┌───────────────────────────────────────────────────────────────────────┐
+ │ MICROK8S + ISTIO (ns davtro02, istio-injection: enabled)              │
+ │  pody pobierają obrazy z GHCR (pull razem z nowym tagiem SHA)         │
+ │  -> rolling update, bez kroków ręcznych                               │
+ └───────────────────────────────────────────────────────────────────────┘
+
+ UWAGA: jeśli pakiet GHCR jest PRIVATE – trzeba w ns utworzyć imagePullSecret
+ i powiązać z ServiceAccount; w tym repo pakiety mają być PUBLIC
+ (w UI GitHuba: Package settings -> Change visibility -> PUBLIC,
+ bo REST API tego nie zmienia).
+```
+
+## Schemat 2 – Szyfrowanie: z zewnątrz (TLS) i wewnątrz (mTLS)
+
+```
+  ZEWNĄTRZ (Internet/LAN)                 ns davtro02 (mesh Istio)
+ ───────────────────────                 ─────────────────────────────
+ klient                                   sidecar Envoy każdego poda
+   │  :80  -> httpsRedirect                 │
+   │  :443 TLS 1.2+ (SIMPLE,               │  mTLS STRICT (PeerAuthentication/default)
+   │  cert davtro-gateway-tls,              │  tożsamość SPIFFE = cluster.local/ns/.../sa/...
+   │  cert-manager x Vault PKI)             ▼
+   ▼                              ┌────────────────────────────┐
+ ┌──────────────────────────┐     │  fastapi  frontend  spring │
+ │ Istio Ingress Gateway    │     │  message-processor  vault  │
+ │ (istio-system)           │────►│  postgres redis kafka      │
+ │ terminacja TLS,          │ :80 │  grafana pgadmin kafka-ui  │
+ │ Gateway+VirtualService   │     │  loki tempo prometheus     │
+ └──────────────────────────┘     └────────────────────────────┘
+                                        │
+   Wyjątki (poza mesh / bez mTLS):      │
+   • Vault :8203  – własny TLS (cert vault-tls), port wyłączony
+     z sidecara, DestinationRule/vault-own-tls = DISABLE, port 8203 PERMISSIVE
+   • Spark (inject=false)               – plaintext, UI przez Gateway
+   • vault-snapshot CronJob (inject=false) – własne HTTPS do :8203
+   • ESO / cert-manager (inny namespace) – własne HTTPS do :8203
+   • node-exporter (hostNetwork)         – plaintext (auto-mTLS)
+
+ AuthorizationPolicy (kto z kim może rozmawiać, L7/SPIFFE):
+   postgres-allow | kafka-allow | redis-allow | fastapi-allow | ui-from-gateway-only
+```
+
+## Schemat 3 – Kto korzysta z Vaulta
+
+```
+                        ┌──────────────────────────────┐
+                        │  VAULT (ns davtro02, :8203   │
+                        │  TLS własny CA vault-ca)     │
+                        │  silniki: KV, Transit,       │
+                        │  database, PKI, kubernetes auth│
+                        └──────────────┬───────────────┘
+   ┌────────────────┬──────────────────┼───────────────────┬──────────────┐
+   ▼                ▼                  ▼                   ▼              ▼
+ External Secrets  cert-manager     aplikacje           Prometheus    vault-snapshot
+ Operator (ESO)    (pki-issuer)     (k8s auth)          (scrap        (CronJob 03:00,
+ • KV davtro/*     • vault-issuer   • fastapi:          :8203,         snapshot raft)
+   -> davtro-secrets   (Gateway)      Transit PII        alerty)       vault-bootstrap
+ • VaultDynamic-   • vault-issuer-  • message-processor: (self-heal co
+   Secret            internal         Transit            60 s: init/
+   database/creds  • vault-issuer-  • spring-app:          unseal/
+   davtro-app-rw     mesh (Wariant B) Transit            konfiguracja)
+   -> credsy DB       istio-csr
+```
+
+## Co trzeba zainstalować, żeby działało auto-wdrożenie (ArgoCD + obrazy z GitHub)
+
+Kolejność ma znaczenie: najpierw operatorzy i CRD, potem mesh, na końcu ArgoCD z aplikacjami.
+Wszystko poza krokami 1–2 i 9 jest zarządzane przez GitOps (nie wymaga ręcznych zmian w klastrze).
+
+### Krok 0 – wymagania w repo GitHub / GHCR
+
+| Co | Gdzie | Po co |
+|---|---|---|
+| Repo `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02` | GitHub | źródło manifestów dla ArgoCD |
+| Secret `GHCR_PAT_02` | GitHub → Settings → Secrets and variables → Actions | login do pushu obrazów do GHCR (`packages: write`) |
+| Sekret `contents: write` w workflow | już w `ci-cd.yaml` (`permissions:`) | bot może zrobić commit z nowymi tagami |
+| Pakiety GHCR ustawione na **PUBLIC** | GitHub → Package settings → Change visibility (tylko UI, REST API nie działa) | klaster pobiera obrazy bez `imagePullSecret` |
+| Dostęp ArgoCD do prywatnego repo | Secret `davtro-github-repo` w ns `argocd` (PAT `Contents: Read`) – patrz sekcja „Dostep ArgoCD" wyżej | ArgoCD pobiera manifesty |
+
+### Krok 1 – klastr i komponenty bazowe (ręczne, jednorazowo)
+
+```bash
+# MicroK8s + Metallb (LoadBalancer dla Istio Ingress Gateway)
+snap install microk8s --classic
+microk8s enable dns storage metallb
+# adresy IP z puli MetalLB -> kubectl edit config -n metallb-system ...
+
+# CLI na stacji roboczej
+microk8s kubectl label node --overwrite node-role.kubernetes.io/control-plane-  # jeśli potrzebne
+curl -L https://istio.io/downloadIstio | sh -   # daje istioctl
+sudo mv istio-*/bin/istioctl /usr/local/bin/
+```
+
+### Krok 2 – operatorzy z CRD (muszą być PRZED synciem ArgoCD)
+
+```bash
+# helm repo add jetstack https://charts.jetstack.io && helm repo update
+helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace \
+  --set crds.enabled=true
+
+# helm repo add external-secrets https://charts.external-secrets.io && helm repo update
+helm install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace
+
+# helm repo add kyverno https://kyverno.github.io/kyverno/ && helm repo update
+helm install kyverno kyverno/kyverno -n kyverno --create-namespace
+```
+
+Bez tych CRD (`Certificate`, `ClusterIssuer`, `ExternalSecret`, `SecretStore`,
+`VaultDynamicSecret`, `ClusterPolicy`) ArgoCD wpada w `SyncError` i blokuje cały sync
+(tzw. GitOps deadlock – opisany w sekcji o `caProvider`).
+
+### Krok 3 – Istio (mesh + Gateway)
+
+```bash
+# Wariant A (domyślny, własne CA istiod) – certy workloadów rotowane co 24h w RAM sidecara
+istioctl install -f istio/istio-operator.yaml -y
+
+# certyfikat dla Ingress Gateway (ns istio-system)
+kubectl apply -k manifests/istio-system
+
+# namespace docelowy dostaje sidecary przy restarcie podów:
+kubectl -n davtro02 rollout restart deploy,sts   # po pierwszym syncu
+```
+
+Wariant B (Vault PKI jako CA mesh) – dopiero po działającym Vaultie, patrz `docs/ISTIO.md`.
+
+### Krok 4 – ArgoCD
+
+```bash
+helm repo add argo https://argoproj.github.io/argo-helm && helm repo update
+helm install argo-cd argo/argo-cd -n argocd --create-namespace
+
+# dostęp ArgoCD do repo GitHub (sekret davtro-github-repo) - patrz sekcja wyżej
+```
+
+### Krok 5 – aplikacje GitOps (ostatni krok, potem wszystko automatyczne)
+
+```bash
+kubectl apply -f argocd/application.yaml        # davtro-website    -> manifests/overlays/production (ns davtro02)
+kubectl apply -f argocd/application-istio.yaml  # davtro-istio-gateway -> manifests/istio-system
+```
+
+Od tego momentu pętla jest w pełni automatyczna:
+
+```
+push do main -> GH Actions buduje 5 obrazow -> GHCR
+             -> GH Actions aktualizuje tagi w kustomization.yaml (commit bota)
+             -> ArgoCD (poll 3 min / webhook) -> kustomize build -> apply
+             -> rolling update podow z nowymi obrazami z GHCR
+```
+
+### Krok 6 – weryfikacja
+
+```bash
+kubectl -n argocd get applications              # obie: Synced / Healthy
+kubectl -n davtro02 get pods -w                 # wszystkie Running/Completed
+kubectl -n davtro02 get peerauthentication,policy,destinationrule   # mesh polityki
+istioctl proxy-status                           # pody w mesh
+istioctl authn tls-check -n davtro02            # mTLS miedzy serwisami
+kubectl -n davtro02 get externalsecret          # 3x SYNCED=True (Vault/ESO)
+curl -k https://davtro.local/                   # -> przekierowanie 80 -> 443 (Gateway)
+```
+
+### Checklista w jednym miejscu
+
+- [ ] Repo GitHub + secret `GHCR_PAT_02` (Actions) + pakiety GHCR = PUBLIC
+- [ ] MicroK8s + Metallb (LoadBalancer dla gateway)
+- [ ] cert-manager (CRD)
+- [ ] External Secrets Operator (CRD)
+- [ ] Kyverno (CRD)
+- [ ] `istioctl install -f istio/istio-operator.yaml` + `kubectl apply -k manifests/istio-system`
+- [ ] ArgoCD + sekret repo `davtro-github-repo`
+- [ ] `kubectl apply -f argocd/application.yaml` i `argocd/application-istio.yaml`
+- [ ] restart podów w `davtro02` (nadanie sidecara) – nazewnictwo SPIFFE = `davtro02`
+- [ ] DNS / `hosts`: `davtro.local`, `spark.davtro.local` -> IP MetalLB
+- [ ] (opcjonalnie) `microk8s disable ingress` – ingress-nginx zastąpiony przez Istio Gateway
 

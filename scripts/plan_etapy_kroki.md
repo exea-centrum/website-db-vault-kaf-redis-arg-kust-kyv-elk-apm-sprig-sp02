@@ -220,3 +220,105 @@ Chcesz, żebym zaczął realizować? Mogę iść w dwóch wariantach — wybierz
 
 - **A) „naprawy P0 najpierw”**: pull + restart Vaulta + weryfikacja metryk + fix `port-forward.sh` + fix namespace Kyverno.
 - **B) „od razu Istio”**: dodać `istio-gateway.yaml` + `istio-virtualservices.yaml` + label namespace + NP dla `istio-system` i przeprowadzić kontrolowaną migrację wejścia (Traefik zostaje jako droga powrotu).
+
+Nie poddałem — mam pełen obraz z repo (na tym środowisku nie ma `kubectl`, więc weryfikacja dotyczy manifestów, nie żywego klastra). Poniżej wynik analizy.
+
+## 1. Stopień wdrożenia Istio — stan: **zaawansowany (kompletne manifesty + GitOps), ale wariant domylny to własne CA Istio**
+
+**Co jest przygotowane:**
+
+| Element | Plik | Status |
+|---|---|---|
+| Instalacja Istio (Wariant A – CA istiod) | `/home/david/github/.../istio/istio-operator.yaml` | gotowy, `istioctl install -f` (ręczny krok) |
+| Wariant B – Vault PKI jako CA mesh | `istio/istio-operator-vault-ca.yaml` + `istio/istio-csr-values.yaml` (cert-manager-istio-csr) | gotowy, ale **opcjony** – wymagaVaulta działającego przed mesh (opisany w `docs/ISTIO.md`) |
+| Namespace z iniekcją | `manifests/base/namespace.yaml` → `istio-injection: enabled` | tak (overlay zmienia ns na `davtro02`) |
+| Gateway + routing (zastąpił ingress-nginx) | `manifests/base/istio-gateway.yaml` – `Gateway` + 2 `VirtualService` | tak |
+| Bezpieczeństwo mesh | `manifests/base/istio-security.yaml` | 2× PeerAuthentication, 1× DestinationRule, 5× AuthorizationPolicy |
+| Patche sidecarów | `manifests/base/kustomization.yaml` | `holdApplicationUntilProxyStarts` dla fastapi, message-processor, spring, vault-bootstrap, vault, kafka-topic-job |
+| Cert dla Gateway | `manifests/istio-system/gateway-certificate.yaml` + `argocd/application-istio.yaml` | tak, ArgoCD auto-sync |
+| Dokumentacja | `docs/ISTIO.md` | bardzo szczegółowa (pułapki, kolejność, weryfikacja) |
+
+**Czego NIE ma (luki):**
+- brak `RequestAuthentication` (JWT/authn na gwiazdzie) – tylko tożsamości SPIFFE;
+- `outboundTrafficPolicy: ALLOW_ANY` (nie REGISTRY_ONLY) – brak kontroli egress, brak `Sidecar`/`ServiceEntry`;
+- brak AuthorizationPolicy dla grafana/loki/tempo/promtail/spring-app (te są tylko za mTLS + NetworkPolicy);
+- README bywa niezgodny z `docs/ISTIO.md` (jeszcze opisuje stare certy `fastapi-mtls` i checklistę „Kafka listener SSL" – relikt sprzed migracji na Istio);
+- SPIFFE w `istio-security.yaml` sztywno wpisuje ns `davtro02` – staging overlay tego nie nadpisuje.
+
+## 2. Mapa TLS/mTLS per usługa
+
+**Wewnątrz klastra (między podami):**
+
+| Usługa | W mesh? | Szyfrowanie wewnątrz |
+|---|---|---|
+| **fastapi (api)** | ✅ sidecar | **mTLS STRICT** (Envoy, SPIFFE); app → PLAINTEXT |
+| **frontend** | ✅ | **mTLS STRICT** |
+| **spring** | ✅ | **mTLS STRICT** |
+| **message-processor** | ✅ | **mTLS STRICT** |
+| **postgresql** | ✅ | **mTLS STRICT** + `AuthorizationPolicy/postgres-allow` (SA `davtro-sa`, `default`); Postgres bez własnego SSL |
+| **redis** | ✅ | **mTLS STRICT** + `AuthorizationPolicy/redis-allow` (tylko `davtro-sa`); brak własnego TLS Redis |
+| **kafka** | ✅ | **mTLS STRICT** – broker celowo `PLAINTEXT://:9092`, szyfruje Envoy (usunięto listener SSL 9094) + `kafka-allow` |
+| **vault** | ⚠️ częściowo | port **8203 API = własne TLS** (cert-manager, bootstrap CA `vault-tls`), **bez sidecara** (`excludeInboundPorts: 8203`, `PeerAuthentication/vault` → portLevelMtls PERMISSIVE, `DestinationRule/vault-own-tls` = DISABLE). Port **8201 raft = mTLS STRICT** mesh |
+| **pgadmin, kafka-ui, grafana** | ✅ | **mTLS STRICT** + polityka `ui-from-gateway-only` (tylko z ingress gateway) |
+| **loki, tempo, prometheus, promtail, eksportery** | ✅ (poza `node-exporter`) | **mTLS STRICT** (auto-mTLS), własne TLS nieszyfrowane w manifestach |
+| **spark (master/worker)** | ❌ `sidecar.istio.io/inject: "false"` | **brak TLS/plaintext** – losowe porty RPC |
+| **vault-snapshot CronJob** | ❌ inject=false | **własny TLS** do :8203 (PERMISSIVE) |
+| **ESO, cert-manager** (poza ns) | ❌ | **własny TLS** HTTPS :8203 do Vaulta |
+| **node-exporter** (hostNetwork) | ❌ | plaintext (auto-mTLS obniża do TLS bez mTLS) |
+
+**Z zewnątrz (north-south):**
+- **Jedyne wejście: Istio Ingress Gateway** – port 80 → `httpsRedirect: true`, port 443 **TLS SIMPLE (bez mTLS)**, `minProtocolVersion: TLSV1_2`, certyfikat `davtro-gateway-tls` (cert-manager podpisany przez **Vault PKI**). Certyfikat wystawia serwis w ns `istio-system`, nie `davtro02`.
+- Gateway → backend: ruch wewnątrz przechodzi mTLS mesh (gateway jest w mesh), dodatkowo warstwa NetworkPolicy (`allow-istio-gateway-to-ui`, `allow-ingress-controller-to-*`).
+- Podsumowując: **zewnętrznie = TLS (serwer), wewnętrznie = mTLS**; client-side mTLS na zewnątrz nie występuje (nikt nie ma cliente certs do Gateway).
+
+## 3. Kto korzysta z Vaulta
+
+| Konsument | Co pobiera | Ścieżka |
+|---|---|---|
+| **External Secrets Operator** (`secret-store.yaml`) | KV `davtro/*` → Secret `davtro-secrets` (DB_USER/DB_PASSWORD, `davtro/auth/ADMIN_PASSWORD`) | HTTPS :8203, Kubernetes auth |
+| **ESO dynamic** (`external-secrets-db-dynamic.yaml`) | `VaultDynamicSecret` – `database/creds/davtro-app-rw` (rotowane credsy PG) | HTTPS :8203 |
+| **fastapi** | Transit PII (`transit/encrypt|decrypt/davtro-app`, k8s auth rola `davtro-transit`) + dynamiczne credsy DB z plików ESO + hasło admina | `transit_client.py`, CA `/etc/vault-tls/ca.crt` |
+| **message-processor** | Transit (szyfrowanie wiadomości/PII), credsy DB (`message-processor-db-creds`) | env `VAULT_TRANSIT_*` |
+| **spring-app** | Transit (KROK 6), `envFrom: davtro-secrets` | env `VAULT_TRANSIT_*` |
+| **cert-manager** (`pki-issuer.yaml`) | `vault-issuer` (certy Gateway), `vault-issuer-internal` (certy serwisów), `vault-issuer-mesh` (Wariant B) | HTTPS :8203, token auth |
+| **Prometheus** | scrap metryk `vault:8203` + alerty (`DavtroVaultTransitStale` itd.) | TLS z `vault-tls/ca.crt` |
+| **vault-bootstrap** | konfiguruje silniki: KV, Transit, database, PKI, roles/policies Kubernetes auth | Job w mesh |
+| **vault-snapshot** CronJob | snapshot storage | HTTPS :8203 (bez sidecara) |
+| **Vault → PostgreSQL** | database engine, `sslmode=disable` (szyfruje sidecar Vaulta, Postgres w STRICT to akceptuje) | przez mesh |
+| **transit-helpers** (ConfigMap) | skrypty `transit_encrypt/decrypt/datakey` | HTTPS :8203 |
+| ❌ **Nie używają Vaulta** | grafana, loki, tempo, promtail, spark, frontend (dostaje dane przez API), pgadmin, kafka-ui | – |
+
+## Podsumowanie stopnia wdrożenia
+- **Definicje: ~90%** – pełen mesh mTLS STRICT, Gateway zamiast ingress, polityki L7 dla kluczowych serwisów, GitOps (ArgoCD), dokumentacja.
+- **Świadome wyłączenia:** Spark (poza mesh), Vault :8203 (własny TLS), vault-snapshot/ESO/cert-manager (poza mesh, własne TLS) – to **celowe i udokumentowane**, nie braki.
+- **Realne luki:** brak JWT (`RequestAuthentication`), brak kontroli egress (ALLOW_ANY), brak authz dla obserwowalności (grafana/loki/tempo), nieaktualne fragmenty README, wariant B (Vault jako CA mesh) tylko przygotowany.
+- **Weryfikacja na żywo niemożliwa** – w tym środowisku brak `kubectl`; polecam zgodnie z `docs/ISTIO.md`: `istioctl proxy-status`, `istioctl authn tls-check`, `kubectl get peerauthentication -n davtro02`.
+
+
+#
+Gotowe — README uzupełniony i zweryfikowany (1442 linie, licznik bloków kodu parzysty → Markdown spójny, brak śladów wklejonej rozmowy).
+
+## Co zostało zmienione w `/home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02/README.md`
+
+**1. Uporządkowanie sekcji o Istio (była wklejona „na surowo")**
+- nagłówek `# ` + tekst rozmowy zastąpiony proper tytułem: **„# Istio – stopień wdrożenia, szyfrowanie (TLS/mTLS) i wykorzystanie Vaulta"** z odsyłaczem do `docs/ISTIO.md`
+- poprawiony ścieżkę pliku operatora Istio (z `/home/david/github/...` na relatywną `istio/istio-operator.yaml`)
+- usunięty zdublowany ostatni punkt „Weryfikacja na żywo niemożliwa…"
+
+**2. Trzy schematy ASCII (nowa sekcja „# Schematy i auto-wdrożenie przez ArgoCD")**
+- **Schemat 1 – Pipeline GitOps**: push → GitHub Actions (build 5 obrazów, `kustomize edit set image`, commit bota) → GHCR (`:latest` + `:sha`) → ArgoCD (2 aplikacje: `davtro-website` → `manifests/overlays/production`, `davtro-istio-gateway` → `manifests/istio-system`) → MicroK8s + Istio → rolling update z pull z GHCR; z uwagą o PUBLIC/private pakietach GHCR (`imagePullSecret`)
+- **Schemat 2 – TLS zewnętrzny vs mTLS wewnętrzne**: 80→443 redirect, terminacja TLS na Gateway (cert z Vault PKI), mTLS STRICT w mesh, wyjątki (Vault :8203 własny TLS, Spark, vault-snapshot, ESO/cert-manager, node-exporter) + lista AuthorizationPolicy
+- **Schemat 3 – konsumenci Vaulta**: ESO, cert-manager (3 issuery), fastapi/spring/message-processor (Transit), Prometheus, vault-bootstrap, vault-snapshot
+
+**3. Checklista „Co trzeba zainstalować, żeby działało auto-wdrożenie"** — kroki 0–6 z komendami:
+- **Krok 0**: sekret `GHCR_PAT_02` w Actions, pakiety GHCR na PUBLIC (tylko UI), sekret `davtro-github-repo` dla ArgoCD
+- **Krok 1**: MicroK8s + MetalLB (LoadBalancer dla gateway) + `istioctl`
+- **Krok 2**: cert-manager, ESO, Kyverno — z ostrzeżeniem, że CRD **muszą** być przed synciem (inaczej GitOps deadlock)
+- **Krok 3**: `istioctl install -f istio/istio-operator.yaml` + `kubectl apply -k manifests/istio-system` + restart podów
+- **Krok 4–5**: ArgoCD + obie aplikacje GitOps
+- **Krok 6**: komendy weryfikacji (`istioctl proxy-status`, `authn tls-check`, `get externalsecret`, curl)
+- gotowa **checklista checkboxów** na końcu
+
+**4. Aktualizacja nieaktualnej sekcji na górze README** („Wdrożenie na MicroK8s przez ArgoCD") — było: `microk8s enable ingress` i jeden plik application.yaml; jest: kolejność operatorów, Istio Gateway zamiast ingress-nginx, obie aplikacje ArgoCD, odsyłacz do nowej sekcji.
+
+Uwaga: sekcja 9.8 i 9.9 niżej w README nadal opisują stare Ingress/nginx i mity z certyfikatami `*-mtls` (relikty sprzed migracji) — zgodnie z analizą to znane rozbieżności; jeśli chcesz, mogę je też zaktualizować do wersji Istio.
