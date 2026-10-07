@@ -60,31 +60,47 @@ start() {
 }
 
 # ---------------------------------------------------------
-# HTTPS (TLS, np. przez Ingress, cert-manager + Vault PKI)
+# HTTPS (TLS) - teraz przez ISTIO Ingress Gateway
 # ---------------------------------------------------------
-# Dla uslug, ktore maja TLS w Ingress (davtro-ingress, spark-ingress).
-# Porty 443 w Ingressach sa przypisane do Secretow davtro-tls / spark-tls.
-# Przy port-forward do Ingressa forwardujemy 443 -> 443 (TLS termination na Ingress).
+# Ingress-nginx (davtro-ingress / spark-ingress) zostal usuniety zastapiony
+# przez Istio Gateway + VirtualService (manifests/base/istio-gateway.yaml).
+# Terminacja TLS: serwis istio-ingressgateway w namespace ISTIO-SYSTEM (port 443),
+# cert davtro-gateway-tls (cert-manager x Vault PKI), TLS 1.2+, SIMPLE (bez client-cert).
 #
-# UWAGA:
-#   - lokalny browser moze wymuszac zaakceptowanie self-signed CA (davtro-tls).
-#   - certyfikaty generuje cert-manager z Vault PKI (pki/sign/davtro-ingress).
+# UWAGA (Host/SNI): Gateway dopasowuje hosty davtro.local / spark.davtro.local,
+# wiec po forwardzie uzywaj nazwy hosta, nie IP/localhost:
+#   echo "127.0.0.1 davtro.local" | sudo tee -a /etc/hosts
+#   https://davtro.local:8443/   (SNI=davtro.local trafia do filtrow Gateway)
+#   curl --resolve davtro.local:8443:127.0.0.1 https://davtro.local:8443/
+#
+# Sciezki VirtualService: /api, /grafana, /kafka-ui, /pgadmin, / (frontend),
+# spark.davtro.local -> spark. Spring i pozostale uslugi NIE maja trasy
+# na zewnatrz - dostepne tylko jako plain HTTP przez port-forward ponizej.
+#
+# UWAGA ogolne:
 #   - "ERR_SSL_PROTOCOL_ERROR" przy https:// oznacza zwykle, ze trafiles na port HTTP
 #     albo forward nie dziala - NIE jest to blad certyfikatu.
 #   - "ERR_CONNECTION_REFUSED" oznacza, ze zaden port-forward nie nasluchuje.
+#   - mTLS pomiedzy podami w mesh robi automatycznie Envoy (certy w RAM sidecara,
+#     zadnych sekretow *-mtls w namespace) - patrz sekcja mTLS nizej.
 # ---------------------------------------------------------
 
-start_https_ingress() {
-  local NAME="$1" LOCAL="$2" INGRESS="$3"
-  $KC port-forward --address "$ADDR" -n "$NS" "svc/$INGRESS" "$LOCAL:443" >"/tmp/pf-$NAME.log" 2>&1 &
-  echo "  $NAME: https://<IP>:${LOCAL}/  -> $INGRESS:443 (TLS termination na Ingress)"
+start_https_gateway() {
+  local NAME="$1" LOCAL="$2"
+  $KC port-forward --address "$ADDR" -n istio-system svc/istio-ingressgateway "$LOCAL:443" >"/tmp/pf-$NAME.log" 2>&1 &
+  echo "  $NAME: https://davtro.local:${LOCAL}/  -> istio-ingressgateway:443 (ns istio-system, TLS termination na Gateway)"
 }
 
 # ---------------------------------------------------------
 # mTLS / client-cert dostep - WYCIAGANIE I GENEROWANIE
 # ---------------------------------------------------------
-# Secrety TLS/mTLS w davtro02: fastapi-mtls, spring-app-mtls, message-processor-mtls
-# Typ kubernetes.io/tls -> klucze: tls.crt, tls.key, ca.crt
+# UWAGA (Istio): stare sekrety fastapi-mtls / spring-app-mtls / message-processor-mtls
+# zostaly usuniete - mTLS pomiedzy podami robi teraz Envoy (certy w RAM sidecara,
+# rotacja ~24h, tozwosc SPIFFE). Zadna aplikacja nie wymaga juz client-certa.
+# Zostaja TLS-e z sekretami kubernetes.io/tls (klucze tls.crt, tls.key, ca.crt):
+#   - vault-tls          (ns davtro02)     - TLS serwera Vaulta :8203
+#   - davtro-gateway-tls (ns istio-system) - TLS Ingress Gateway
+# extract-tls / make-pfx dzialaja dla KAZDEGO takiego Secreta (argument + [namespace]).
 #
 # UWAGA: sam .crt + .key NIE da sie zaimportowac do przegladarki jako certyfikat
 # klienta. Przegladarka wymaga kontenera .pfx/.p12 (cert + klucz + lancuch CA,
@@ -93,21 +109,22 @@ start_https_ingress() {
 # ---------------------------------------------------------
 
 extract_tls() {
-  # extract_tls <secret-name> [out-prefix]
+  # extract_tls <secret-name> [out-prefix] [namespace]
   local SECRET="$1"
   local PREFIX="${2:-/tmp/$SECRET}"
+  local SECRENS="${3:-$NS}"
   local CRTPATH="${PREFIX}.crt"
   local KEYPATH="${PREFIX}.key"
   local CAPATH="${PREFIX}-ca.crt"
 
-  echo "  [extract] $NS/$SECRET -> $CRTPATH, $KEYPATH, $CAPATH"
-  $KC -n "$NS" get secret "$SECRET" -o jsonpath='{.data.tls\.crt}' | base64 -d > "$CRTPATH" 2>/dev/null || true
-  $KC -n "$NS" get secret "$SECRET" -o jsonpath='{.data.tls\.key}' | base64 -d > "$KEYPATH" 2>/dev/null || true
-  $KC -n "$NS" get secret "$SECRET" -o jsonpath='{.data.ca\.crt}'  | base64 -d > "$CAPATH"  2>/dev/null || true
+  echo "  [extract] $SECRENS/$SECRET -> $CRTPATH, $KEYPATH, $CAPATH"
+  $KC -n "$SECRENS" get secret "$SECRET" -o jsonpath='{.data.tls\.crt}' | base64 -d > "$CRTPATH" 2>/dev/null || true
+  $KC -n "$SECRENS" get secret "$SECRET" -o jsonpath='{.data.tls\.key}' | base64 -d > "$KEYPATH" 2>/dev/null || true
+  $KC -n "$SECRENS" get secret "$SECRET" -o jsonpath='{.data.ca\.crt}'  | base64 -d > "$CAPATH"  2>/dev/null || true
 
-  # Jesli brak CA w secrecie - sprobuj z davtro-tls jako fallback
+  # Jesli brak CA w secrecie - sprobuj z vault-tls (bootstrapowe CA Vaulta) jako fallback
   if [ ! -s "$CAPATH" ]; then
-    $KC -n "$NS" get secret davtro-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > "$CAPATH" 2>/dev/null || true
+    $KC -n "$NS" get secret vault-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > "$CAPATH" 2>/dev/null || true
   fi
 
   chmod 600 "$KEYPATH" 2>/dev/null || true
@@ -165,7 +182,7 @@ import_help() {
 
 === IMPORT CERTYFIKATOW DO PRZEGLADARKI (Linux) ===
 
-1) CERTYFIKAT CA (zeby przegladarka ufala serwerowi - Ingress):
+1) CERTYFIKAT CA (zeby przegladarka ufala serwerowi - Istio Gateway):
    - Chromium/Chrome/Edge czytaja baze NSS, nie systemowy magazyn.
    - Najprosciej: dodaj do systemu i wlacz w Chrome opcje "Uzywaj certyfikatow lokalnych".
        sudo cp /tmp/davtro-ca.crt /usr/local/share/ca-certificates/davtro-ca.crt
@@ -185,13 +202,16 @@ import_help() {
      (mozna tez: about:config -> security.enterprise_roots.enabled = true,
       wtedy Firefox ufa systemowemu magazynowi)
 
-2) CERTYFIKAT KLIENTA (mTLS) - MUSI byc .pfx / .p12, nie .crt + .key:
-   - wygeneruj:
-       ./scripts/port-forward.sh make-pfx fastapi-mtls /tmp/fastapi.pfx "MojeHaslo123" "fastapi client"
+2) CERTYFIKAT KLIENTA - w tym projekcie JUZ NIEPOTRZEBNY:
+   - Stare sekrety fastapi-mtls / spring-app-mtls / message-processor-mtls zostaly
+     usuniete razem z migracja na Istio; Gateway terminuje TLS w trybie SIMPLE
+     (bez client-cert), a mTLS wewnatrz mesh robi Envoy automatycznie.
+   - Jesli potrzebujesz .pfx z innego Secreta kubernetes.io/tls (np. vault-tls):
+       ./scripts/port-forward.sh make-pfx vault-tls /tmp/vault.pfx "MojeHaslo123" "vault"
    - import:
-       Chrome/Edge: chrome://settings/certificates -> "Twoje certyfikaty" -> Importuj -> /tmp/fastapi.pfx
+       Chrome/Edge: chrome://settings/certificates -> "Twoje certyfikaty" -> Importuj -> /tmp/vault.pfx
        Firefox:     about:preferences#privacy -> Certyfikaty -> Wyswietl certyfikaty
-                    -> "Twoje certyfikaty" -> Importuj -> /tmp/fastapi.pfx
+                    -> "Twoje certyfikaty" -> Importuj -> /tmp/vault.pfx
    - jesli nie chcesz hasla: pomin 3. argument (puste haslo).
 
 3) DIAGNOSTYKA BLEDOW W PRZEGLADARCE:
@@ -200,19 +220,16 @@ import_help() {
    - ERR_CERT_AUTHORITY_INVALID -> CA nie zaimportowane (punkt 1).
    - ERR_CERT_COMMON_NAME_INVALID -> cert wystawiony na inna nazwe (np. *.davtro.local),
                                      a wchodzisz po IP - dodaj SAN z IP w certyfikacie
-                                     albo uzywaj nazwy DNS z Ingressa.
-   - "Witryna prosi o wybranie certyfikatu klienta" -> dziala mTLS, wybierz cert z punktu 2.
+                                     albo uzywaj nazwy DNS z Gateway (davtro.local).
+   - "Witryna prosi o wybranie certyfikatu klienta" -> NIE powinno wystapic (Gateway bez client-cert).
 
-4) SPRAWDZENIE Z CLI (curl):
-   # CA + cert klienta + klucz (mTLS):
-     curl --cacert /tmp/fastapi-mtls-ca.crt \
-          --cert   /tmp/fastapi-mtls.crt \
-          --key    /tmp/fastapi-mtls.key \
-          https://localhost:8443/api/health
-   # tylko CA (bez mTLS):
-     curl --cacert /tmp/davtro-ca.crt https://localhost:8443/
+4) SPRAWDZENIE Z CLI (curl) - po odpalonym https-fastapi/https-frontend:
+   # CA + prawidlowy Host/SNI (zalecane):
+     curl --resolve davtro.local:8443:127.0.0.1 \
+          --cacert /tmp/vault-tls-ca.crt \
+          https://davtro.local:8443/api/health
    # ignorowanie certyfikatu (dev, NIE produkcja):
-     curl -k https://localhost:8443/
+     curl -k --resolve davtro.local:8443:127.0.0.1 https://davtro.local:8443/
 
 EOF
 }
@@ -220,19 +237,21 @@ EOF
 # ---------------------------------------------------------
 # KROK 6b (dostep HTTPS/mTLS z LAN): wyborcze forwardy przez argumenty,
 # bez odpalania calej paczki HTTP (ADDR domyslnie 0.0.0.0; lokalnie: ADDR=127.0.0.1):
-#   ./scripts/port-forward.sh https-fastapi   8443   -> https://<IP>:8443 (Ingress, davtro-tls)
-#   ./scripts/port-forward.sh https-frontend  8444   -> https://<IP>:8444 (Ingress, davtro-tls)
-#   ./scripts/port-forward.sh https-spring    8445   -> https://<IP>:8445 (Ingress)
-#   ./scripts/port-forward.sh https-vault     8243   -> https://<IP>:8243 (Vault TLS)
-#   ./scripts/port-forward.sh https-all              -> 8443/8444/8445/8243 razem (wait)
-#   ./scripts/port-forward.sh extract-tls fastapi-mtls /tmp/fastapi
-#   ./scripts/port-forward.sh make-pfx   fastapi-mtls /tmp/fastapi.pfx "Haslo123" "fastapi client"
+#   ./scripts/port-forward.sh https-fastapi   8443   -> https://davtro.local:8443 (Istio Gateway, /api)
+#   ./scripts/port-forward.sh https-frontend  8444   -> https://davtro.local:8444 (Istio Gateway, /)
+#   ./scripts/port-forward.sh https-gateway   8446   -> https://davtro.local:8446 (Istio Gateway, dowolna sciezka)
+#   ./scripts/port-forward.sh https-vault     8243   -> https://<IP>:8243 (Vault TLS :8203)
+#   ./scripts/port-forward.sh https-all              -> 8443/8444/8243 razem (wait)
+#   ./scripts/port-forward.sh extract-tls vault-tls /tmp/vault
+#   ./scripts/port-forward.sh extract-tls davtro-gateway-tls /tmp/gw istio-system
+#   ./scripts/port-forward.sh make-pfx   vault-tls /tmp/vault.pfx "Haslo123" "vault server"
 #   ./scripts/port-forward.sh import-help
 #   ./scripts/port-forward.sh diag                    -> szybka diagnostyka portow i logow
 #
-# Certyfikaty davtro-tls podpisuje Vault PKI przez cert-manager i SAM je renewuje
-# przed TTL (duration 90d, renewBefore 15d) - sekret tls.crt/tls.key podmienia sie
-# sam; w przegladarce zaakceptuj self-signed CA przy pierwszym wejsciu.
+# Certyfikat Gateway (davtro-gateway-tls, ns istio-system) podpisuje Vault PKI
+# przez cert-manager i SAM sie renewuje przed TTL (90d / renew 15d); CA w sekrecie
+# vault-tls (ns davtro02). Po forwardzie uzywaj https://davtro.local:<port>
+# (wpis w /etc/hosts -> 127.0.0.1), bo Gateway dopasowuje ruch po SNI/Host.
 # ---------------------------------------------------------
 
 diag() {
@@ -249,24 +268,26 @@ diag() {
     tail -n 5 "$f"
   done
   echo
-  echo "=== serwis i endpointy Ingressa ==="
-  $KC -n "$NS" get svc davtro-ingress 2>&1
-  $KC -n "$NS" get endpoints davtro-ingress 2>&1
+  echo "=== serwis i endpointy Istio Ingress Gateway (ns istio-system) ==="
+  $KC -n istio-system get svc istio-ingressgateway 2>&1
+  $KC -n istio-system get endpoints istio-ingressgateway 2>&1
+  echo
+  echo "=== Gateway/VirtualService (ns $NS) ==="
+  $KC -n "$NS" get gateway,virtualservice 2>&1
   echo
   echo "=== sekrety TLS w $NS ==="
   $KC -n "$NS" get secrets 2>/dev/null | grep -E 'tls|mtls' || echo "  (brak)"
 }
 
 case "${1:-}" in
-  https-fastapi)  start_https_ingress fastapi  "${2:-8443}" davtro-ingress; exit 0 ;;
-  https-frontend) start_https_ingress frontend "${2:-8444}" davtro-ingress; exit 0 ;;
-  https-spring)   start_https_ingress spring   "${2:-8445}" davtro-ingress; exit 0 ;;
+  https-fastapi)  start_https_gateway fastapi  "${2:-8443}"; echo "   sciezka: https://davtro.local:${2:-8443}/api/health"; exit 0 ;;
+  https-frontend) start_https_gateway frontend "${2:-8444}"; echo "   sciezka: https://davtro.local:${2:-8444}/"; exit 0 ;;
+  https-gateway)  start_https_gateway gateway   "${2:-8446}"; echo "   sciezka: https://davtro.local:${2:-8446}/ (dowolna: /api, /grafana, /kafka-ui, /pgadmin)"; exit 0 ;;
   https-vault)    start vault-https "${2:-8243}" vault 8203; exit 0 ;;
   https-all)
-    start_https_ingress fastapi  "${2:-8443}" davtro-ingress
-    start_https_ingress frontend "${3:-8444}" davtro-ingress
-    start_https_ingress spring   "${4:-8445}" davtro-ingress
-    start vault-https "${5:-8243}" vault 8203
+    start_https_gateway fastapi  "${2:-8443}"
+    start_https_gateway frontend "${3:-8444}"
+    start vault-https "${4:-8243}" vault 8203
     echo
     echo "Wszystkie forwardy HTTPS odpalone. Ctrl+C aby zakonczyc."
     wait
@@ -312,29 +333,31 @@ start node-exp    9101 node-exporter       9100
 
 echo
 
-echo "=== HTTPS (TLS przez Ingress) — opcjonalne, uruchamiaj recznie jesli potrzebne ==="
-echo "# FastAPI-HTTPS przez davtro-ingress:"
-echo "#   $0 https-fastapi 8443   (uruchomi: $KC port-forward svc/davtro-ingress 8443:443)"
-echo "# Frontend-HTTPS przez davtro-ingress:"
-echo "#   $0 https-frontend 8444  (uruchomi: port-forward svc/davtro-ingress 8444:443)"
-echo "# Spring-HTTPS przez davtro-ingress:"
-echo "#   $0 https-spring 8445    (uruchomi: port-forward svc/davtro-ingress 8445:443)"
+echo "=== HTTPS (TLS przez ISTIO Ingress Gateway) - opcjonalne, uruchamiaj recznie jesli potrzebne ==="
+echo "# UWAGA: uzywaj https://davtro.local:<port> (wpis w /etc/hosts -> 127.0.0.1),"
+echo "#        nie <IP>/localhost - Gateway dopasowuje ruch po SNI/Host (davtro.local)."
+echo "# API (/api) przez Gateway:"
+echo "#   $0 https-fastapi 8443   (uruchomi: port-forward -n istio-system svc/istio-ingressgateway 8443:443)"
+echo "# Frontend (/) przez Gateway:"
+echo "#   $0 https-frontend 8444  (uruchomi: port-forward -n istio-system svc/istio-ingressgateway 8444:443)"
+echo "# Dowolna sciezka Gateway (/api, /grafana, /kafka-ui, /pgadmin):"
+echo "#   $0 https-gateway 8446    (uruchomi: port-forward -n istio-system svc/istio-ingressgateway 8446:443)"
 echo "# Vault-HTTPS:"
 echo "#   $0 https-vault 8243     (uruchomi: port-forward svc/vault 8243:8203)"
+echo "# Spring nie jest wystawiony przez Gateway - plain HTTP: $0 (pelna paczka) lub port-forward svc/spring-app-svc"
 echo "# Wszystko naraz (zostaje w foreground, Ctrl+C konczy):"
 echo "#   $0 https-all"
 echo
-echo "=== mTLS / client-cert ==="
-echo "# Secrety TLS/mTLS w ${NS}: fastapi-mtls, message-processor-mtls, spring-app-mtls"
+echo "=== TLS sekrety (Istio mTLS w mesh robi sam Envoy - zadnych sekretow *-mtls) ==="
+echo "# Dostepne sekrety kubernetes.io/tls: vault-tls (${NS}), davtro-gateway-tls (istio-system)"
 echo "# Wyciagnij .crt/.key/.ca.crt z Secreta:"
-echo "#   $0 extract-tls fastapi-mtls /tmp/fastapi-mtls"
+echo "#   $0 extract-tls vault-tls /tmp/vault-tls"
+echo "#   $0 extract-tls davtro-gateway-tls /tmp/gw istio-system"
 echo "# Zrob .pfx/.p12 z haslem (do importu w przegladarce):"
-echo "#   $0 make-pfx fastapi-mtls /tmp/fastapi.pfx 'Haslo123' 'fastapi client'"
+echo "#   $0 make-pfx vault-tls /tmp/vault.pfx 'Haslo123' 'vault server'"
 echo "#   (bez hasla: pomin 3. argument - przegladarka nie zapyta o haslo)"
-echo "# Test z curl (mTLS):"
-echo "#   curl --cacert /tmp/fastapi-mtls-ca.crt --cert /tmp/fastapi-mtls.crt --key /tmp/fastapi-mtls.key https://localhost:8443/api/health"
-echo "# Test z curl (tylko CA, bez mTLS):"
-echo "#   curl --cacert /tmp/davtro-ca.crt https://localhost:8443/"
+echo "# Test z curl (bez client-certa - Gateway TLS SIMPLE):"
+echo "#   curl --resolve davtro.local:8443:127.0.0.1 --cacert /tmp/vault-tls-ca.crt https://davtro.local:8443/api/health"
 echo
 echo "=== Import certyfikatow do przegladarki / CLI ==="
 echo "# Pelna instrukcja (Chrome/Firefox/Linux, certutil, update-ca-certificates, curl):"

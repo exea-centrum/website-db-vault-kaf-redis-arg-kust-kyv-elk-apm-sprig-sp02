@@ -600,3 +600,30 @@ Hasło musi być **takie samo** po obu stronach — inaczej import `.pfx` się n
 4. **Po restarcie maszyny z K8s** — forwardy i `serve` padają. Warto owinąć w `systemd` albo odpalać w `tmux`.
 5. **Certyfikaty w `/tmp/ctr/`** — `/tmp` czyści się przy restarcie. Jeśli chcesz trwałe, zmień `CTR_DIR=/srv/certs` (i pamiętaj o uprawnieniach).
 
+#
+Składnia OK (`bash -n`), pozostałe wystąpienia `davtro-ingress`/`*-mtls` to tylko komentarze historyczne/objaśniające. Podsumowanie:
+
+## Czy plik wymagał aktualizacji? — **TAK** (7 nieaktualnych miejsc)
+
+Plik `scripts/port-forward-with-an-argument.sh` odwoływał się do rzeczy, które już nie istnieją po migracji na Istio. Poprawione:
+
+**1. `https-*` przez nieistniejący serwis `davtro-ingress`** (krytyczne — case `https-fastapi/https-frontend/https-spring/https-all` by nie działał):
+- nowa funkcja `start_https_gateway` → `port-forward -n istio-system svc/istio-ingressgateway $LOCAL:443`
+- **`https-spring` usunięty** → zastąpiony `https-gateway 8446`; powód: spring nie ma trasy w `VirtualService` (dostępne sciezki: `/api`, `/grafana`, `/kafka-ui`, `/pgadmin`, `/`), więc przez Gateway i tak by nie zadziałał — w komentarzu wskazany plain HTTP
+- **dodana uwaga o SNI/Host**: trzeba używać `https://davtro.local:<port>` (wpis w `/etc/hosts`) lub `curl --resolve`, bo Gateway dopasowuje ruch po `davtro.local`
+
+**2. Sekcja mTLS** — stare sekrety `fastapi-mtls`/`spring-app-mtls`/`message-processor-mtls` już nie istnieją (teraz Envoy, certy w RAM sidecara). Opis zaktualizowany; wskazane działające sekrety: `vault-tls` i `davtro-gateway-tls`.
+
+**3. `extract_tls`** — dostał 3. parametr `[namespace]` (żeby czytać `davtro-gateway-tls` z `istio-system`), fallback CA zmieniony z nieistniejącego `davtro-tls` → `vault-tls`.
+
+**4. `import_help`** — punkt „certyfikat klienta (mTLS)" przepisany na „już niepotrzebny" (Gateway TLS SIMPLE), przykłady `curl --cert --key` → `curl --resolve ... --cacert`.
+
+**5. `diag`** — sprawdza teraz `svc/endpoints istio-ingressgateway` w `istio-system` + dodane `get gateway,virtualservice`.
+
+**6. Bloki `echo` na końcu** — instrukcje `https-*` i sekcja mTLS przepisane pod Gateway i `vault-tls`.
+
+**7. Komentarze nagłówkowe** sekcji HTTPS — pełny opis nowego toru (Istio Gateway, cert `davtro-gateway-tls`, brak client-certów).
+
+**Weryfikacja:** `bash -n` → `SYNTAX_OK`; zero aktywnych odwołań do `davtro-ingress`, `start_https_ingress`, `davtro-tls` i `*-mtls` (zostały tylko komentarze informujące, że coś usunięto).
+
+**Uwaga:** nie ruszałem pozostałych trzech plików (`port-forward.sh`, `port-forward-without-an-argument*.sh`) — mają **te same nieaktualne odwołania** (`davtro-ingress`, `fastapi-mtls`, a `port-forward.sh` dodatkowo nieaktualny `kafka-tls :9094`). Mogę je uaktualnić tak samo, jeśli chcesz.
