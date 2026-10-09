@@ -6,6 +6,9 @@ git rebase --abort || true && git add -A && git commit -m "Team GitSecOps MLOps 
 cd /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02 && git add manifests/base/vault-bootstrap.yaml && git commit -m "fix: caBundle w formacie byte (base64) w kroku 25a bootstrapu" && git pull --rebase origin main && git push origin main && git log --oneline -2
 
 
+cd /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02 && git add -A && git commit -m "GitSecOps MLOps Marietta Julia Zosia Helena compared AI agent for vscode " && git pull --rebase origin main && git push origin main && git log --oneline -2
+
+
  9104  [2026-10-02 16:25:09 CEST] kubectl delete namespace davtro02
  9105  [2026-10-02 16:26:39 CEST] kubectl get all -n davtro02
  9106  [2026-10-02 16:26:55 CEST] argocd app get davtro-website
