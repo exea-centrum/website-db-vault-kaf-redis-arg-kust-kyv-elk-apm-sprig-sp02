@@ -42,3 +42,69 @@
 **Naprawdę darmowe i bez limitów są tylko rozwiązania lokalne.** Continue + Ollama albo Twinny + Ollama nie wysyłają kodu do żadnego zewnętrznego API — wnioskowanie odbywa się na twoim sprzęcie . Koszt to karta graficzna i pamięć: 16 GB VRAM pozwala uruchomić qwen3-coder:30b (kontekst 256K), 24–32 GB daje większy komfort.
 
 **Codeium to jedyna kombinacja „zero konfiguracji + nielimitowane uzupełnianie".** Nie wymaga klucza API, działa od razu po instalacji — dobra opcja dla osób, które nie chcą nic konfigurować .
+
+
+#
+Rozbudowałem tabelę oraz zestawienie o **narzędzia dedykowane do VS Code** (oraz wybrane natywne edytory jako punkt odniesienia), ze szczególnym uwzględnieniem tych, które **oferują darmowe tokeny / kredyty startowe** lub **darmowe plany z limitem zapytań**.
+
+Do listy dołączyły m.in.: **Supermaven** (najszybsze uzupełnianie wierszowe), **Cursor** (obsługa jako osobny edytor/odgałęzienie VS Code), **Augment Code** (darmowy okres próbny) oraz **Void** (open-source alternatywa Cursor/VS Code).
+
+---
+
+### 📊 Zaktualizowana tabela: Narzędzia AI do VS Code i programowania
+
+| Narzędzie | Typ | Darmowy limit | Limit tokenów / kontekstu | Wykorzystanie danych / prywatność | Wymaga własnego klucza? | VS Code | Najlepsze zastosowanie |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **Supermaven Free** | Uzupełnianie | **Nielimitowane szybkie uzupełnianie** | Domyślny kontekst | Przechowywanie 7 dni | Nie | ✅ | Najszybsza alternatywa dla Copilot |
+| **GitHub Copilot Free** | Subskrypcja | 2000 uzupełnień + 50 czatów/mies. | Zależny od modelu | Standardowe warunki GitHub | Nie | ✅ | Codzienne podstawowe uzupełnianie |
+| **Codeium / Windsurf** | Subskrypcja | Uzupełnianie bez limitu; agent 25 kredytów | Nieujawnione | Standardowe warunki | Nie | ✅ | Nielimitowane autouzupełnianie |
+| **Gemini Code Assist** | Subskrypcja | 180 000 uzupełnień/mies. | Modele Gemini (1M+) | Dane przechowywane 540 dni | Nie | ✅ | Wysoki darmowy limit, ekosystem Google |
+| **AWS Q Developer** | Subskrypcja | 50 zapytań agenta/mies. + uzupełnienia | Zależny od modelu | Free Tier może trenować | Nie | ✅ | Integracja z AWS i uzupełnianie |
+| **CodeGeeX** | Uzupełnianie | **Uzupełnianie bez limitu**, podstawowe funkcje | 32K tokenów | Lokalna inferencja, prywatność | Nie | ✅ | Bezpłatne uzupełnianie wierszowe |
+| **Sixth** | Agent | **50 zapytań + 2000 uzupełnień/mies.** | GPT-5.4-mini (1M kontekstu) | Dane przez backend | Nie | ✅ | Darmowy agent w VS Code z Claude/Gemini |
+| **CodeGPT** | Agent | **10 interakcji/dzień** (Economy) + $1 kredyt | Zależny od modelu | Zależna od API | Nie (lub BYOK) | ✅ | Codzienne krótkie sesje kodowania |
+| **Tongyi Lingma** | Subskrypcja | **Uzupełnianie wierszowe bez limitu** + 100 pkt | Kontekst jednoplikowy | Standardowe warunki Alibaba | Nie | ✅ | Darmowe autouzupełnianie |
+| **Bito AI** | Recenzja / Chat | **20 czatów AI dziennie** | Nieujawnione | Standardowe warunki | Nie | ✅ | Szybkie pytania i code review |
+| **Kilo Code** | BYOK / agent | Narzędzie darmowe, płacisz za API | Zależny od modelu | Może trenować (zależy od API) | Tak (BYOK) | ✅ | Zaawansowany agent multi-mode |
+| **Cline** | BYOK / agent | Narzędzie darmowe, płacisz za API | Zależny od modelu | Zależna od dostawcy API | Tak | ✅ | Autonomiczny agent (operacje na plikach/CLI) |
+| **Continue (rdzeń)** | BYOK / open-source | Narzędzie darmowe, 100% darmowe | Zależny od modelu | Pełna kontrola / API | Tak | ✅ | Podłączanie Ollama / LM Studio / OpenRouter |
+| **Continue Models Add-On** | Hostowany | 50 czatów + 2000 uzupełnień/mies. | Modele hostowane przez Continue | Warunki Continue | Nie | ✅ | Gotowy czat bez konfiguracji API |
+| **CodePilot** | Multi-agent | Darmowe modele przez OpenRouter | Przez OpenRouter | Sesje w chmurze | Nie (lub BYOK) | ✅ | Orkiestracja wielu agentów |
+| **Cognify AI** | BYOK / agent | Dostawcy darmowych modeli w zestawie | Zależny od modelu | Lokalnie / Cloud | Tak | ✅ | Multi-agent z wyszukiwaniem |
+| **KISS Sorcar** | BYOK | Bez limitów (klient open-source) | Zależny od modelu | Bez serwerów zewnętrznych | Tak | ✅ | Lekki, prosty agent |
+| **Andromity** | BYOK | Bez limitów (klient open-source) | Zależny od modelu | Pełna lokalna kontrola | Tak | ✅ | Ponad 300 modeli przez API |
+| **Twinny** | Open-source | **100% darmowy klient + modele** | Model lokalny | 100% prywatność (P2P/Lokalnie) | Nie | ✅ | Lokalne autouzupełnianie + czat |
+| **Free Repo Agent** | BYOK | Darmowy interfejs bez subskrypcji | DeepSeek V4 / Qwen | Zależna od API | Tak | ✅ | Alternatywa dla Copilot Workspace |
+| **Qwen Coder (OpenRouter)** | Darmowy model API | **50 zapytań/dzień** (20 RPM) | 480B, 1M kontekstu | Może logować prompt | Tak (klucz OpenRouter) | Z innym (np. Cline) | Potężny, darmowy model do podłączenia |
+| **Ollama / LM Studio** | Local Runtime | Całkowicie darmowe (lokalne) | Zależy od RAM/VRAM | 100% lokalnie | Nie | Z innym (np. Continue) | Backend dla modeli offline (DeepSeek, Llama) |
+| **LocalAI** | Self-hosted | Darmowy (MIT) | Model lokalny | 100% lokalnie | Nie | Z innym | Emulator OpenAI API dla modeli lokalnych |
+| **Cursor** | Dedykowany edytor | **50 darmowych zapytań Premium + 2000 uzupełnień/mies.** | Modele premium / Auto | Telemetria w wersji free | Nie | ❌ (Fork VS Code) | Najpopularniejszy edytor AI-first |
+| **Void** | Dedykowany edytor | **100% darmowy / open-source** | Zależy od modelu | 100% prywatny / BYOK | Tak | ❌ (Fork VS Code) | Open-source'owa alternatywa dla Cursor |
+| **Augment Code** | Subskrypcja | **30 000 darmowych tokenów na start** (trial) | Duży kontekst repozytorium | Bezpieczeństwo enterprise | Nie | ✅ | Szybkie zrozumienie dużych projektów |
+| **Tabby** | Self-hosted | Darmowy (do 5 użytkowników) | Model lokalny | Kod nie opuszcza serwera | Nie | ✅ | Własny serwer autocomplete w firmie |
+| **Tabnine** | Subskrypcja | Bardzo ograniczony plan podstawowy | Nieujawnione | Bezpieczne (Private Cloud) | Nie | ✅ | Sektor korporacyjny |
+| **OpenHands** | BYOK / R&D | Darmowy (MIT) | Zależny od modelu | Pełna kontrola lokalna | Tak | ❌ | Zaawansowana automatyzacja w środowisku |
+| **OpenCode** | CLI / BYOK | Darmowy (MIT) | Zależny od modelu | Open-source | Tak | ❌ | Praca w terminalu |
+| **Aider** | CLI / BYOK | Darmowy (Python CLI) | Zależny od modelu | Zależna od API | Tak | ❌ | Pair programming w terminalu Git |
+| **Goose (Block)** | CLI / BYOK | Darmowy (Apache 2.0) | Zależny od modelu | Pełna lokalna kontrola | Tak | ❌ | Autonomiczne zadania w terminalu |
+| **Zed** | Edytor | 2000 predykcji/mies. | Zależny od modelu | Zależna od API | Tak | ❌ | Ekstremalnie szybki edytor Rust |
+| **Bolt.new** | Cloud IDE | 300 000 tokenów/dzień | Nieprzejrzysty | Przechowywanie w chmurze | Nie | ❌ | Generowanie aplikacji w przeglądarce |
+
+---
+
+### 🔑 Jak podłączyć darmowe tokeny i modele do wtyczek VS Code?
+
+Jeśli korzystasz z rozszerzeń typu **Cline**, **Kilo Code**, **Continue** lub **CodeGPT**, nie musisz płacić za API, aby pracować za darmo:
+
+1. **OpenRouter (Darmowe modele):**
+* Rejestracja daje dostęp do darmowych modeli ze stawka `$0/1M tokenów` (np. `qwen/qwen-2.5-coder-32b-instruct:free`, `meta-llama/llama-3.3-70b-instruct:free`).
+* **Limit:** Zazwyczaj 50 zapytań dziennie lub 20 na minutę.
+
+
+2. **Google Gemini API Key:**
+* Po wygenerowaniu bezpłatnego klucza w Google AI Studio otrzymujesz dostęp do modeli `Gemini 1.5 Flash` i `Gemini 1.5 Pro` w darmowym pułapie (Free Tier z limitem RPD/RPM), co wystarcza na ogromną liczbę interakcji w wtyczkach VS Code.
+
+
+3. **Lokalne uruchomienie (Ollama / LM Studio):**
+* Instalujesz Ollama, pobierasz dedykowany model do kodowania (np. `ollama run qwen2.5-coder:7b` lub `deepseek-coder-v2`).
+* Wtyczki **Continue** lub **Twinny** łączą się bezpośrednio z `localhost:11434` – zerowe koszty, brak limitu tokenów i 100% prywatności.
