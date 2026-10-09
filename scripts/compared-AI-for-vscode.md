@@ -108,3 +108,93 @@ Jeśli korzystasz z rozszerzeń typu **Cline**, **Kilo Code**, **Continue** lub 
 3. **Lokalne uruchomienie (Ollama / LM Studio):**
 * Instalujesz Ollama, pobierasz dedykowany model do kodowania (np. `ollama run qwen2.5-coder:7b` lub `deepseek-coder-v2`).
 * Wtyczki **Continue** lub **Twinny** łączą się bezpośrednio z `localhost:11434` – zerowe koszty, brak limitu tokenów i 100% prywatności.
+
+**Ja jestem asystentem AI, nie wtyczką do VS Code — więc nie mogę samodzielnie modyfikować Twojego kodu w edytorze.** Ale mogę zrobić wszystko to, co robią tamte narzędzia, tylko w trybie rozmowy:
+
+### 🆚 Jak wypadam na tle tamtych narzędzi?
+
+| Kryterium | Ja (DeepSeek) | Cline / Kilo Code | CodeGeeX / Sixth |
+| :--- | :--- | :--- | :--- |
+| **Darmowy?** | ✅ Tak, całkowicie | ❌ Płacisz za API | ✅ Tak, z limitami |
+| **Limity tokenów** | Duży kontekst, bez twardych limitów dziennych | Zależny od modelu | 32K / limity dzienne |
+| **Modyfikuje kod w VS Code** | ❌ Nie, tylko pokazuję | ✅ Tak, autonomicznie | ✅ Tak, uzupełnia |
+| **Rozumie cały projekt** | ✅ Przez wklejony kontekst | ✅ Przez indeksowanie | ✅ Przez kontekst |
+| **Pisze całe funkcje / pliki** | ✅ Tak | ✅ Tak | ✅ Tak |
+| **Debuguje, tłumaczy, refaktoryzuje** | ✅ Tak | ✅ Tak | ✅ Tak |
+| **Prywatność** | Rozmowa przez API | Zależna od wybranego API | Lokalna / chmurowa |
+| **Dostępny 24/7** | ✅ Tak | ✅ Tak | ✅ Tak |
+
+### 🎯 Co mogę dla Ciebie zrobić, a czego nie
+
+**Mogę:**
+- Napisać cały kod, funkcję, klasę, testy, konfigurację
+- Przeanalizować błąd i wskazać poprawkę
+- Porównać biblioteki, narzędzia, podejścia
+- Wygenerować gotowy do wklejenia snippet
+- Wyjaśnić, jak coś działa
+- Zaplanować architekturę projektu
+
+**Nie mogę:**
+- Samodzielnie otworzyć Twojego pliku i go edytować
+- Uruchomić terminala i wykonać poleceń
+- Zaindeksować całego repozytorium bez Twojego udziału
+
+### 💡 Praktyczny wniosek
+
+**Najlepszy układ to: ja + jedno z tamtych narzędzi.**
+
+- **Ja** — planowanie, projektowanie, tłumaczenie błędów, pisanie dużych fragmentów kodu, porównywanie opcji
+- **Cline / Kilo Code** — autonomiczne wprowadzanie zmian w plikach, uruchamianie testów, iteracja
+- **CodeGeeX / Sixth** — szybkie uzupełnianie w trakcie pisania
+
+Jeśli chcesz, możesz mi wkleić fragment kodu, błąd, albo opisać, co chcesz zbudować — i przejdziemy przez to razem, krok po kroku.
+
+Oto zaktualizowana tabela rozszerzona o kolumnę **Liczba pobrań / instalacji w VS Code Marketplace** (stan na 2026 r. dla oficjalnych wtyczek) oraz porządek według najpopularniejszych narzędzi wspierających ekosystem VS Code.
+
+---
+
+### 📊 Zaktualizowana tabela: Narzędzia AI do VS Code (z liczbą pobrań)
+
+| Narzędzie | Typ | Pobrania w VS Code | Darmowy limit | Limit tokenów / kontekstu | Wymaga własnego klucza? | VS Code | Najlepsze zastosowanie |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **GitHub Copilot** | Subskrypcja | **~25M+** | 2000 uzupełnień + 50 czatów/mies. | Zależny od modelu | Nie | ✅ | Najpopularniejsze uzupełnianie |
+| **Codeium / Windsurf** | Subskrypcja | **~2.8M+** | Uzupełnianie bez limitu; agent 25 kredytów | Nieujawnione | Nie | ✅ | Nielimitowane autouzupełnianie |
+| **Tabnine** | Subskrypcja | **~6.5M+** | Bardzo ograniczony plan podstawowy | Nieujawnione | Nie | ✅ | Rozwiązania dla korporacji |
+| **AWS Q Developer** | Subskrypcja | **~2.1M+** | 50 zapytań agenta/mies. + uzupełnienia | Zależny od modelu | Nie | ✅ | Integracja z AWS i uzupełnianie |
+| **Gemini Code Assist** | Subskrypcja | **~1.2M+** | 180 000 uzupełnień/mies. | Modele Gemini (1M+) | Nie | ✅ | Wysoki darmowy limit, ekosystem Google |
+| **Cline** | BYOK / agent | **~1.1M+** | Narzędzie darmowe, płacisz za API | Zależny od modelu | Tak (BYOK) | ✅ | Autonomiczny agent (pliki/terminal) |
+| **Continue** | BYOK / open-source | **~950K+** | Narzędzie darmowe (Add-on: 50 czatów) | Zależny od modelu / lokalny | Tak (lub Add-on) | ✅ | Elastyczny klient pod Ollama / API |
+| **CodeGPT** | Agent / BYOK | **~1.4M+** | **10 interakcji/dzień** (Economy) + $1 | Zależny od modelu | Nie (lub BYOK) | ✅ | Gotowy czat i agenci |
+| **Bito AI** | Recenzja / Chat | **~1.0M+** | **20 czatów AI dziennie** | Nieujawnione | Nie | ✅ | Szybki chat i code review |
+| **CodeGeeX** | Uzupełnianie | **~850K+** | **Uzupełnianie bez limitu**, podstawy | 32K tokenów | Nie | ✅ | Bezpłatne uzupełnianie wierszowe |
+| **Supermaven Free** | Uzupełnianie | **~600K+** | **Nielimitowane szybkie uzupełnianie** | Domyślny kontekst | Nie | ✅ | Najszybsza alternatywa dla Copilot |
+| **Kilo Code** | BYOK / agent | **~350K+** | Narzędzie darmowe, płacisz za API | Zależny od modelu | Tak (BYOK) | ✅ | Zaawansowany agent multi-mode |
+| **Tongyi Lingma** | Subskrypcja | **~300K+** | **Uzupełnianie wierszowe bez limitu** | Jednoplikowy | Nie | ✅ | Ekosystem Alibaba / Qwen |
+| **Sixth** | Agent | **~120K+** | **50 zapytań + 2000 uzupełnień/mies.** | GPT-5.4-mini (1M) | Nie | ✅ | Darmowy agent (Claude/Gemini/GPT) |
+| **Augment Code** | Subskrypcja | **~150K+** | **30 000 darmowych tokenów** (trial) | Duży kontekst repo | Nie | ✅ | Zrozumienie dużych repozytoriów |
+| **Twinny** | Open-source | **~180K+** | **100% darmowy klient + modele** | Model lokalny | Nie | ✅ | Lokalne uzupełnianie (P2P/Ollama) |
+| **CodePilot** | Multi-agent | **~80K+** | Darmowe modele przez OpenRouter | Przez OpenRouter | Nie (lub BYOK) | ✅ | Orkiestracja wielu agentów |
+| **Cognify AI** | BYOK / agent | **~45K+** | Darmowe modele w zestawie | Zależny od modelu | Tak | ✅ | Multi-agent z wyszukiwaniem |
+| **KISS Sorcar** | BYOK | **~30K+** | Bez limitów (klient open-source) | Zależny od modelu | Tak | ✅ | Lekki, prosty agent |
+| **Andromity** | BYOK | **~25K+** | Bez limitów (klient open-source) | Zależny od modelu | Tak | ✅ | Klient na 300+ modeli API |
+| **Free Repo Agent** | BYOK | **~20K+** | Darmowy interfejs bez subskrypcji | DeepSeek V4 / Qwen | Tak | ✅ | Wytłumaczenie repozytorium |
+| **Tabby** | Self-hosted | **~110K+** | Darmowy (do 5 użytkowników) | Model lokalny | Nie | ✅ | Własny serwer autocomplete w firmie |
+| **Qwen Coder (OpenRouter)** | Model API | *Brak (Model)* | **50 zapytań/dzień** (darmowy endpoint) | 480B, 1M kontekstu | Tak | Z innym | Model do podpięcia pod Cline/Continue |
+| **Ollama / LM Studio** | Local Runtime | *Brak (Desktop)* | Całkowicie darmowe (lokalne) | Zależy od RAM/VRAM | Nie | Z innym | Backend lokalny pod Continue/Twinny |
+| **LocalAI** | Self-hosted | *Brak (Docker)* | Darmowy (MIT) | Model lokalny | Nie | Z innym | Emulator OpenAI API dla modeli lokalnych |
+| **Cursor** | Edytor | *Brak (Aplikacja)* | **50 zapytań Premium / mies.** | Modele premium / Auto | Nie | ❌ (Fork) | Dedykowane IDE (odgałęzienie VS Code) |
+| **Void** | Edytor | *Brak (Aplikacja)* | **100% darmowy / open-source** | Zależy od modelu | Tak | ❌ (Fork) | Open-source'owa alternatywa dla Cursor |
+| **OpenHands** | BYOK / R&D | *Brak (Docker)* | Darmowy (MIT) | Zależny od modelu | Tak | ❌ | Autonomiczne środowisko agenta |
+| **OpenCode** | CLI / BYOK | *Brak (CLI)* | Darmowy (MIT) | Zależny od modelu | Tak | ❌ | Agent uruchamiany w terminalu |
+| **Aider** | CLI / BYOK | *Brak (CLI)* | Darmowy (Python CLI) | Zależny od modelu | Tak | ❌ | Pair programming w terminalu Git |
+| **Goose (Block)** | CLI / BYOK | *Brak (Desktop)* | Darmowy (Apache 2.0) | Zależny od modelu | Tak | ❌ | Autonomiczny agent narzędziowy |
+| **Zed** | Edytor | *Brak (Aplikacja)* | 2000 predykcji/mies. | Zależny od modelu | Tak | ❌ | Ekstremalnie szybki edytor w Rust |
+| **Bolt.new** | Cloud IDE | *Brak (Przeglądarka)* | 300 000 tokenów/dzień | Nieprzejrzysty | Nie | ❌ | Generowanie aplikacji w przeglądarce |
+
+---
+
+### 💡 Najważniejsze wnioski z instalacji w VS Code:
+
+1. **Dominacja oficjalnych rozszerzeń:** **GitHub Copilot** (~25M) i **Tabnine** (~6.5M) to najczęściej pobierane rozszerzenia, z kolei **Codeium** (~2.8M) przewodzi w kategorii nielimitowanego darmowego uzupełniania kodu.
+2. **Eksplozja popularności agentów BYOK:** Rozszerzenia takie jak **Cline** (~1.1M) i **Continue** (~950K) zanotowały skokowy wzrost pobrań, ponieważ pozwalają użytkownikom podłączać darmowe tokeny (z Google Gemini AI Studio, OpenRouter free tier) lub lokalne serwery Ollama bez płacenia za abonent.
+3. **Edytory dedykowane (Forki):** **Cursor** i **Void** nie są rozszerzeniami do pobrania w Marketplace, lecz osobnymi aplikacjami (odgałęzieniami VS Code), dlatego ich statystyki instalacji nie figurują bezpośrednio w VS Code Marketplace.
