@@ -15,7 +15,6 @@ set -u
 
 ADDR="${ADDR:-0.0.0.0}"
 NS="${NS:-davtro02}"
-ISTIO_NS="${ISTIO_NS:-istio-system}"
 
 # Binarka kubectl: zwykly kubectl albo microk8s (snap) - niezaleznie od PATH
 if command -v kubectl >/dev/null 2>&1; then
@@ -54,25 +53,9 @@ echo "Port-forwarding uslug DavTro na $ADDR ... (kubectl: $KC, namespace: $NS)"
 #   Node Exp    9101 -> node-exporter:9100
 # ---------------------------------------------------------
 
-# Czy w namespace sa jakiekolwiek endpointy dla svc?
-# 0 = sa, 1 = brak. Uzywane do pomijania martwych forwardow (0/0 podow).
-has_endpoints() {
-  local ns="$1" svc="$2"
-  local out
-  out=$($KC -n "$ns" get endpoints "$svc" \
-        -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)
-  [ -n "$out" ]
-}
-
 start() {
   local NAME="$1" LOCAL="$2" SVC="$3" TARGET="$4"
-  if ! has_endpoints "$NS" "$SVC"; then
-    echo "  $NAME: POMINIETY - svc/$SVC (ns $NS) nie ma endpointow (0/0 podow)"
-    return 0
-  fi
-  $KC port-forward --address "$ADDR" -n "$NS" "svc/$SVC" "$LOCAL:$TARGET" \
-      >"/tmp/pf-$NAME.log" 2>&1 &
-  echo $! > "/tmp/pf-$NAME.pid"
+  $KC port-forward --address "$ADDR" -n "$NS" "svc/$SVC" "$LOCAL:$TARGET" >"/tmp/pf-$NAME.log" 2>&1 &
   echo "  $NAME: http://<IP>:${LOCAL}/  -> $SVC:$TARGET"
 }
 
@@ -104,14 +87,8 @@ start() {
 
 start_https_gateway() {
   local NAME="$1" LOCAL="$2"
-  if ! has_endpoints "$ISTIO_NS" "istio-ingressgateway"; then
-    echo "  $NAME: POMINIETY - istio-ingressgateway (ns $ISTIO_NS) nie ma endpointow"
-    return 0
-  fi
-  $KC port-forward --address "$ADDR" -n "$ISTIO_NS" svc/istio-ingressgateway "$LOCAL:443" \
-      >"/tmp/pf-$NAME.log" 2>&1 &
-  echo $! > "/tmp/pf-$NAME.pid"
-  echo "  $NAME: https://davtro.local:${LOCAL}/  -> istio-ingressgateway:443 (ns $ISTIO_NS, TLS termination na Gateway)"
+  $KC port-forward --address "$ADDR" -n istio-system svc/istio-ingressgateway "$LOCAL:443" >"/tmp/pf-$NAME.log" 2>&1 &
+  echo "  $NAME: https://davtro.local:${LOCAL}/  -> istio-ingressgateway:443 (ns istio-system, TLS termination na Gateway)"
 }
 
 # ---------------------------------------------------------
@@ -155,14 +132,13 @@ extract_tls() {
 }
 
 make_pfx() {
-  # make_pfx <secret-name> [out-pfx] [password] [friendly-name] [namespace]
+  # make_pfx <secret-name> [out-pfx] [password] [friendly-name]
   # Generuje .pfx (PKCS#12) z .crt + .key + .ca.crt wyciagnietych z Secreta.
   # Haslo ustawia USER (argument lub env PFX_PASS). Puste haslo = brak pytania w przegladarce.
   local SECRET="$1"
   local OUT="${2:-/tmp/$SECRET.pfx}"
   local PASS="${3:-${PFX_PASS:-}}"
   local FRIENDLY="${4:-$SECRET}"
-  local SECRENS="${5:-$NS}"
   local PREFIX="/tmp/$SECRET"
 
   if ! command -v openssl >/dev/null 2>&1; then
@@ -170,7 +146,7 @@ make_pfx() {
     return 1
   fi
 
-  extract_tls "$SECRET" "$PREFIX" "$SECRENS"
+  extract_tls "$SECRET" "$PREFIX"
 
   echo "  [pfx] $PREFIX.crt + $PREFIX.key + $PREFIX-ca.crt -> $OUT"
   if [ -z "$PASS" ]; then
@@ -280,23 +256,10 @@ EOF
 
 diag() {
   echo "=== porty nasluchujace (kubectl port-forward) ==="
-  ss -tlnp 2>/dev/null | grep -E \
-    '8080|8081|8082|8083|8084|8085|3000|3100|3200|5050|5432|6379|8243|8443|8444|8445|8446|7077|9090|9092|9101|9187|9308' \
-    || echo "  (brak nasluchujacych portow z listy)"
+  ss -tlnp 2>/dev/null | grep -E '8443|8444|8445|8243|8080' || echo "  (brak nasluchujacych portow z listy)"
   echo
-  echo "=== aktywne port-forwardy (PID z /tmp/pf-*.pid) ==="
-  local found=0
-  for f in /tmp/pf-*.pid; do
-    [ -e "$f" ] || continue
-    local pid; pid=$(cat "$f" 2>/dev/null)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      echo "  ZYWY  PID $pid  ($(basename "$f" .pid))"
-      found=1
-    else
-      echo "  MARTWY       ($(basename "$f" .pid)) - usun $f"
-    fi
-  done
-  [ "$found" -eq 0 ] && echo "  (brak zywych port-forwardow)"
+  echo "=== procesy kubectl port-forward ==="
+  ps aux | grep -E 'port-forward' | grep -v grep || echo "  (brak)"
   echo
   echo "=== logi /tmp/pf-*.log (ostatnie 5 linii kazdego) ==="
   for f in /tmp/pf-*.log; do
@@ -305,24 +268,21 @@ diag() {
     tail -n 5 "$f"
   done
   echo
-  echo "=== serwis i endpointy Istio Ingress Gateway (ns $ISTIO_NS) ==="
-  $KC -n "$ISTIO_NS" get svc istio-ingressgateway 2>&1
-  $KC -n "$ISTIO_NS" get endpoints istio-ingressgateway 2>&1
+  echo "=== serwis i endpointy Istio Ingress Gateway (ns istio-system) ==="
+  $KC -n istio-system get svc istio-ingressgateway 2>&1
+  $KC -n istio-system get endpoints istio-ingressgateway 2>&1
   echo
   echo "=== Gateway/VirtualService (ns $NS) ==="
   $KC -n "$NS" get gateway,virtualservice 2>&1
   echo
   echo "=== sekrety TLS w $NS ==="
   $KC -n "$NS" get secrets 2>/dev/null | grep -E 'tls|mtls' || echo "  (brak)"
-  echo
-  echo "=== sekrety TLS w $ISTIO_NS ==="
-  $KC -n "$ISTIO_NS" get secrets 2>/dev/null | grep -E 'tls|mtls' || echo "  (brak)"
 }
 
 case "${1:-}" in
   https-fastapi)  start_https_gateway fastapi  "${2:-8443}"; echo "   sciezka: https://davtro.local:${2:-8443}/api/health"; exit 0 ;;
   https-frontend) start_https_gateway frontend "${2:-8444}"; echo "   sciezka: https://davtro.local:${2:-8444}/"; exit 0 ;;
-  https-gateway)  start_https_gateway gateway  "${2:-8446}"; echo "   sciezka: https://davtro.local:${2:-8446}/ (dowolna: /api, /grafana, /kafka-ui, /pgadmin)"; exit 0 ;;
+  https-gateway)  start_https_gateway gateway   "${2:-8446}"; echo "   sciezka: https://davtro.local:${2:-8446}/ (dowolna: /api, /grafana, /kafka-ui, /pgadmin)"; exit 0 ;;
   https-vault)    start vault-https "${2:-8243}" vault 8203; exit 0 ;;
   https-all)
     start_https_gateway fastapi  "${2:-8443}"
@@ -334,15 +294,15 @@ case "${1:-}" in
     exit 0
     ;;
   extract-tls)
-    # extract-tls <secret-name> [prefix] [namespace]
-    [ -z "${2:-}" ] && { echo "Uzycie: $0 extract-tls <secret-name> [prefix] [namespace]"; exit 1; }
-    extract_tls "$2" "${3:-/tmp/$2}" "${4:-$NS}"
+    # extract-tls <secret-name> [prefix]
+    [ -z "${2:-}" ] && { echo "Uzycie: $0 extract-tls <secret-name> [prefix]"; exit 1; }
+    extract_tls "$2" "${3:-/tmp/$2}"
     exit 0
     ;;
   make-pfx)
-    # make-pfx <secret-name> [out.pfx] [haslo] [friendly-name] [namespace]
-    [ -z "${2:-}" ] && { echo "Uzycie: $0 make-pfx <secret-name> [out.pfx] [haslo] [friendly-name] [namespace]"; exit 1; }
-    make_pfx "$2" "${3:-/tmp/$2.pfx}" "${4:-}" "${5:-$2}" "${6:-$NS}"
+    # make-pfx <secret-name> [out.pfx] [haslo] [friendly-name]
+    [ -z "${2:-}" ] && { echo "Uzycie: $0 make-pfx <secret-name> [out.pfx] [haslo] [friendly-name]"; exit 1; }
+    make_pfx "$2" "${3:-/tmp/$2.pfx}" "${4:-}" "${5:-$2}"
     exit 0
     ;;
   import-help) import_help; exit 0 ;;
@@ -377,11 +337,11 @@ echo "=== HTTPS (TLS przez ISTIO Ingress Gateway) - opcjonalne, uruchamiaj reczn
 echo "# UWAGA: uzywaj https://davtro.local:<port> (wpis w /etc/hosts -> 127.0.0.1),"
 echo "#        nie <IP>/localhost - Gateway dopasowuje ruch po SNI/Host (davtro.local)."
 echo "# API (/api) przez Gateway:"
-echo "#   $0 https-fastapi 8443   (uruchomi: port-forward -n $ISTIO_NS svc/istio-ingressgateway 8443:443)"
+echo "#   $0 https-fastapi 8443   (uruchomi: port-forward -n istio-system svc/istio-ingressgateway 8443:443)"
 echo "# Frontend (/) przez Gateway:"
-echo "#   $0 https-frontend 8444  (uruchomi: port-forward -n $ISTIO_NS svc/istio-ingressgateway 8444:443)"
+echo "#   $0 https-frontend 8444  (uruchomi: port-forward -n istio-system svc/istio-ingressgateway 8444:443)"
 echo "# Dowolna sciezka Gateway (/api, /grafana, /kafka-ui, /pgadmin):"
-echo "#   $0 https-gateway 8446    (uruchomi: port-forward -n $ISTIO_NS svc/istio-ingressgateway 8446:443)"
+echo "#   $0 https-gateway 8446    (uruchomi: port-forward -n istio-system svc/istio-ingressgateway 8446:443)"
 echo "# Vault-HTTPS:"
 echo "#   $0 https-vault 8243     (uruchomi: port-forward svc/vault 8243:8203)"
 echo "# Spring nie jest wystawiony przez Gateway - plain HTTP: $0 (pelna paczka) lub port-forward svc/spring-app-svc"
@@ -389,10 +349,10 @@ echo "# Wszystko naraz (zostaje w foreground, Ctrl+C konczy):"
 echo "#   $0 https-all"
 echo
 echo "=== TLS sekrety (Istio mTLS w mesh robi sam Envoy - zadnych sekretow *-mtls) ==="
-echo "# Dostepne sekrety kubernetes.io/tls: vault-tls (${NS}), davtro-gateway-tls (${ISTIO_NS})"
+echo "# Dostepne sekrety kubernetes.io/tls: vault-tls (${NS}), davtro-gateway-tls (istio-system)"
 echo "# Wyciagnij .crt/.key/.ca.crt z Secreta:"
 echo "#   $0 extract-tls vault-tls /tmp/vault-tls"
-echo "#   $0 extract-tls davtro-gateway-tls /tmp/gw $ISTIO_NS"
+echo "#   $0 extract-tls davtro-gateway-tls /tmp/gw istio-system"
 echo "# Zrob .pfx/.p12 z haslem (do importu w przegladarce):"
 echo "#   $0 make-pfx vault-tls /tmp/vault.pfx 'Haslo123' 'vault server'"
 echo "#   (bez hasla: pomin 3. argument - przegladarka nie zapyta o haslo)"

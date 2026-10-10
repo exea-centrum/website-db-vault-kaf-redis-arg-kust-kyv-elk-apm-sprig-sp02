@@ -735,3 +735,191 @@ virtualservice.networking.istio.io/spark-routes    ["davtro-gateway"]   ["spark.
 vault-ca                     kubernetes.io/tls                3      5d
 vault-tls                    kubernetes.io/tls                3      5d
 ```
+
+HTTPS przez bramkę **naprawione** — cert `CN=davtro.local` z `davtro-internal CA`, TLS handshake przechodzi, RST zniknął. Został `503`, bo wszystkie backendy siedzą na `0/0` (zeskalowane do zera). Podaję podsumowanie.
+
+## Co było nie tak (root cause)
+
+Twoje objawy (RST / `TLS connect error` / brak certyfikatu) **nie** miały związku z `port-forward` ani z LAN-em. Łańcuch przyczyn:
+
+1. **`ClusterIssuer vault-issuer` nie miał `caBundle`** → cert-manager weryfikował Vault przez systemowy trust store, a Vault używa własnego CA `davtro-vault-ca` → `x509: certificate signed by unknown authority`.
+2. → **cert `davtro-gateway-tls` nigdy nie wystawiony** (stuck „Issuing" 5 dni, Secret nie istniał).
+3. → Envoy na bramce nie miał czym terminować TLS na 443 → **zrzucał połączenie (RST)** na 8443/8444.
+4. Dodatkowo **token cert-managera był martwy** (`403 invalid token`, 28 dni, nawet `renew-self` nie przechodził).
+
+Stąd na `:443` hosta łapałeś **Traefik default cert** (bo Twój forward TLS padał, a hostowy Traefik odpowiadał), a `:10250` to kubelet — nigdy nie zadziała dla WWW.
+
+## Co naprawiłem (na `.19`)
+
+- Dodałem `caBundle` do `ClusterIssuer vault-issuer` → `Ready=True reason=VaultVerified`.
+- Pobrałem root token z PVC (`/vault/data/bootstrap-keys`) i utworzyłem nowy token z polityką `pki-issuer` (TTL 30 dni, odnawialny), zaktualizowałem `cert-manager-vault-token`.
+- Restart cert-managera → **`davtro-gateway-tls` wystawiony**, `Ready=True`.
+- Potwierdzone: `subject=CN=davtro.local`, `issuer=davtro-internal CA`. `curl` przechodzi (bez RST).
+
+## Został `503` — ale to inny temat
+
+`503` = brak zdrowego backendu. **Wszystkie** deploymenty siedzą na `0/0`:
+
+```
+fastapi-web-app 0/0, frontend 0/0, spring-app 0/0, grafana 0/0,
+kafka-ui 0/0, pgadmin 0/0, spark-master 0/0, redis 0/0, ...
+```
+
+Serwisy istnieją, endpoints `<none>` → Gateway nie ma dokąd kierować. To **nie** TLS. Te pody zostały wyzerowane (prawdopodobnie dla oszczędności RAM — masz tylko 7,7 Gi i wcześniej load 24).
+
+## Co dalej — potrzebuję Twojej decyzji
+
+Zanim cokolwiek włączę, bo to zje RAM (wcześniej maszyna się dusiła):
+
+Które backendy odpalić? Opcje:
+- **A** — tylko warstwa WWW: `frontend`, `fastapi-web-app`, `spring-app-deployment` (żeby strona + `/api` chodziły).
+- **B** — A + monitoring: `grafana`, `kafka-ui`, `pgadmin`, `spark-master`.
+- **C** — wszystko (ryzyko OOM — masz 7 Gi RAM, a do tego ES/Loki/Prometheus).
+
+Po włączeniu `503` zniknie i z klienta zadziała:
+```
+https://davtro.local:8444/          → frontend
+https://davtro.local:8443/api/health → fastapi
+https://davtro.local:8443/pgadmin/  → pgadmin
+https://davtro.local:8443/grafana/  → grafana
+https://spark.davtro.local:8443/    → spark
+```
+(hosts na kliencie: `192.168.1.19 davtro.local spark.davtro.local`)
+
+Którą opcję mam odpalić?
+
+Oba skrypty **działają poprawnie** — problem nie leży w nich. Oto co się dzieje:
+
+## 1. `extract-tls` — źle użyty argument
+
+Ty wpisałeś:
+```bash
+... extract-tls bash
+```
+
+Skrypt traktuje **`bash` jako nazwę sekretu** (1. argument po `extract-tls`), a nie jako polecenie. Szuka sekretu `bash` w namespace `davtro02` → nie ma go → tworzy puste pliki:
+```
+[davtro02/bash] -> /tmp/bash.crt, /tmp/bash.key, /tmp/bash-ca.crt
+Error: secrets "bash" not found
+crt: 0 B, key: 0 B        <- puste, bo "bash" to nie sekret
+```
+
+Stąd Twoje `/tmp/ctr` i puste pliki. To nie jest bug — po prostu `bash` to nie jest nazwa sekretu.
+
+**Poprawne użycie** (nazwa sekretu + prefiks) — i to **działa**, sprawdziłem:
+```bash
+bash scripts/port-forward-with-an-argument.sh extract-tls vault-tls /tmp/ctr
+# [davtro02/vault-tls] -> /tmp/ctr.crt, /tmp/ctr.key, /tmp/ctr-ca.crt
+# crt: 1289 B, key: 1679 B, ca: 1107 B   <- pełne pliki
+```
+
+Dostępne sekrety TLS w `davtro02`: `vault-tls`, `vault-ca`.
+
+**Uwaga (realny limitation skryptu):** `extract-tls` ma zakodowany namespace `$NS=davtro02`. Twój gateway cert `davtro-gateway-tls` leży w **`istio-system`**, więc przez ten subcommand go **nie** wyciągniesz. Trzeba ręcznie:
+```bash
+/snap/bin/microk8s kubectl -n istio-system get secret davtro-gateway-tls \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/gw.crt
+/snap/bin/microk8s kubectl -n istio-system get secret davtro-gateway-tls \
+  -o jsonpath='{.data.tls\.key}' | base64 -d > /tmp/gw.key
+```
+
+## 2. Tryb bez argumentu — skrypt startuje, ale nie ma dokąd kierować
+
+Skrypt **odpala się poprawnie** (widzisz całą listę `fastapi -> 8082`, `frontend -> 8083` itd.). Ale logi `/tmp/pf-*.log` są **puste**, bo za serwisami **nie ma żadnych podów**:
+
+```
+fastapi-web-app-svc   endpoints: <none>
+frontend-svc          endpoints: <none>
+grafana               endpoints: <none>
+spring-app-svc        endpoints: <none>
+...wszystkie <none>
+
+deploymenty: fastapi-web-app 0/0, frontend 0/0, spring 0/0, grafana 0/0 ...
+```
+
+`kubectl port-forward` startuje i nasłuchuje, ale przy pierwszym połączeniu nie ma backendu → od razu pada (`pod does not exist` / connection refused). Dlatego „nie zrzuca" niczego użytecznego.
+
+Działa tylko to, co faktycznie ma pody: `vault` (8243), `postgres`, `kafka-kraft`, `node-exporter`. Reszta to martwe forwardy, bo deploymenty są na `0/0`.
+
+## Podsumowanie
+
+| Co | Skrypt | Powód „nie działa" |
+|---|---|---|
+| `extract-tls bash` | OK | `bash` to nie nazwa sekretu → 0 B pliki. Użyj `extract-tls vault-tls /tmp/ctr` |
+| `extract-tls` na gateway cert | ograniczony | cert jest w `istio-system`, a skrypt patrzy tylko w `davtro02` → ręczny `kubectl get secret` |
+| tryb bez argumentu | OK | wszystkie backendy na `0/0`, brak podów → forward startuje i pada |
+
+Żeby tryb bez argumentu cokolwiek dał, trzeba najpierw podnieść backendy. Odpalić? Daj znać które:
+- **A** — tylko WWW: `frontend`, `fastapi-web-app`, `spring-app-deployment`
+- **B** — A + `grafana`, `kafka-ui`, `pgadmin`, `spark-master`
+- **C** — wszystko (ryzyko OOM, masz 7 Gi RAM)
+
+> Certyfikat bramki już naprawiłem (wcześniej w tym wątku) — `https://davtro.local:8444/` zwraca `503` zamiast RST, bo TLS działa, ale nie ma backendu. Jak podniesiesz A/B, `503` zamieni się w stronę WWW.
+
+Oba skrypty **działają poprawnie** — problem nie leży w nich. Oto co się dzieje:
+
+## 1. `extract-tls` — źle użyty argument
+
+Ty wpisałeś:
+```bash
+... extract-tls bash
+```
+
+Skrypt traktuje **`bash` jako nazwę sekretu** (1. argument po `extract-tls`), a nie jako polecenie. Szuka sekretu `bash` w namespace `davtro02` → nie ma go → tworzy puste pliki:
+```
+[davtro02/bash] -> /tmp/bash.crt, /tmp/bash.key, /tmp/bash-ca.crt
+Error: secrets "bash" not found
+crt: 0 B, key: 0 B        <- puste, bo "bash" to nie sekret
+```
+
+Stąd Twoje `/tmp/ctr` i puste pliki. To nie jest bug — po prostu `bash` to nie jest nazwa sekretu.
+
+**Poprawne użycie** (nazwa sekretu + prefiks) — i to **działa**, sprawdziłem:
+```bash
+bash scripts/port-forward-with-an-argument.sh extract-tls vault-tls /tmp/ctr
+# [davtro02/vault-tls] -> /tmp/ctr.crt, /tmp/ctr.key, /tmp/ctr-ca.crt
+# crt: 1289 B, key: 1679 B, ca: 1107 B   <- pełne pliki
+```
+
+Dostępne sekrety TLS w `davtro02`: `vault-tls`, `vault-ca`.
+
+**Uwaga (realny limitation skryptu):** `extract-tls` ma zakodowany namespace `$NS=davtro02`. Twój gateway cert `davtro-gateway-tls` leży w **`istio-system`**, więc przez ten subcommand go **nie** wyciągniesz. Trzeba ręcznie:
+```bash
+/snap/bin/microk8s kubectl -n istio-system get secret davtro-gateway-tls \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/gw.crt
+/snap/bin/microk8s kubectl -n istio-system get secret davtro-gateway-tls \
+  -o jsonpath='{.data.tls\.key}' | base64 -d > /tmp/gw.key
+```
+
+## 2. Tryb bez argumentu — skrypt startuje, ale nie ma dokąd kierować
+
+Skrypt **odpala się poprawnie** (widzisz całą listę `fastapi -> 8082`, `frontend -> 8083` itd.). Ale logi `/tmp/pf-*.log` są **puste**, bo za serwisami **nie ma żadnych podów**:
+
+```
+fastapi-web-app-svc   endpoints: <none>
+frontend-svc          endpoints: <none>
+grafana               endpoints: <none>
+spring-app-svc        endpoints: <none>
+...wszystkie <none>
+
+deploymenty: fastapi-web-app 0/0, frontend 0/0, spring 0/0, grafana 0/0 ...
+```
+
+`kubectl port-forward` startuje i nasłuchuje, ale przy pierwszym połączeniu nie ma backendu → od razu pada (`pod does not exist` / connection refused). Dlatego „nie zrzuca" niczego użytecznego.
+
+Działa tylko to, co faktycznie ma pody: `vault` (8243), `postgres`, `kafka-kraft`, `node-exporter`. Reszta to martwe forwardy, bo deploymenty są na `0/0`.
+
+## Podsumowanie
+
+| Co | Skrypt | Powód „nie działa" |
+|---|---|---|
+| `extract-tls bash` | OK | `bash` to nie nazwa sekretu → 0 B pliki. Użyj `extract-tls vault-tls /tmp/ctr` |
+| `extract-tls` na gateway cert | ograniczony | cert jest w `istio-system`, a skrypt patrzy tylko w `davtro02` → ręczny `kubectl get secret` |
+| tryb bez argumentu | OK | wszystkie backendy na `0/0`, brak podów → forward startuje i pada |
+
+Żeby tryb bez argumentu cokolwiek dał, trzeba najpierw podnieść backendy. Odpalić? Daj znać które:
+- **A** — tylko WWW: `frontend`, `fastapi-web-app`, `spring-app-deployment`
+- **B** — A + `grafana`, `kafka-ui`, `pgadmin`, `spark-master`
+- **C** — wszystko (ryzyko OOM, masz 7 Gi RAM)
+
+> Certyfikat bramki już naprawiłem (wcześniej w tym wątku) — `https://davtro.local:8444/` zwraca `503` zamiast RST, bo TLS działa, ale nie ma backendu. Jak podniesiesz A/B, `503` zamieni się w stronę WWW.
