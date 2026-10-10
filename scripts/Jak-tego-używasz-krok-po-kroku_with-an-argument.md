@@ -627,3 +627,111 @@ Plik `scripts/port-forward-with-an-argument.sh` odwoływał się do rzeczy, któ
 **Weryfikacja:** `bash -n` → `SYNTAX_OK`; zero aktywnych odwołań do `davtro-ingress`, `start_https_ingress`, `davtro-tls` i `*-mtls` (zostały tylko komentarze informujące, że coś usunięto).
 
 **Uwaga:** nie ruszałem pozostałych trzech plików (`port-forward.sh`, `port-forward-without-an-argument*.sh`) — mają **te same nieaktualne odwołania** (`davtro-ingress`, `fastapi-mtls`, a `port-forward.sh` dodatkowo nieaktualny `kafka-tls :9094`). Mogę je uaktualnić tak samo, jeśli chcesz.
+
+
+#
+Nic Ci nie padło - tylko wchodzisz na **złe porty bez portu**.
+
+### 1. `https://192.168.1.19:10250/` - NIGDY nie zadziała
+
+`10250` to nie jest żaden Twój serwis. To jest **kubelet** - wewnętrzny agent MicroK8s na nodzie.
+
+* Twój skrypt go w ogóle nie forwarduje. Forwardujesz `8443/8444 -> istio-ingressgateway:443` i `8243 -> vault:8203`.
+* Kubelet wymaga client-certa i zna tylko ścieżki typu `/pods`, `/runningpods`, `/metrics`. Wejście na `/` daje `404 page not found` z definicji.
+* Zostaw `10250` w spokoju. To nie Vault, nie frontend, nie Spark.
+
+Wcześniejszy błąd w logach:
+```
+dial tcp 192.168.1.19:10250: connect: connection refused
+```
+to był tylko objaw że `apiserver/kubelet` leżał, nie adres do wchodzenia.
+
+### 2. `https://davtro.local/` - brakuje portu
+
+Jak wpiszesz tak w przeglądarkę, idziesz na `192.168.1.19:443`. A Ty masz forward na `8443` i `8444`, nie na `443`. Tam nic nie słucha.
+
+Musi być z portem:
+```
+https://davtro.local:8443/
+https://davtro.local:8444/  <- to samo, ten sam Gateway w skrypcie `https-all`
+```
+
+I na **drugim kompie** w `hosts` musi być:
+```
+192.168.1.19  davtro.local spark.davtro.local
+```
+Linux: `/etc/hosts`, Windows: `C:\Windows\System32\drivers\etc\hosts`
+
+Bez tego `davtro.local` w ogóle nie wskaże na `.19`.
+
+### 3. Dobre adresy dla każdego:
+
+Z Twojego `manifests/base/istio-gateway.yaml` + `https-all`:
+
+| chcesz | poprawny URL | czemu Twój nie działał |
+|---|---|---|
+| **vault** | `https://192.168.1.19:8243/v1/sys/health -k` | Vault idzie PROSTO do `svc/vault:8203`, bez Gateway. Nie używaj `davtro.local` do Vaulta. I nie na `/` tylko na `/v1/...` lub `/ui/`. Samo `/` da 404 z Vaulta. Przeglądarka wywali cert self-signed - musisz kliknąć Zaawansowane / Akceptuj. |
+| **frontend** | `https://davtro.local:8443/` | `https://davtro.local/` bez `:8443` trafia na 443 gdzie nic nie ma. `https://192.168.1.19:8443/` da 404 bo `Host: 192.168.1.19` nie pasuje do `hosts: [davtro.local]` |
+| **spark** | `https://spark.davtro.local:8443/` | Spark jest TYLKO na hoście `spark.davtro.local`, nie na `davtro.local`. Jak wejdziesz na `davtro.local:8443/` to łapiesz catch-all `/ -> frontend` i masz 404 z nginxa. |
+| **spring** | `http://192.168.1.19:8084/` PLAIN HTTP | Spring **nie ma w ogóle trasy** w Gateway. Przez `https://davtro.local:8443/spring` wpadasz w catch-all do frontendu i frontend daje 404. Springa odpalasz pełną paczką bez argumentu: `./scripts/port-forward-with-an-argument.sh` (bez `https-all`) - wtedy wstaje `8084 -> spring-app-svc:80` |
+| **pgadmin** | `https://davtro.local:8443/pgadmin/` | Uwaga na slash na końcu! Bez `/` na końcu VirtualService `/pgadmin` + redirect pgadmina się zapętla / daje 404. Używaj zawsze `.../pgadmin/` |
+
+Test z drugiego kompa bez grzebania w przeglądarce:
+```bash
+curl -vk https://davtro.local:8443/ --resolve davtro.local:8443:192.168.1.19
+curl -vk https://spark.davtro.local:8443/ --resolve spark.davtro.local:8443:192.168.1.19
+curl -vk https://davtro.local:8443/pgadmin/ --resolve davtro.local:8443:192.168.1.19
+curl -vk https://192.168.1.19:8243/v1/sys/health
+curl http://192.168.1.19:8084/actuator/health
+```
+
+### 4. Sprawdź na `.19` czy forwardy żyją:
+
+`404` = Gateway żyje. `ERR_CONNECTION_REFUSED` = forward padł / klaster leży:
+
+```bash
+ss -tln | grep -E '8443|8444|8243|8084'
+cat /tmp/pf-fastapi.log | tail -n 20
+./scripts/port-forward-with-an-argument.sh diag
+```
+
+Jak nie ma `LISTEN 0.0.0.0:8443` to ubij stare i odpal od nowa:
+```bash
+pkill -f "port-forward.*8443"; pkill -f "port-forward.*8444"; pkill -f "port-forward.*8243"
+./scripts/port-forward-with-an-argument.sh https-all
+# + w drugim terminalu dla springa:
+kubectl port-forward --address 0.0.0.0 -n davtro02 svc/spring-app-svc 8084:80
+```
+
+Podsumowanie: zapomnij o `:10250`, do wszystkiego przez Gateway zawsze `davtro.local:8443` lub `spark.davtro.local:8443`, Vault tylko przez `IP:8243/v1/...`, Spring tylko przez `IP:8084` plain HTTP.
+
+```bash
+ss -tln | grep -E '8443|8444|8243|8084'
+cat /tmp/pf-fastapi.log | tail -n 20
+./port-forward-with-an-argument.sh diag
+cat: /tmp/pf-fastapi.log: Nie ma takiego pliku ani katalogu
+Port-forwarding uslug DavTro na 0.0.0.0 ... (kubectl: /snap/bin/microk8s kubectl, namespace: davtro02)
+=== porty nasluchujace (kubectl port-forward) ===
+  (brak nasluchujacych portow z listy)
+
+=== procesy kubectl port-forward ===
+david     345616  0.0  0.0   9752  3616 pts/3    S+   12:49   0:00 /bin/bash ./port-forward-with-an-argument.sh diag
+
+=== logi /tmp/pf-*.log (ostatnie 5 linii kazdego) ===
+
+=== serwis i endpointy Istio Ingress Gateway (ns istio-system) ===
+NAME                   TYPE           CLUSTER-IP       EXTERNAL-IP   PORT(S)                                         AGE
+istio-ingressgateway   LoadBalancer   10.152.183.154   <pending>     15021:30933/TCP,80:31426/TCP,443:31411/TCP,31400:31631/TCP,15443:30658/TCP   137d
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
+NAME                   ENDPOINTS                                                          AGE
+istio-ingressgateway   10.1.93.138:15021,10.1.93.138:8080,10.1.93.138:15443 + 2 more...   137d
+
+=== Gateway/VirtualService (ns davtro02) ===
+NAME                                               GATEWAYS             HOSTS                    AGE
+virtualservice.networking.istio.io/davtro-routes   ["davtro-gateway"]   ["davtro.local"]         5d
+virtualservice.networking.istio.io/spark-routes    ["davtro-gateway"]   ["spark.davtro.local"]   5d
+
+=== sekrety TLS w davtro02 ===
+vault-ca                     kubernetes.io/tls                3      5d
+vault-tls                    kubernetes.io/tls                3      5d
+```
