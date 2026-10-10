@@ -923,3 +923,18 @@ Działa tylko to, co faktycznie ma pody: `vault` (8243), `postgres`, `kafka-kraf
 - **C** — wszystko (ryzyko OOM, masz 7 Gi RAM)
 
 > Certyfikat bramki już naprawiłem (wcześniej w tym wątku) — `https://davtro.local:8444/` zwraca `503` zamiast RST, bo TLS działa, ale nie ma backendu. Jak podniesiesz A/B, `503` zamieni się w stronę WWW.
+Diff vs. Twój oryginał
+#	Zmiana	Dlaczego
+1	ISTIO_NS="${ISTIO_NS:-istio-system}"	koniec zahardkodowanego istio-system w start_https_gateway i diag; można nadpisać env-em
+2	nowa funkcja has_endpoints	wykrywa 0/0 przed startem forwardu
+3	start sprawdza has_endpoints i zapisuje $! do /tmp/pf-$NAME.pid	brak pustych forwardów + PID do diag
+4	start_https_gateway sprawdza has_endpoints i zapisuje PID	to samo dla gatewaya
+5	extract_tls bez zmian sygnatury (już przyjmował $3), ale case extract-tls przekazuje $4	naprawia realny bug: extract-tls davtro-gateway-tls /tmp/gw istio-system
+6	make_pfx przyjmuje $5 jako namespace i przekazuje do extract_tls	spójność: make-pfx davtro-gateway-tls /tmp/gw.pfx "" "" istio-system
+7	case make-pfx przekazuje $6	j.w.
+8	diag czyta /tmp/pf-*.pid i pokazuje ZYWY / MARTWY	koniec zgadywania po ps aux | grep
+9	diag rozszerzony o wszystkie porty z listy	pełny obraz
+10	diag pokazuje też sekrety TLS w $ISTIO_NS	tam leży davtro-gateway-tls
+11	https-all woła start_https_gateway (już z has_endpoints)	jeśli gateway nie ma podów, wait nie wisi bez sensu
+12	W helpie $ISTIO_NS zamiast literału istio-system	spójność
+13	#!/bin/bash w pierwszej linii	poprawny shebang (Twój plik .txt miał #!binbash)

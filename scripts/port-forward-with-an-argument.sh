@@ -32,6 +32,25 @@ fi
 echo "Port-forwarding uslug DavTro na $ADDR ... (kubectl: $KC, namespace: $NS)"
 
 # ---------------------------------------------------------
+# Sprzatanie przy wyjsciu (Ctrl+C / kill / normal EXIT).
+# Zabija wszystkie port-forwardy zapisane w /tmp/pf-*.pid
+# i usuwa pliki PID. Bez tego Ctrl+C w https-all zostawia
+# procesy w tle i kolejny start = "address already in use".
+# ---------------------------------------------------------
+cleanup_forward() {
+  local f pid
+  for f in /tmp/pf-*.pid; do
+    [ -e "$f" ] || continue
+    pid=$(cat "$f" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null
+    fi
+    rm -f "$f"
+  done
+}
+trap cleanup_forward EXIT INT TERM
+
+# ---------------------------------------------------------
 # HTTP (zwykly plain-text, np. local dev / debug)
 # ---------------------------------------------------------
 #   FastAPI     8082 -> fastapi-web-app-svc:80      | REST API (/api/health)
@@ -65,7 +84,9 @@ has_endpoints() {
 }
 
 start() {
+  # start <name> <local-port> <svc> <target-port> [scheme]
   local NAME="$1" LOCAL="$2" SVC="$3" TARGET="$4"
+  local SCHEME="${5:-http}"
   if ! has_endpoints "$NS" "$SVC"; then
     echo "  $NAME: POMINIETY - svc/$SVC (ns $NS) nie ma endpointow (0/0 podow)"
     return 0
@@ -73,7 +94,7 @@ start() {
   $KC port-forward --address "$ADDR" -n "$NS" "svc/$SVC" "$LOCAL:$TARGET" \
       >"/tmp/pf-$NAME.log" 2>&1 &
   echo $! > "/tmp/pf-$NAME.pid"
-  echo "  $NAME: http://<IP>:${LOCAL}/  -> $SVC:$TARGET"
+  echo "  $NAME: ${SCHEME}://<IP>:${LOCAL}/  -> $SVC:$TARGET"
 }
 
 # ---------------------------------------------------------
@@ -323,13 +344,13 @@ case "${1:-}" in
   https-fastapi)  start_https_gateway fastapi  "${2:-8443}"; echo "   sciezka: https://davtro.local:${2:-8443}/api/health"; exit 0 ;;
   https-frontend) start_https_gateway frontend "${2:-8444}"; echo "   sciezka: https://davtro.local:${2:-8444}/"; exit 0 ;;
   https-gateway)  start_https_gateway gateway  "${2:-8446}"; echo "   sciezka: https://davtro.local:${2:-8446}/ (dowolna: /api, /grafana, /kafka-ui, /pgadmin)"; exit 0 ;;
-  https-vault)    start vault-https "${2:-8243}" vault 8203; exit 0 ;;
+  https-vault)    start vault-https "${2:-8243}" vault 8203 https; exit 0 ;;
   https-all)
     start_https_gateway fastapi  "${2:-8443}"
     start_https_gateway frontend "${3:-8444}"
-    start vault-https "${4:-8243}" vault 8203
+    start vault-https "${4:-8243}" vault 8203 https
     echo
-    echo "Wszystkie forwardy HTTPS odpalone. Ctrl+C aby zakonczyc."
+    echo "Wszystkie forwardy HTTPS odpalone. Ctrl+C aby zakonczyc (sprzatanie automatyczne)."
     wait
     exit 0
     ;;
@@ -364,7 +385,7 @@ start prometheus  9090 prometheus          9090
 start pgadmin     5050 pgadmin             80
 start postgres    5432 postgres-clusterip  5432
 start redis       6379 redis               6379
-start vault       8243 vault               8203
+start vault       8243 vault               8203 https
 start spark       7077 spark-master-svc    7077
 start kafka       9092 kafka-kraft         9092
 start kafka-exp   9308 kafka-exporter      9308
@@ -383,9 +404,9 @@ echo "#   $0 https-frontend 8444  (uruchomi: port-forward -n $ISTIO_NS svc/istio
 echo "# Dowolna sciezka Gateway (/api, /grafana, /kafka-ui, /pgadmin):"
 echo "#   $0 https-gateway 8446    (uruchomi: port-forward -n $ISTIO_NS svc/istio-ingressgateway 8446:443)"
 echo "# Vault-HTTPS:"
-echo "#   $0 https-vault 8243     (uruchomi: port-forward svc/vault 8243:8203)"
+echo "#   $0 https-vault 8243     (uruchomi: port-forward svc/vault 8243:8203; UI: https://<IP>:8243/)"
 echo "# Spring nie jest wystawiony przez Gateway - plain HTTP: $0 (pelna paczka) lub port-forward svc/spring-app-svc"
-echo "# Wszystko naraz (zostaje w foreground, Ctrl+C konczy):"
+echo "# Wszystko naraz (zostaje w foreground, Ctrl+C konczy i sprzata):"
 echo "#   $0 https-all"
 echo
 echo "=== TLS sekrety (Istio mTLS w mesh robi sam Envoy - zadnych sekretow *-mtls) ==="
