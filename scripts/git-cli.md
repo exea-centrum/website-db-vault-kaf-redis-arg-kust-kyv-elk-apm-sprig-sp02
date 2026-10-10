@@ -1,3 +1,4 @@
+```bash
 git add -A && git commit -m "Team GitSecOps MLOps Marietta Julia Zosia Helena Istio 001 deepseek  " && git pull --rebase origin main && git push origin main
 git checkout --ours . && git add -A && GIT_EDITOR=true git rebase --continue && git push origin main
 
@@ -40,3 +41,4 @@ kubectl -n davtro02 get pods
 kubectl -n davtro02 logs deploy/vault-bootstrap -c vault-bootstrap --tail=40
 kubectl -n davtro02 describe pod vault-0 | sed -n '/Events:/,$p'
 kubectl -n davtro02 get secretstore,externalsecret
+```
