@@ -1,6 +1,11 @@
 # ISTIO: zastepuje ingress-nginx (Ingress davtro-ingress + spark-ingress).
-# TLS terminuje Istio Ingress Gateway (istio-system) certem z cert-managera (Secret davtro-gateway-tls,
-# patrz manifests/istio-system/). Routing - te same sciezki co w dawnym Ingressie.
+# TLS terminuje Istio Ingress Gateway (istio-system) certem z cert-managera
+# (Secret davtro-gateway-tls, patrz manifests/istio-system/gateway-certificate.yaml).
+#
+# Routing: per HOST (nie subpath), bo pgAdmin i Kafka UI NIE obsluguja subpath
+# (zwracaja 404 na /pgadmin/ i /kafka-ui/). Wyjatki:
+#   - FastAPI: /api/*   (dziala natywnie pod subpath)
+#   - frontend: /       (dziala natywnie pod /)
 apiVersion: networking.istio.io/v1beta1
 kind: Gateway
 metadata:
@@ -11,11 +16,29 @@ spec:
     istio: ingressgateway
   servers:
     - port: { number: 80, name: http, protocol: HTTP }
-      hosts: ["davtro.local", "spark.davtro.local"]
+      hosts:
+        - "davtro.local"
+        - "spark.davtro.local"
+        - "kafka-ui.davtro.local"
+        - "grafana.davtro.local"
+        - "pgadmin.davtro.local"
+        - "tempo.davtro.local"
+        - "prometheus.davtro.local"
+        - "loki.davtro.local"
+        - "spring.davtro.local"
       tls:
         httpsRedirect: true
     - port: { number: 443, name: https, protocol: HTTPS }
-      hosts: ["davtro.local", "spark.davtro.local"]
+      hosts:
+        - "davtro.local"
+        - "spark.davtro.local"
+        - "kafka-ui.davtro.local"
+        - "grafana.davtro.local"
+        - "pgadmin.davtro.local"
+        - "tempo.davtro.local"
+        - "prometheus.davtro.local"
+        - "loki.davtro.local"
+        - "spring.davtro.local"
       tls:
         mode: SIMPLE
         credentialName: davtro-gateway-tls
@@ -30,15 +53,8 @@ spec:
   hosts: ["davtro.local"]
   gateways: ["davtro-gateway"]
   http:
-    # kolejnosc ma znaczenie: od najbardziej szczegolowych, "/" na koncu
     - match: [{ uri: { prefix: /api } }]
       route: [{ destination: { host: fastapi-web-app-svc, port: { number: 80 } } }]
-    - match: [{ uri: { prefix: /grafana } }]
-      route: [{ destination: { host: grafana, port: { number: 3000 } } }]
-    - match: [{ uri: { prefix: /kafka-ui } }]
-      route: [{ destination: { host: kafka-ui, port: { number: 80 } } }]
-    - match: [{ uri: { prefix: /pgadmin } }]
-      route: [{ destination: { host: pgadmin, port: { number: 80 } } }]
     - route: [{ destination: { host: frontend-svc, port: { number: 80 } } }]
 ---
 apiVersion: networking.istio.io/v1beta1
@@ -51,3 +67,80 @@ spec:
   gateways: ["davtro-gateway"]
   http:
     - route: [{ destination: { host: spark-master-svc, port: { number: 8082 } } }]
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: kafka-ui-routes
+  namespace: davtro02
+spec:
+  hosts: ["kafka-ui.davtro.local"]
+  gateways: ["davtro-gateway"]
+  http:
+    - route: [{ destination: { host: kafka-ui, port: { number: 80 } } }]
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: grafana-routes
+  namespace: davtro02
+spec:
+  hosts: ["grafana.davtro.local"]
+  gateways: ["davtro-gateway"]
+  http:
+    - route: [{ destination: { host: grafana, port: { number: 3000 } } }]
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: pgadmin-routes
+  namespace: davtro02
+spec:
+  hosts: ["pgadmin.davtro.local"]
+  gateways: ["davtro-gateway"]
+  http:
+    - route: [{ destination: { host: pgadmin, port: { number: 80 } } }]
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: tempo-routes
+  namespace: davtro02
+spec:
+  hosts: ["tempo.davtro.local"]
+  gateways: ["davtro-gateway"]
+  http:
+    - route: [{ destination: { host: tempo, port: { number: 3200 } } }]
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: prometheus-routes
+  namespace: davtro02
+spec:
+  hosts: ["prometheus.davtro.local"]
+  gateways: ["davtro-gateway"]
+  http:
+    - route: [{ destination: { host: prometheus, port: { number: 9090 } } }]
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: loki-routes
+  namespace: davtro02
+spec:
+  hosts: ["loki.davtro.local"]
+  gateways: ["davtro-gateway"]
+  http:
+    - route: [{ destination: { host: loki, port: { number: 3100 } } }]
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: spring-routes
+  namespace: davtro02
+spec:
+  hosts: ["spring.davtro.local"]
+  gateways: ["davtro-gateway"]
+  http:
+    - route: [{ destination: { host: spring-app-svc, port: { number: 80 } } }]

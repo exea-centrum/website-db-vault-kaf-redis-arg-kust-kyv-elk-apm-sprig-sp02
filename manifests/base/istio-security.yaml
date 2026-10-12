@@ -1,9 +1,4 @@
 # ISTIO: bezpieczenstwo sieci w namespace davtro02.
-# Zastepuje: certyfikaty *-mtls (cert-manager), keystore/truststore Kafki, SSL w kodzie aplikacji.
-# Zasady identycznosci: SPIFFE = cluster.local/ns/<ns>/sa/<serviceaccount>.
-# UWAGA: fastapi, message-processor, frontend, vault wspoldziela SA davtro-sa (role Vault Kubernetes-auth
-# sa przypiete do davtro-sa), a reszta uzywa SA default. Rozdzielenie SA = dodatkowa granularnosc, ale wymaga
-# zmiany bound_service_account_names w vault-bootstrap.yaml.
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
@@ -11,14 +6,8 @@ metadata:
   namespace: davtro02
 spec:
   mtls:
-    mode: STRICT          # tylko mTLS miedzy podami z sidecarem
+    mode: STRICT
 ---
-# Vault: API na :8203 ma WLASNY TLS i jest wolane takze spoza mesh (ESO, cert-manager, CronJob snapshotu)
-# oraz przez kubelet (probe httpGet HTTPS na IP poda). Envoy przechwytujacy ten port zamykal polaczenia
-# przed handshake'iem (Vault: "TLS handshake error from 127.0.0.6: EOF", probe EOF, restarty poda),
-# dlatego port 8203 jest wylaczony z przechwytywania sidecara (traffic.sidecar.istio.io/excludeInboundPorts
-# w patchu StatefulSet/vault w kustomization.yaml), a DestinationRule nizej wylacza Istio-mTLS po stronie klientow.
-# Pozostale porty Vaulta (8201 raft) zostaja w mesh - STRICT.
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
@@ -30,11 +19,9 @@ spec:
   mtls:
     mode: STRICT
   portLevelMtls:
-    "8203":   # klucz MUSI byc stringiem - kustomize (ArgoCD) odrzuca int jako klucz mapy
+    "8203":
       mode: PERMISSIVE
 ---
-# Klienci w mesh (fastapi, spring, message-processor, vault-bootstrap) lacza sie z Vaultem po jego wlasnym TLS.
-# Bez tej reguly auto-mTLS Istio probowalby mTLS do portu, na ktorym Vault mowi czystym TLS (handshake fail).
 apiVersion: networking.istio.io/v1beta1
 kind: DestinationRule
 metadata:
@@ -48,7 +35,6 @@ spec:
         tls:
           mode: DISABLE
 ---
-# Postgres 5432: aplikacje, pgAdmin, exporter, Vault (database engine)
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -67,7 +53,6 @@ spec:
       to:
         - operation: { ports: ["5432"] }
 ---
-# Kafka 9092: producenci/konsumenci, UI, exporter, Job tworzacy topiki
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -87,7 +72,6 @@ spec:
       to:
         - operation: { ports: ["9092"] }
 ---
-# Redis 6379: tylko fastapi + message-processor (SA davtro-sa)
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -105,7 +89,6 @@ spec:
       to:
         - operation: { ports: ["6379"] }
 ---
-# FastAPI (L7): z gateway'a tylko /api/*; wewnatrz mesh (Prometheus, frontend) dowolna sciezka
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -128,7 +111,6 @@ spec:
               - cluster.local/ns/davtro02/sa/davtro-sa
               - cluster.local/ns/davtro02/sa/default
 ---
-# UI wystawione przez gateway: frontend, Grafana, pgAdmin, Kafka-UI - wejscie wylacznie przez Istio Ingress Gateway
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -137,7 +119,9 @@ metadata:
 spec:
   selector:
     matchExpressions:
-      - { key: app, operator: In, values: [frontend, grafana, pgadmin, kafka-ui] }
+      - { key: app, operator: In,
+          values: [frontend, grafana, pgadmin, kafka-ui,
+                   tempo, prometheus, loki, spring-app, spark-master] }
   action: ALLOW
   rules:
     - from:

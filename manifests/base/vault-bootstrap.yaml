@@ -348,7 +348,7 @@ spec:
                     ttl=87600h key_type=rsa key_bits=2048 >/dev/null
                 fi
                 vault write pki/roles/davtro-ingress \
-                  allowed_domains="davtro.local,spark.davtro.local" \
+                  allowed_domains="davtro.local,spark.davtro.local,kafka-ui.davtro.local,grafana.davtro.local,pgadmin.davtro.local,tempo.davtro.local,prometheus.davtro.local,loki.davtro.local,spring.davtro.local" \
                   allow_subdomains=true allow_bare_domains=true \
                   max_ttl=2160h key_type=rsa key_bits=2048 >/dev/null
                 vault write pki/roles/davtro-internal \
