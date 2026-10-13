@@ -2,7 +2,7 @@
 # Port-forwarding uslug DavTro - dostep z innych maszyn w LAN.
 #
 # Domyslnie bindowanie na 0.0.0.0 (widoczne z sieci).
-# Lokalnie (tylko ta maszyna):  ADDR=127.0.0.1 ./scripts/port-forward.sh
+# Lokalnie (tylko ta maszyna):  ADDR=127.0.0.1 ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh
 #
 # UWAGA: port 8080 jest ZAJETY przez port-forward ArgoCD, wiec:
 #   FastAPI -> 8082, frontend -> 8083, spring -> 8084, spark-ui -> 8085
@@ -30,7 +30,7 @@ else
   exit 1
 fi
 
-echo "Port-forwarding uslug DavTro na $ADDR ... (kubectl: $KC, namespace: $NS)"
+echo "Port-forwarding uslug DavTro na $ADDR ... (kubectl: $KC, namespace: $NS, CERT_DIR: $CERT_DIR)"
 
 # ---------------------------------------------------------
 # Sprzatanie wlasnych forwardow (z /tmp/pf-*.pid).
@@ -217,8 +217,12 @@ extract_tls() {
   local KEYPATH="${PREFIX}.key"
   local CAPATH="${PREFIX}-ca.crt"
 
-  # Utworz katalog, jesli nie istnieje:
-  mkdir -p "$(dirname "$PREFIX")"
+  # ZAWSZE utworz katalog CERT_DIR (na wypadek gdyby PREFIX byl w innym miejscu):
+  echo "  [extract] CERT_DIR=$CERT_DIR"
+  echo "  [extract] PREFIX=$PREFIX"
+  mkdir -p "$CERT_DIR" || { echo "BLAD: nie moge utworzyc $CERT_DIR" >&2; return 1; }
+  # Utworz tez katalog z prefixu (na wypadek gdyby PREFIX byl w innym katalogu):
+  mkdir -p "$(dirname "$PREFIX")" || { echo "BLAD: nie moge utworzyc $(dirname "$PREFIX")" >&2; return 1; }
 
   echo "  [extract] $SECRENS/$SECRET -> $CRTPATH, $KEYPATH, $CAPATH"
   $KC -n "$SECRENS" get secret "$SECRET" -o jsonpath='{.data.tls\.crt}' | base64 -d > "$CRTPATH" 2>/dev/null || true
@@ -232,6 +236,9 @@ extract_tls() {
 
   chmod 600 "$KEYPATH" 2>/dev/null || true
   echo "    crt: $(wc -c < "$CRTPATH" 2>/dev/null) B, key: $(wc -c < "$KEYPATH" 2>/dev/null) B, ca: $(wc -c < "$CAPATH" 2>/dev/null) B"
+  # Debug: pokaz co jest w katalogu CERT_DIR:
+  echo "  [extract] zawartosc $CERT_DIR:"
+  ls -la "$CERT_DIR" 2>/dev/null | sed 's/^/    /'
 }
 
 make_pfx() {
@@ -251,7 +258,8 @@ make_pfx() {
     return 1
   fi
 
-  mkdir -p "$CERT_DIR"
+  # ZAWSZE utworz katalog CERT_DIR:
+  mkdir -p "$CERT_DIR" || { echo "BLAD: nie moge utworzyc $CERT_DIR" >&2; return 1; }
 
   extract_tls "$SECRET" "$PREFIX" "$SECRENS"
 
@@ -314,7 +322,7 @@ import_help() {
      usuniete razem z migracja na Istio; Gateway terminuje TLS w trybie SIMPLE
      (bez client-cert), a mTLS wewnatrz mesh robi Envoy automatycznie.
    - Jesli potrzebujesz .pfx z innego Secreta kubernetes.io/tls (np. vault-tls):
-       ./scripts/port-forward-with-an-argument.sh make-pfx vault-tls "" "MojeHaslo123" "vault server"
+       ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh make-pfx vault-tls "" "MojeHaslo123" "vault server"
    - import:
        Chrome/Edge: chrome://settings/certificates -> "Twoje certyfikaty" -> Importuj -> /tmp/cert-davtro/vault-tls.pfx
        Firefox:     about:preferences#privacy -> Certyfikaty -> Wyswietl certyfikaty
@@ -342,25 +350,29 @@ EOF
 }
 
 # ---------------------------------------------------------
+# KROK 6b (dostep HTTPS/mTLS z LAN): wyborcze forwardy przez argumenty.
+# CERT_DIR (domyslnie /tmp/cert-davtro) to katalog zrzutu certow.
+# ---------------------------------------------------------
 # KROK 6b (dostep HTTPS/mTLS z LAN): wyborcze forwardy przez argumenty,
 # bez odpalania calej paczki HTTP (ADDR domyslnie 0.0.0.0; lokalnie: ADDR=127.0.0.1):
-#   ./scripts/port-forward-with-an-argument.sh https-fastapi   8443
-#   ./scripts/port-forward-with-an-argument.sh https-frontend  8444
-#   ./scripts/port-forward-with-an-argument.sh https-gateway   8443   (dowolna sciezka)
-#   ./scripts/port-forward-with-an-argument.sh https-vault     8243
-#   ./scripts/port-forward-with-an-argument.sh https-all
-#   ./scripts/port-forward-with-an-argument.sh https-all-cleanup-sierot
-#   ./scripts/port-forward-with-an-argument.sh cleanup
-#   ./scripts/port-forward-with-an-argument.sh extract-tls vault-tls
-#   ./scripts/port-forward-with-an-argument.sh extract-tls davtro-gateway-tls "" istio-system
-#   ./scripts/port-forward-with-an-argument.sh make-pfx vault-tls "" "Haslo123" "vault server"
-#   ./scripts/port-forward-with-an-argument.sh import-help
-#   ./scripts/port-forward-with-an-argument.sh diag
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-fastapi   8443
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-frontend  8444
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-gateway   8443   (dowolna sciezka)
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-vault     8243
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-all
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-all-cleanup-sierot
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh cleanup
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh extract-tls vault-tls
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh extract-tls davtro-gateway-tls "" istio-system
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh make-pfx vault-tls "" "Haslo123" "vault server"
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh import-help
+#   ./scripts/Port-forwarding-deepseek-cleanup-sierot.sh diag
 #
 # Certyfikat Gateway (davtro-gateway-tls, ns istio-system) podpisuje Vault PKI
 # przez cert-manager i SAM sie renewuje przed TTL (90d / renew 15d); CA w sekrecie
 # vault-tls (ns davtro02). Po forwardzie uzywaj https://davtro.local:<port>
 # (wpis w /etc/hosts -> 127.0.0.1), bo Gateway dopasowuje ruch po SNI/Host.
+#
 # ---------------------------------------------------------
 
 diag() {
@@ -403,7 +415,7 @@ diag() {
   echo "=== sekrety TLS w $ISTIO_NS ==="
   $KC -n "$ISTIO_NS" get secrets 2>/dev/null | grep -E 'tls|mtls' || echo "  (brak)"
   echo
-  echo "=== certy cert-davtro w $CERT_DIR ==="
+  echo "=== certy w $CERT_DIR ==="
   ls -la "$CERT_DIR" 2>/dev/null || echo "  (katalog $CERT_DIR nie istnieje)"
 }
 
@@ -527,7 +539,7 @@ echo "=== Klient (na innej maszynie) ==="
 echo "# Skopiuj CA na klienta:"
 echo "#   scp $(whoami)@$(hostname -I | awk '{print $1}'):$CERT_DIR/davtro-gateway-tls-ca.crt ~/davtro-ca.crt"
 echo "# Zaimportuj CA na kliencie:"
-echo "#   ./scripts/client-import-certs.sh ~/davtro-ca.crt"
+echo "#   ./scripts/Client-import-certs-deepseek.sh ~/davtro-ca.crt"
 echo
 
 echo "ArgoCD UI:  https://<IP-HOSTA>:8080/   (port-forward osobno, port 8080 = ArgoCD)"

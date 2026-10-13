@@ -876,3 +876,71 @@ grep -n 'trap' /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-ap
 ```
 
 …to powiem, **czy skrypt jest OK** i **co dokładnie pokaże `ls -l /tmp/pf-*.pid`** po trybie bez argumentu.
+
+```bash
+# 1) Tryb bez argumentu – szybko wraca, PID-y zostają:
+bash /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02/scripts/Port-forwarding-deepseek-cleanup-sierot.sh
+sleep 3
+ls -l /tmp/pf-*.pid
+# Powinno byc 18 plikow .pid
+
+# Diagnostyka:
+bash /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02/scripts/Port-forwarding-deepseek-cleanup-sierot.sh diag
+
+# Sprzatanie po sobie (bo tryb bez argumentu zostawia forwardy):
+bash /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02/scripts/Port-forwarding-deepseek-cleanup-sierot.sh cleanup
+
+# 2) https-all-cleanup-sierot + Ctrl+C:
+bash /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02/scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-all-cleanup-sierot
+# Ctrl+C
+ls /tmp/pf-*.pid 2>/dev/null
+# Pusto
+ss -tlnp | grep -E '8443|8444|8243'
+# Pusto (oprocz 8080/10443, jesli byly)
+
+# 3) extract-tls – POPRAWNIE (puste "" jako 3. argument, namespace jako 4.):
+bash /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02/scripts/Port-forwarding-deepseek-cleanup-sierot.sh extract-tls davtro-gateway-tls "" istio-system
+
+# Sprawdz pliki:
+ls -la /tmp/cert-davtro/
+file /tmp/cert-davtro/davtro-gateway-tls.crt \
+     /tmp/cert-davtro/davtro-gateway-tls.key \
+     /tmp/cert-davtro/davtro-gateway-tls-ca.crt
+# Powinno pokazac 3 pliki PEM
+```
+```bash
+SCRIPT=/home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02/scripts/Port-forwarding-deepseek-cleanup-sierot.sh
+
+# 1) Tryb bez argumentu – startuje 18 forwardów, PID-y ZOSTAJĄ (bo trap usunięty):
+bash "$SCRIPT"
+sleep 3
+ls -l /tmp/pf-*.pid
+# Powinno byc 18 plikow .pid
+
+# Sprawdz, ze dzialaja:
+ss -tlnp | grep -E '8082|8083|8243'
+# Powinno byc LISTEN
+
+# diag:
+bash "$SCRIPT" diag
+
+# Sprzatanie po sobie (bo tryb bez argumentu zostawia forwardy):
+bash "$SCRIPT" cleanup
+
+# 2) https-all-cleanup-sierot + Ctrl+C:
+bash "$SCRIPT" https-all-cleanup-sierot
+# Ctrl+C
+
+ls /tmp/pf-*.pid 2>/dev/null
+# Pusto
+
+ss -tlnp | grep -E '8443|8444|8243'
+# Pusto (oprocz 8080/10443, jesli byly)
+
+# 3) extract-tls:
+bash "$SCRIPT" extract-tls davtro-gateway-tls /tmp/cert-davtro/davtro-gateway-tls istio-system
+file /tmp/cert-davtro/davtro-gateway-tls.crt \
+     /tmp/cert-davtro/davtro-gateway-tls.key \
+     /tmp/cert-davtro/davtro-gateway-tls-ca.crt
+# Powinno pokazac 3 pliki PEM
+```
