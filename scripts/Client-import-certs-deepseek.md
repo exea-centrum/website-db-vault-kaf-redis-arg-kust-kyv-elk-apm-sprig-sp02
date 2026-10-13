@@ -1202,3 +1202,139 @@ ls -la /tmp/cert-davtro/
 ```
 
 …to powiem, czy **wszystko zapisało się poprawnie** w `/tmp/cert-davtro/`.
+
+
+#
+# Poprawione komendy — Twoje nazwy plików
+
+Poniżej **wszystkie komendy** z **Twoimi nazwami**:
+
+- `scripts/Port-forwarding-deepseek-cleanup-sierot.sh`
+- `scripts/Client-import-certs-deepseek.sh`
+- `scripts/Client-port-forwarding-deepseek-cleanup-sierot.sh`
+
+---
+
+## 1. Wdrożenie — komendy
+
+```bash
+cd /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+
+# 1) Podmien 3 pliki (skopiuj zawartosc z poprzedniej wiadomosci):
+#    scripts/Port-forwarding-deepseek-cleanup-sierot.sh          <- Plik 1
+#    scripts/Client-import-certs-deepseek.sh                     <- Plik 2
+#    scripts/Client-port-forwarding-deepseek-cleanup-sierot.sh   <- Plik 3
+
+# 2) Nadaj prawa wykonywania:
+chmod +x scripts/Port-forwarding-deepseek-cleanup-sierot.sh
+chmod +x scripts/Client-import-certs-deepseek.sh
+chmod +x scripts/Client-port-forwarding-deepseek-cleanup-sierot.sh
+
+# 3) Test:
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh extract-tls davtro-gateway-tls "" istio-system
+ls -la /tmp/cert-davtro/
+
+# 4) Git:
+git add scripts/Port-forwarding-deepseek-cleanup-sierot.sh \
+        scripts/Client-import-certs-deepseek.sh \
+        scripts/Client-port-forwarding-deepseek-cleanup-sierot.sh
+
+git commit -m "scripts: certy do /tmp/cert-davtro, cleanup sierot, client-import-certs poprawiony"
+
+git push origin main
+```
+
+---
+
+## 2. Test — pełny flow (Twoje nazwy)
+
+### **Na serwerze** (`david@parrot`)
+
+```bash
+cd /home/david/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+
+# 1) Wyciagnij CA Gatewaya:
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh extract-tls davtro-gateway-tls "" istio-system
+# -> /tmp/cert-davtro/davtro-gateway-tls-ca.crt
+
+# 2) Sprawdz:
+ls -la /tmp/cert-davtro/
+
+# 3) Wyciagnij CA Vaulta:
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh extract-tls vault-tls
+# -> /tmp/cert-davtro/vault-tls-ca.crt
+
+# 4) (Opcjonalnie) PFX Vaulta do przegladarki:
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh make-pfx vault-tls "" "Haslo123" "vault server"
+# -> /tmp/cert-davtro/vault-tls.pfx
+```
+
+### **Na kliencie** (`david@lmde`)
+
+```bash
+# 5) Skopiuj CA z serwera:
+scp david@192.168.1.19:/tmp/cert-davtro/davtro-gateway-tls-ca.crt ~/davtro-ca.crt
+
+# 6) Zaimportuj CA:
+./scripts/Client-import-certs-deepseek.sh ~/davtro-ca.crt
+
+# 7) Test z curl:
+curl --resolve davtro.local:8443:192.168.1.19 \
+     --cacert ~/davtro-ca.crt \
+     https://davtro.local:8443/api/health
+```
+
+### **Na serwerze — odpal port-forward:**
+
+```bash
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-gateway 8443
+# Zostaw w tle (trap globalny usuniety).
+```
+
+### **Użycie — sciaga (Twoje nazwy)**
+
+```bash
+# Codzienna praca (forwardy zostaja w tle):
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-gateway 8443
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-vault 8243
+
+# Wszystko naraz + Ctrl+C sprzata TYLKO swoje:
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-all
+
+# Wszystko naraz + Ctrl+C sprzata SWOJE + SIEROTY (poza 8080, 10443):
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-all-cleanup-sierot
+
+# Reczne sprzatanie sierot:
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh cleanup
+
+# Diagnostyka:
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh diag
+
+# Extract certow:
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh extract-tls davtro-gateway-tls "" istio-system
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh extract-tls vault-tls
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh make-pfx vault-tls "" "Haslo123" "vault server"
+```
+
+---
+
+## 3. Podsumowanie — mapowanie nazw
+
+| Twoja nazwa | Co to za plik | Zawartość |
+|---|---|---|
+| `scripts/Port-forwarding-deepseek-cleanup-sierot.sh` | port-forward + cleanup sierot | **Plik 1** z poprzedniej wiadomości |
+| `scripts/Client-import-certs-deepseek.sh` | import CA na kliencie | **Plik 2** z poprzedniej wiadomości |
+| `scripts/Client-port-forwarding-deepseek-cleanup-sierot.sh` | klient port-forward (opcjonalny) | **Plik 3** z poprzedniej wiadomości |
+
+**Wklej output z:**
+
+```bash
+ls -la scripts/Port-forwarding-deepseek-cleanup-sierot.sh \
+       scripts/Client-import-certs-deepseek.sh \
+       scripts/Client-port-forwarding-deepseek-cleanup-sierot.sh
+
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh extract-tls davtro-gateway-tls "" istio-system
+ls -la /tmp/cert-davtro/
+```
+
+…to powiem, czy **wszystko zapisało się poprawnie** i czy **prawa wykonywania** są nadane.
