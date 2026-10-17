@@ -1,73 +1,87 @@
-# Davtro Apartments – platforma wynajmu krótkoterminowego (Full Open Source)
-# Oparte na gł. Istio
-Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
-Namespace docelowy: `davtro`
-KUSTOMIZE_IMAGE_ID: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
-KUSTOMIZE_PATH: `./manifests/production`
+# Davtro Apartments - platforma wynajmu krotkoterminowego (Full Open Source)
 
-## Architektura przepływu rezerwacji
-1. Użytkownik rezerwuje termin na stronie (kalendarz w `app/templates/index.html`).
-2. `FastAPI` (`app/main.py`) zapisuje rezerwację w PostgreSQL, buforuje event w Redis, publikuje do Kafka (`booking-events`).
-3. `message-processor` (`app/consumer.py`) konsumuje event, wysyła e-mail (potwierdzenie + faktura proforma) i aktualizuje status w PostgreSQL.
-4. Zgody marketingowe trafiają do tematu `marketing-events`, konsumowane tak samo, dodatkowo agregowane przez `spark-jobs/marketing_analytics.py`.
-5. `spring-app-deployment` udostępnia panel raportowy/administracyjny na tych samych danych.
-6. Sekrety pochodzą z HashiCorp Vault przez External Secrets Operator (ESO) – `secret-store.yaml` + `external-secrets.yaml`; bootstrap Vaulta (init/unseal/KV/auth/database) robi automatycznie Job `vault-bootstrap` (PostSync). Aplikacje Python dostają dynamiczne credsy DB z `database/creds/davtro-app-rw` (rotacja co 30 min).
 
-## Struktura repo
+
+## Spis tresci
+
+- [1. Architektura przeplywu rezerwacji](#1--architektura-przeplywu-rezerwacji)
+- [2. Struktura repo](#2--struktura-repo)
+- [3. Uruchomienie lokalnie](#3--uruchomienie-lokalnie-dev-bez-k8s)
+- [4. Wdrozenie na MicroK8s przez ArgoCD](#4--wdrozenie-na-microk8s-przez-argocd)
+- [5. Co wypychamy do GitHuba i po co](#5--co-wypychamy-do-githuba-i-po-co)
+- [6. Co robi ArgoCD](#6--co-robi-argocd)
+- [7. Czemu 4+1 obrazow](#7--czemu-41-obrazow-a-nie-1)
+- [8. Jaka to strona i po co kazdy komponent](#8--jaka-to-strona-i-po-co-kazdy-komponent)
+- [9. Mapa komponentow](#9--mapa-komponentow--co-do-czego-uderza)
+- [10. Warstwa aplikacji](#10--warstwa-aplikacji)
+- [11. Warstwa danych](#11--warstwa-danych--postgres-redis-kafka)
+- [12. Vault i sekrety](#12--vault-pelna-automatyzacja-full-auto-cold-start)
+- [13. Obserwowalność](#13--obserwowalność--prometheus-grafana-loki-tempo)
+- [14. Wejscie, skalowanie, polityki](#14--wejscie-skalowanie-odpornosc-i-polityki)
+- [15. Certyfikaty TLS - 3 lancuchy](#15--certyfikaty-tls--kto-co-i-komu-wydaje)
+- [16. Relacje generowania certyfikatow](#16--relacje-generowania-certyfikatow-co-do-czego-uderza)
+- [17. Zewnetrzny cert do Vaulta (Opcje A/B/C)](#17--jak-wlozyc-zewnetrzny-certyfikat-profesjonalnie)
+- [18. Rotacje](#18--rotacja-certyfikatow-tokenow-i-kluczy)
+- [19. Gdzie leza sekrety i certyfikaty](#19--gdzie-sa-przechowywane-sekrety-i-certyfikaty)
+- [20. Auth, faktura, hasla](#20--auth-faktura-hasla-admina)
+- [21. Alerty o certyfikatach + Alertmanager](#21--alerty-o-wygasajacych-certyfikatach-i-alertmanager)
+- [22. Vault HTTPS i Kafka/Istio](#22--vault-https-kafka-istio)
+- [23. Schematy zbiorcze](#23--schematy-zbiorcze-gitops-tls-vault)
+- [24. Wdrozenie od zera krok po kroku](#24--co-trzeba-zainstalowac-kolejnosc-wazna)
+## 1. 🏠 Architektura przeplywu rezerwacji
+
+1. Gosc rezerwuje termin na stronie (kalendarz we `frontend/`, formularz wymaga logowania).
+2. `FastAPI` (`backend-fastapi/app/main.py`) zapisuje rezerwacje w PostgreSQL (status `pending`), buforuje event w Redis, publikuje event do Kafki (topic `bookings-created`). Dane osobowe (imie, e-mail, telefon) szyfruje w locie Vault Transit (`vault:v1:...`), zanim trafia do bazy.
+3. `message-processor` (`backend-fastapi/app/consumer.py`) konsumuje event, wysyla e-mail (potwierdzenie + faktura proforma, `email_sender.py`) i aktualizuje status w PostgreSQL (`confirmed`, `invoice_sent=True`).
+4. Zgody marketingowe trafiaja do tematu `marketing-actions`, konsumowane tak samo, dodatkowo agregowane przez `spark-jobs/marketing_analytics.py` (Spark poza meshem).
+5. `spring-app-deployment` (`java-app/`, Spring Boot) udostepnia panel raportowy/administracyjny na tych samych danych (wlasny `BookingConsumer` z Kafki).
+6. Sekrety pochodza z HashiCorp Vault przez External Secrets Operator (ESO) - `secret-store.yaml` + `external-secrets.yaml` (+ `external-secrets-db-dynamic.yaml`); bootstrap Vaulta (init/unseal/KV/auth/database/PKI) robi automatycznie Deployment `vault-bootstrap` (petla self-heal 60 s). Aplikacje Python dostaja dynamiczne credsy DB z `database/creds/davtro-app-rw` (rotacja co 30 min, przeladowanie pooli w locie).
+
+```text
+GOSC [kalendarz] --POST /api/bookings--> FASTAPI --INSERT pending--> POSTGRES
+     |                                    |--SET--> REDIS (cache)
+     |                                    |--PUBLISH bookings-created--> KAFKA
+     |                                    +--ENCRYPT PII--> VAULT Transit
+     v
+MESSAGE-PROCESSOR <--CONSUME-- KAFKA --MAIL--> GOSC (potwierdzenie + PROFORMA)
+     +--UPDATE confirmed--> POSTGRES
+ZGODY --> marketing-actions --> SPARK (agregacje) | SPRING (raporty)
 ```
-app/                  # FastAPI (web + API rezerwacji) + konsument Kafka + wysyłka e-mail
-java-app/             # Spring Boot – panel raportowy
-spark-jobs/           # Spark – analityka marketingowa
-manifests/base/       # Wszystkie zasoby K8s (Kustomize base)
-manifests/production/ # Overlay produkcyjny (namespace davtro, replicas)
-kyverno-policies/     # Polityki Kyverno (kopiowane też do manifests/base)
-.github/workflows/    # CI: build obrazów -> GHCR -> aktualizacja Kustomize -> ArgoCD sync
-argocd/application.yaml
-terraform/            # Terraform Cloud (workspace github-actions-terraform)
+
+| Dlaczego tak? | Wyjasnienie |
+|---|---|
+| Status `pending` -> `confirmed` (nie od razu `confirmed`) | Mail moze nie dojsc; rezerwacja bez maila wisi jako oczekujaca i widac ja w panelu. Dopiero event z Kafki domyka transakcje. |
+| PII szyfrowane przed INSERT | Wyciek dumpa bazy nie ujawnia danych gosci (`vault:v1:...` bez klucza to smiec). Klucz nigdy nie opuszcza Vaulta. |
+| Kafka posrodku (nie direct call) | Pad mailera nie gubi rezerwacji; ten sam event czytaja 2 konsumery (maile + marketing). |
+
+## 2. 📁 Struktura repo
+
+```
+backend-fastapi/        # FastAPI (web + API rezerwacji) + consumer Kafki + wysylka e-mail
+java-app/               # Spring Boot - panel raportowy
+spark-jobs/             # Spark - analityka marketingowa (marketing_analytics.py)
+frontend/               # Nginx - strona + kalendarz
+manifests/base/         # Wszystkie zasoby K8s (Kustomize base, ~40 plikow)
+manifests/istio-system/ # Certyfikat Gateway (ODDZIELNY kustomize - nie scalac z base!)
+manifests/overlays/     # Overlaye staging/production (production: ns davtro02, fastapi x3)
+kyverno-policies/       # Polityki Kyverno (kopiowane tez do manifests/base)
+argocd/                 # 2 aplikacje: application.yaml + application-istio.yaml
+istio/                  # istio-operator.yaml (Wariant A) + warianty Vault CA
+docs/                   # ISTIO.md + README-v2/v3/v4 (ten plik)
+scripts/                # port-forward.*, Client-import-certs-*, weryfikacje, setup
+  scripts/all-in-one/   # ARCHIWALNE generatory (kimi/chatgpt/deepseek/...) - nie wdrazaj
+.github/workflows/      # CI: build 5 obrazow -> GHCR -> tagi w Kustomize -> ArgoCD sync
 ```
 
-## Uruchomienie lokalnie (dev, bez K8s)
-```bash
-cd app/.. 
-python -m venv .venv && source .venv/bin/activate
-pip install -r app/requirements.txt
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/davtro
-uvicorn app.main:app --reload --port 8080
-```
+| Zmiana wzgledem v1 | Dlaczego? |
+|---|---|
+| `app/` -> `backend-fastapi/` | Taka nazwa katalogu jest w repo; sciezka `app/main.py` z v1 nie istnieje. |
+| `manifests/production` -> `manifests/base` + `overlays/production` | Base trzyma wspolne manifesty, overlay doklada ns/repliki/taglatest; ArgoCD bierze overlay. |
+| Brak `terraform/` w tabeli | Katalog nie istnieje w tym projekcie (byl w v1 na wyrost). |
+| Doszly `frontend/`, `docs/`, `scripts/`, `istio/`, `manifests/istio-system/` | To one decyduja o dzialaniu (strona, mesh, certy, dostep z LAN). |
 
-## Wdrożenie na MicroK8s przez ArgoCD
-> **Pełna, aktualna instrukcja (schematy + kolejność instalacji):** sekcja na końcu README
-> „# Schematy i auto-wdrożenie przez ArgoCD" oraz `docs/ISTIO.md`.
+## 3. 💻 Uruchomienie lokalnie (dev, bez K8s)
 
-1. Zainstaluj komponenty zewnątrzne w tej kolejności: cert-manager, External Secrets Operator, Kyverno (CRD przed synciem), potem Istio (`istioctl install -f istio/istio-operator.yaml`) i ArgoCD.
-2. Sekret repo GitHub dla ArgoCD (`davtro-github-repo`, patrz „Dostep ArgoCD do prywatnego repozytorium" niżej) + secret `GHCR_PAT_02` w GitHub Actions + pakiety GHCR na PUBLIC.
-3. Zastosuj aplikacje: `kubectl apply -f argocd/application.yaml` i `kubectl apply -f argocd/application-istio.yaml`.
-4. Push do `main` -> GitHub Actions buduje 5 obrazów i wysyła je do GHCR -> aktualizuje tagi w `manifests/base/kustomization.yaml` -> ArgoCD (auto-sync) wdroży zmiany. Wejście: **Istio Ingress Gateway** (nie ingress-nginx).
-
-## WAŻNE – rzeczy do dopracowania przed produkcją
-- ~~sekrety w repo~~ ZROBIONE: Vault (raft na PVC) + ESO generują `davtro-secrets`; Job `vault-bootstrap` automatyzuje init/unseal/KV/auth/database po każdym syncu.
-- ~~Vault dev-mode~~ ZROBIONE: storage raft na PVC. Do produkcji HA: Helm chart z auto-unseal (cloud KMS / transit) zamiast klucza unseal na PVC.
-- `service-monitors.yaml` wymaga Prometheus Operatora (CRD `ServiceMonitor`) – jest wyłączony w `kustomization.yaml`, odkomentuj po instalacji operatora.
-- SMTP nie jest skonfigurowany – bez zmiennych `SMTP_*` e-maile tylko logują się do stdout (`app/email_sender.py`).
-- Obrazy produkcyjne CI/CD budują się pod `ghcr.io/<twoja-organizacja>/...` – ustaw `github.repository_owner` zgodnie z Twoim kontem/organizacją.
-
-
-
-# Davtro Apartments – platforma wynajmu krotkoterminowego
-
-Repo: `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02`
-Namespace: `davtro`
-
-## Architektura
-1. **Frontend** (SPA) → Nginx
-2. **FastAPI** → PostgreSQL + Redis (cache) + Kafka (producent)
-3. **message-processor** (consumer) → Kafka → email + PostgreSQL update
-4. **Spring Boot** → panel raportowy / admin
-5. **Spark** → analityka marketingowa z Kafka
-6. **Vault** → sekrety (raft + ESO + auto-bootstrap; dynamiczne credsy DB dla FastAPI/consumer)
-7. **Observability** → Prometheus + Grafana + Loki + Tempo
-
-## Lokalne uruchomienie (dev)
 ```bash
 cd backend-fastapi
 python -m venv .venv && source .venv/bin/activate
@@ -76,708 +90,358 @@ export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/davtro
 uvicorn app.main:app --reload --port 8080
 ```
 
-## K8s / ArgoCD
-```bash
-kubectl apply -f argocd/application.yaml -n argocd
+> Bez Vaulta/Kafki dziala w trybie awaryjnym: Transit robi fallback do plaintextu (z logiem), maile loguja sie do stdout bez `SMTP_*`. Pelny przeplyw (eventy, proforma, Transit) wymaga klastra.
+
+## 4. 🚀 Wdrozenie na MicroK8s przez ArgoCD
+
+> Pelna instrukcja krok po kroku: §24 + checklista; szczegoly meshu: `docs/ISTIO.md`.
+
+1. Zainstaluj komponenty w tej kolejnosci: cert-manager, External Secrets Operator, Kyverno (CRD **przed** synciem - inaczej SyncError/deadlock), potem Istio (`istioctl install -f istio/istio-operator.yaml`) i ArgoCD.
+2. Sekret repo GitHub dla ArgoCD (`davtro-github-repo`, PAT `Contents: Read`) + secret `GHCR_PAT_02` w GitHub Actions + pakiety GHCR na **PUBLIC** (tylko przez UI, REST API nie zmienia widocznosci).
+3. Zastosuj aplikacje: `kubectl apply -f argocd/application.yaml` i `kubectl apply -f argocd/application-istio.yaml`.
+4. Push do `main` -> Actions buduje 5 obrazow -> GHCR -> tagi w `manifests/base/kustomization.yaml` -> ArgoCD (auto-sync, prune+selfHeal) wdrozy zmiany. Wejscie: **Istio Ingress Gateway** (nie ingress-nginx - zastapiony).
+
+```text
+push main --> Actions (build 5) --> GHCR --> tagi --> ArgoCD (2 appki) --> klaster
 ```
-Push do `main` → GitHub Actions buduje obrazy → Kustomize aktualizuje tagi → ArgoCD sync.
+## 5. 📤 Co wypychamy do GitHuba i po co
 
-### Dostep ArgoCD do prywatnego repozytorium GitHub
+Do GitHuba trafia wylacznie kod + DEKLARACJE (manifesty). Nigdy hasla, tokeny ani klucze (pilnuje tego Kyverno + review + fakt, ze sekretow nie ma gdzie wpisac - `secret.yaml` to same komentarze).
 
-ArgoCD musi miec osobne dane dostepowe do prywatnego repozytorium. Tokenu nie
-wpisuj do tego repozytorium ani do `application.yaml`. Utworz secret w
-namespace `argocd` z tokenem GitHub (PAT powinien miec co najmniej `Contents:
-Read`):
+| Co pushujemy | Po co to lezy w Gicie | Co sie dzieje po pushu |
+|---|---|---|
+| `backend-fastapi/`, `java-app/`, `frontend/`, `spark-jobs/` | kod 4 aplikacji + consumera | Actions buduje 5 obrazow i wysyla do GHCR |
+| `manifests/base/*.yaml` (~40 plikow) | deklaratywny stan klastra (Deploymenty, StatefulSety, ESO, PKI, Istio, polityki) | ArgoCD buduje (`kustomize build`) i aplikuje |
+| `manifests/overlays/production` | nakladka: ns `davtro02`, tagi `latest`, fastapi x3 | ArgoCD bierze overlay jako zrodlo (nie base!) |
+| `manifests/istio-system/` | certyfikat Gateway (musi lezec w ns gatewaya) | druga aplikacja ArgoCD |
+| `argocd/*.yaml`, `.github/workflows/`, `istio/*.yaml` | definicje GitOps, pipeline, mesh | recznie raz (`kubectl apply`, `istioctl install`) |
+| `scripts/*`, `docs/*` | port-forwardy, import CA, weryfikacje, dokumentacja | tylko do uzytku z laptopa, klaster ich nie widzi |
+
+```text
+KOD (4 katalogi) --push--> GITHUB --Actions--> GHCR (5 obrazow :latest + :sha)
+DEKLARACJE (manifests) --push--> GITHUB --ArgoCD poll--> kustomize build --> apply
+SEKRETY: . . . nie istnieja w Gicie (Vault generuje je w klastrze, ESO rozwozi)
+```
+
+## 6. 🔄 Co robi ArgoCD (i czego NIE robi)
+
+| ArgoCD robi | ArgoCD NIE robi |
+|---|---|
+| Pilnuje 2 aplikacji: `davtro-website` (overlay production -> ns `davtro02`) i `davtro-istio-gateway` (`istio-system`) | Nie buduje obrazow (to robi GitHub Actions) |
+| Auto-sync co ~3 min (lub webhook): pull -> `kustomize build` -> apply | Nie generuje hasel (to robi `vault-bootstrap` w klastrze) |
+| `prune: true` - usuwa z klastra to, czego nie ma w Gicie | Nie odnawia certow (to robi cert-manager + istiod) |
+| `selfHeal: true` - cofa reczne `kubectl edit` do stanu z Gita | Nie instaluje CRD operatorow (musza byc PRZED pierwszym synciem) |
+| `CreateNamespace` - zaklada ns jesli zniknal | Nie importuje CA do przegladarki (to robi `Client-import-certs-*.sh`) |
+
+Dostep do prywatnego repo: sekret `davtro-github-repo` w ns `argocd` (PAT `Contents: Read`):
 
 ```bash
-read -s GITHUB_PAT
-export GITHUB_PAT
-kubectl create secret generic davtro-github-repo \
-	-n argocd \
-	--from-literal=type=git \
-	--from-literal=url=https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02.git \
-	--from-literal=username=exea-centrum \
-	--from-literal=password="$GITHUB_PAT" \
-	--dry-run=client -o yaml |
-	kubectl label -f - argocd.argoproj.io/secret-type=repository --local -o yaml |
-	kubectl apply -f -
+read -s GITHUB_PAT; export GITHUB_PAT
+kubectl create secret generic davtro-github-repo -n argocd \
+  --from-literal=type=git \
+  --from-literal=url=https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02.git \
+  --from-literal=username=exea-centrum \
+  --from-literal=password="$GITHUB_PAT" \
+  --dry-run=client -o yaml | kubectl label -f - argocd.argoproj.io/secret-type=repository --local -o yaml | kubectl apply -f -
 unset GITHUB_PAT
+kubectl annotate application davtro-website -n argocd argocd.argoproj.io/refresh=hard --overwrite
 ```
 
-Nastepnie odswiez ArgoCD:
+## 7. 📦 Czemu 4+1 obrazow, a nie 1 (tabela prawd)
 
-```bash
-kubectl annotate application davtro-website -n argocd \
-	argocd.argoproj.io/refresh=hard --overwrite
-kubectl get application davtro-website -n argocd -w
+| Obraz (`ghcr.io/exea-centrum/...`) | Z czego zbudowany | Gdzie jezdzi | Czemu osobno, a nie jeden monolit? |
+|---|---|---|---|
+| `...-sp02` (glowny API) | `backend-fastapi/` (Dockerfile) | `fastapi-web-app` (x2, HPA) | API musi skalowac sie niezaleznie (szczyt rezerwacji); restart API nie zabija wysylki maili. |
+| `...-sp02-consumer` | `backend-fastapi/` (Dockerfile.consumer) | `message-processor` (x1) | Consumer ma inny cykl zycia (dlugie pollingi Kafki, retry SMTP); wolny mail nie blokuje API. Ten sam kod, inny entrypoint. |
+| `...-sp02-frontend` | `frontend/` (Nginx) | `frontend` (x2) | Statyki serwuje Nginx 10x taniej niz Python; zmiana wygladu strony nie rebuilduje backendu. |
+| `...-sp02-spring` | `java-app/` (Maven) | `spring-app-deployment` (x1) | Osobny stack (JVM) i osobny zespol kompetencji; panel raportowy wdraza sie rzadziej niz API. |
+| `...-sp02-spark` | `spark-jobs/` | joby Spark | Ciezki obraz (Spark 3.5) odpalany epizodycznie; nie ma sensu ciagnac go w kazdym podzie API. |
+
+```text
+1 repo --Actions--> 5 obrazow --GHCR--> 5 Workloadow (skaluja sie i restarta NIEZALEZNIE)
+monolit = zmiana koloru buttona rebuilduje Jave + Spark + mailer (absurd) -> stad podzial
+```
+## 8. 🎯 Jaka to strona i po co kazdy komponent
+
+**Davtro Apartments** - wynajem krotkoterminowy: gosc wybiera apartament i termin w kalendarzu, wysyla rezerwacje przez API, system zapisuje ja w bazie, wysyla e-mail z potwierdzeniem i faktura proforma, zgody marketingowe zasilaja analityke, a panel raportowy sluzy obsludze obiektu.
+
+Wejscie: **Istio Ingress Gateway**, hosty `*.davtro.local` (routing per HOST - pgAdmin i Kafka UI nie obsluguja subpath, zwracaja 404; stare `/pgadmin`, `/kafka-ui` z v1 sa nieaktualne):
+
+| Host | Dokad | Po co? |
+|---|---|---|
+| `davtro.local /` | `frontend-svc:80` | strona goscia (oferta, kalendarz, formularz) |
+| `davtro.local /api` | `fastapi-web-app-svc:80` | REST API rezerwacji + auth gosci |
+| `spring.davtro.local` | `spring-app-svc:80` | panel raportowy Java |
+| `pgadmin.davtro.local` | `pgadmin:80` | bazo przez przegladarke (login `admin@davtro.pl`, haslo = DB_PASSWORD z sekretu) |
+| `kafka-ui.davtro.local` | `kafka-ui:80` | czy eventy plyna? (diagnostyka) |
+| `grafana.davtro.local` | `grafana:3000` | metryki + logi + trace (dashboard Davtro Platform Overview) |
+| `prometheus.davtro.local` | `prometheus:9090` | surowe metryki i alerty |
+| `loki.davtro.local` | `loki:3100` | przeszukiwanie logow |
+| `tempo.davtro.local` | `tempo:3200` | sciezka requestu |
+| `spark.davtro.local` | `spark-master-svc:8082` | joby Spark |
+
+```text
+GOSC --HTTPS *.davtro.local--> GATEWAY (:80 redirect, :443 TLS z Vault PKI)
+  |-- davtro.local/ --> frontend (Nginx)          |-- grafana/prometheus/loki/tempo
+  |-- davtro.local/api --> fastapi (API)          |-- pgadmin / kafka-ui
+  |-- spring.davtro.local --> spring (panel)      |-- spark.davtro.local --> Spark UI
 ```
 
-## WAZNE – przed produkcja
-- ~~Vault dev-mode~~ ZROBIONE (raft + auto-bootstrap); produkcja HA: Helm chart + auto-unseal
-- ~~ArgoCD Vault Plugin (AVP)~~ ZROBIONE inaczej: External Secrets Operator (ESO)
-- Skonfiguruj realny SMTP w secretach
-- Zainstaluj Prometheus Operator jesli chcesz uzyc ServiceMonitor
+## 9. 🗺️ Mapa komponentow - co do czego uderza
 
-# Vault: pełna automatyzacja (full-auto cold start)
+```text
+gosc --> Gateway --> frontend --> fastapi --+--> postgres (rezerwacje)
+                                            +--> redis (cache)
+                                            +--> kafka (eventy)
+kafka --+--> message-processor --> SMTP --> mail + PROFORMA --> gosc
+         +--> spring-app (raporty)  +--> spark (marketing)
+```
 
-Usunięcie projektu + wklejenie `argocd/application.yaml` do ArgoCD wystarcza – bez kroków ręcznych:
+```text
+exporterzy (pg 9187, kafka 9308, node 9100) --> prometheus 9090 --> grafana 3000
+promtail (DS, kazdy nod) --> loki 3100 --> grafana | aplikacje --> tempo 3200 --> grafana
+cert-expiry-exporter --> alerty --> alertmanager 9093 --> e-mail
+```
 
-1. ArgoCD deployuje stack; Job `vault-bootstrap` (PostSync, idempotentny) inicjalizuje i unsealuje Vault (klucze: `/vault/data/bootstrap-keys` na PVC `vault-data-vault-0`), generuje `DB_PASSWORD` do KV `davtro/db`, włącza audit→stdout (Loki), auth kubernetes (+ `system:auth-delegator`), policy/role `davtro-apps`, database engine + rolę `davtro-app-rw` (retry aż Postgres wstanie) oraz `davtro-snapshot`.
-2. ESO tworzy `davtro-secrets` (statyczne KV: db/smtp) → Postgres robi initdb z tym hasłem → ESO tworzy dynamiczne credsy `fastapi-db-creds` / `message-processor-db-creds` z `database/creds/davtro-app-rw` (rotacja co 30 min; aplikacje przełączają pool(e) w locie – `watch_db_creds` / `get_engine()`).
-3. CronJob `vault-snapshot` robi nocny snapshot rafta (logowanie po ServiceAccount, retencja 14 dni).
+```text
+vault-bootstrap --> vault-0 :8203 (KV/database/PKI/Transit/auth)
+  --> ESO (SecretStore + ExternalSecret + VaultDynamicSecret)
+  --> Sekrety K8s (davtro-secrets, fastapi-db-creds, message-processor-db-creds)
+  --> postgres / fastapi / message-processor / spring / pgadmin / exporterzy
+```
 
-## Jednorazowa migracja klastra sprzed automatyzacji
+## 10. 🧱 Warstwa aplikacji (kazdy element: co / po co / z kim gada + schemat)
 
-Jeżeli Vault był inicjalizowany ręcznie (przed wdrożeniem `vault-bootstrap.yaml`), Job wyexituje z prośbą o plik kluczy. Skonsumuj raz wartości z pierwotnego `vault operator init`:
+### frontend (Nginx, x2) - `frontend.yaml`
+Co: statyczna strona (oferta, kalendarz, formularz). Po co: tanie serwowanie bez obciazania API. Gada z: przegladarka + `/api` backendu.
+
+```text
+przegladarka --> Gateway (davtro.local/) --> frontend-svc:80 --> Nginx --POST /api--> fastapi
+```
+
+### fastapi-web-app (Python, x2 base / x3 prod, HPA, PDB) - `deployment.yaml` + `service.yaml`
+Co: glowne API (`/api/properties`, `/api/auth/*`, `/api/health`). Po co: rezerwacje + walidacja + Transit PII + eventy. Gada z: postgres, redis, kafka, Vault Transit. Sekrety: `davtro-secrets` + `fastapi-db-creds` (pool przeladowywany w locie `watch_db_creds`).
+
+```text
+frontend --/api/*--> fastapi --+--> postgres (pending) +--> redis (cache)
+                               +--> kafka (bookings-created) +--> Transit (szyfruj PII)
+```
+
+### message-processor (consumer, x1) - `message-processor.yaml`
+Co: pracownik w tle. Po co: mail + **faktura proforma** + `status=confirmed`; bez niego rezerwacje wisza jako oczekujace. Gada z: kafka, postgres, SMTP.
+
+```text
+kafka (bookings-created) --> consumer --+--> SMTP --> mail + PROFORMA
+                                         +--> postgres (confirmed, invoice_sent)
+```
+
+### spring-app-deployment (Java, x1) - `spring-app.yaml`
+Co: panel raportowy (admin: `ADMIN_PASSWORD` z Vaulta). Po co: zestawienia i obsluga obiektu w Javie. Gada z: postgres, kafka (`BookingConsumer`).
+
+```text
+admin --> Gateway (spring.davtro.local) --> spring-app-svc:80 --> Postgres/Kafka
+```
+
+### spark-master + workerzy - `spark.yaml` (POZA meshem: `inject: "false"`)
+Co: batch (master `:7077`, UI `:8082`). Po co: `marketing_analytics.py` - agregacje zgod/kampanii, zeby nie meczyc bazy transakcyjnej. Gada z: `spark://spark-master-svc:7077`, czyta `marketing-actions`.
+
+```text
+marketing-actions --> Spark job --> agregacje (UI: spark.davtro.local)
+```
+## 11. 💾 Warstwa danych - Postgres, Redis i Kafka
+
+### postgres-db (16-alpine, STS 1x, PVC 5Gi, headless `postgres-clusterip:5432`) - `postgres.yaml`
+Jedyne zrodlo prawdy (baza `davtro_rentals`, user `davtro`). Rezerwacje, konta, statusy. Tylko wewnatrz klastra (graficznie pgadmin, metryki exporter). InitContainer `fix-data-permissions` (chown 999 - microk8s hostpath ignoruje fsGroup).
+
+```text
+fastapi / consumer / spring --SQL--> postgres-clusterip:5432
+pgadmin --> postgres (podglad) | pg-exporter:9187 --> prometheus
+```
+
+### redis (7, Deploy 1x, `redis:6379`) - `redis.yaml`
+Cache (dostepnosc terminow, sesje `session:<token>` TTL 24h, idempotencja). Ulotny - po restarcie odtwarzany z bazy. Tylko fastapi (`redis-allow`: wylacznie SA `davtro-sa`).
+
+```text
+fastapi --GET/SET--> redis:6379 (miss --> postgres)
+```
+
+### kafka-kraft (3.7, KRaft bez Zookepera, STS 1x) - `kafka.yaml`
+Dziennik zdarzen: broker `:9092` + kontroler `:9093` (tylko localhost). Topici (Job `kafka-topic-job`, 3 partycje, RF=1): `bookings-created`, `email-invoices`, `marketing-actions`. Producent: fastapi. Konsumenci: message-processor, spring, Spark. Wariant Istio: **PLAINTEXT :9092** (bez keystoreow!) - szyfruje Envoy (mTLS); listener SSL `:9094` usuniety.
+
+```text
+fastapi --produce--> kafka:9092 [bookings-created] --+--> consumer (mail+proforma)
+                                                      +--> spring | [marketing-actions] --> Spark
+kafka-ui --> kafka (podglad) | kafka-exporter:9308 --> prometheus
+```
+
+## 12. 🔐 Vault: pelna automatyzacja (full-auto cold start)
+
+Usuniecie projektu + `kubectl apply -f argocd/application.yaml` wystarcza - bez krokow recznych:
+
+1. ArgoCD deployuje stack; Deployment `vault-bootstrap` (petla self-heal 60 s, idempotentny) inicjalizuje i unsealuje Vault (klucze `/vault/data/bootstrap-keys` na PVC), generuje `DB_PASSWORD` do KV `davtro/db` (+ `ADMIN_PASSWORD` do `davtro/auth`), wlacza audit->stdout (Loki), auth kubernetes (+ `system:auth-delegator`), policy/role `davtro-apps`, database engine + role `davtro-app-rw` (retry az Postgres wstanie), PKI + `davtro-snapshot`.
+2. ESO tworzy `davtro-secrets` (statyczne KV: db/smtp/auth) -> Postgres robi initdb z tym haslem (a przy rotacji bootstrap robi `ALTER USER` = ALIGN) -> ESO tworzy dynamiczne `fastapi-db-creds` / `message-processor-db-creds` z `database/creds/davtro-app-rw` (rotacja co 30 min; aplikacje przelaczaja poole w locie).
+3. CronJob `vault-snapshot` robi nocny snapshot rafta (JWT ServiceAccount, retencja 14 dni).
+
+Jednorazowa migracja klastra sprzed automatyzacji (Vault inicjalizowany recznie):
 
 ```bash
-kubectl -n davtro02 exec vault-0 -- sh -c \
-  'printf "%s\n%s\n" "<UNSEAL_KEY>" "<ROOT_TOKEN>" > /vault/data/bootstrap-keys && chmod 600 /vault/data/bootstrap-keys'
+kubectl -n davtro02 exec vault-0 -- sh -c 'printf "%s\n%s\n" "<UNSEAL_KEY>" "<ROOT_TOKEN>" > /vault/data/bootstrap-keys && chmod 600 /vault/data/bootstrap-keys'
 kubectl -n davtro02 delete job vault-bootstrap
 kubectl -n argocd annotate application davtro-website argocd.argoproj.io/refresh=hard --overwrite
 kubectl -n davtro02 logs -f job/vault-bootstrap   # czekaj na "[bootstrap] DONE"
 ```
 
-## Weryfikacja Vault + ESO
+Weryfikacja Vault + ESO:
 
 ```bash
-kubectl -n davtro02 get externalsecret                                            # 3x SYNCED=True
-kubectl -n davtro02 exec postgres-db-0 -- psql -U davtro -d davtro_rentals -c '\du'  # userzy v-token-...
+kubectl -n davtro02 get externalsecret                       # 3x SYNCED=True
+kubectl -n davtro02 exec postgres-db-0 -- psql -U davtro -d davtro_rentals -c '\du'  # konta v-token-...
 kubectl -n davtro02 logs deploy/fastapi-web-app | grep -i "przelaczono\|creds"
 ```
 
-Roadmapa: **Krok 4** = PKI (cert-manager + Vault issuer dla ingress TLS) + GitHub OIDC dla CI; opcjonalnie Transit (szyfrowanie PII w PostgreSQL) i migracja Springa na Spring Cloud Vault.
+```text
+bootstrap --init/unseal--> vault-0 (KV + database + PKI + Transit + auth)
+  | generuje hasla, role, ALIGN w Postgresie
+  v
+ESO (vault-backend 1h + vault-dynamic 30m) --> Sekrety K8s --> pody
+snapshot 03:00 --> PVC vault-backup (14 dni retencji)
+```
+## 13. 📊 Obserwowalność - Prometheus, Grafana, Loki, Promtail i Tempo
 
----
-
-# Platforma Davtro — co to za strona i po co każdy komponent (wersja bez sekretów)
-
-> Ta sekcja nie zawiera żadnych haseł, tokenów ani certyfikatów. Opisuje wyłącznie przeznaczenie elementów systemu.
-
-## 1. Jaka to strona i do czego służy
-
-**Davtro Apartments** to platforma wynajmu krótkoterminowego (apartamenty / pokoje na doby):
-
-- gość wybiera apartament i termin w kalendarzu na stronie,
-- wysyła rezerwację przez API,
-- system zapisuje rezerwację, wysyła e-mail z potwierdzeniem i fakturą proforma,
-- zgody marketingowe gościa zasilają analitykę marketingową,
-- panel administracyjno-raportowy służy obsłudze obiektu.
-
-Wejście od internetu: host `davtro.local` (Ingress `davtro-ingress`):
-
-| Ścieżka | Dokąd prowadzi | Do czego służy |
-|---|---|---|
-| `/` | `frontend-svc:80` (Nginx) | strona dla gościa: oferta, kalendarz, formularz rezerwacji |
-| `/api` | `fastapi-web-app-svc:80` | REST API rezerwacji (tworzenie / odczyt / status) |
-| `/grafana` | `grafana:3000` | podgląd metryk, logów i tracingu |
-| `/kafka-ui` | `kafka-ui:80` | podgląd topiców i wiadomości Kafka (diagnostyka) |
-| `/pgadmin` | `pgadmin:80` | przegląd bazy przez przeglądarkę (administracja) |
-| `spark.davtro.local /` | `spark-master-svc:8082` | podgląd jobów Spark (analityka) |
-
-## 2. Mapa komponentów — co do czego uderza i po co istnieje
+### prometheus (`:9090`) - `prometheus.yaml`
+Baza metryk (scrape 15 s): fastapi, pg/kafka/node-exporterzy, cert-expiry-exporter, vault:8203. Reguly: `cert-alerts.yml` + `target-health` (DavtroTargetDown po 5 min).
+### postgres-exporter (`:9187`) / kafka-exporter (`:9308`) / node-exporter (`:9100`) - `exporters.yaml`
+Tlumacze stanu na metryki: kondycja bazy, kolejek i noda osobno. (+ `service-monitors.yaml`.)
+### grafana (`:3000`, dashboard `Davtro Platform Overview`) - `grafana.yaml`
+Jedno okno: Prometheus + Loki + Tempo. Diagnoza bez grzebania po podach.
+### loki (`:3100`) + promtail (DaemonSet) - `loki.yaml`, `promtail.yaml`
+Magazyn logow + zbieracz z `/var/log/containers/*.log` (lapie tez audit Vaulta ze stdout).
+### tempo (`:3200`) - `tempo.yaml`
+Trace OpenTelemetry: sciezka requestu frontend->API->DB/Kafka->konsument (widac, co spowalnia rezerwacje).
+### kafka-ui (`:80`) i pgadmin (`:80`) - `kafka-ui.yaml`, `pgadmin.yaml`
+"Czy eventy plyna?" i "co lezy w bazie?" bez wchodzenia na pody. pgadmin bez PVC (restart czysci sesje/blokady logowania).
 
 ```text
-gość (przeglądarka)
-  |
-  v
-Ingress davtro.local
-  |-- / ---------> frontend (Nginx, statyczna strona + kalendarz)
-  |-- /api ------> fastapi-web-app (API rezerwacji)
-  |                   |-- zapis/odczyt ---> postgres (baza rezerwacji)
-  |                   |-- cache/sesje ----> redis (szybka pamięć)
-  |                   |-- event rezerwacji -> kafka-kraft (kolejka zdarzeń)
-  |-- /grafana ---> grafana (metryki + logi + trace w jednym miejscu)
-  |-- /kafka-ui --> kafka-ui (podgląd kolejek)
-  |-- /pgadmin ---> pgadmin (podgląd bazy)
+postgres --> pg-exp:9187 --\
+kafka ----> kafka-exp:9308 ---> prometheus:9090 --> grafana:3000
+nody -----> node-exp:9100 -----/        ^
+certy ----> cert-expiry:9887 --> alerty --> alertmanager:9093 --> e-mail
+pody -----> promtail (DS) --> loki:3100 --> grafana | aplikacje --> tempo --> grafana
 ```
+
+## 14. 🚪 Wejscie, skalowanie, odpornosc i polityki
+
+- **Gateway (brzeg):** `davtro-gateway` (ns `istio-system`): `:80`->redirect, `:443` TLS SIMPLE 1.2+ (cert `davtro-gateway-tls` z Vault PKI) + 9 VirtualServices per HOST. ingress-nginx zastepiony (mozna `microk8s disable ingress`). Plik: `istio-gateway.yaml`.
+- **Skalowanie:** HPA fastapi (2-8, CPU 70%), prod: fastapi x3, frontend x2, 2 workery Spark. **Dostepnosc:** PDB (min. 1 przy drainach). Pliki: `hpa.yaml`, `pdb.yaml`.
+- **Siec/mesh:** PeerAuthentication STRICT (+ `vault`: 8203 PERMISSIVE), DestinationRule `vault-own-tls` (DISABLE :8203), AuthorizationPolicy: `postgres-allow` (davtro-sa, default), `kafka-allow` (+kafka-job-sa), `redis-allow` (tylko davtro-sa), `fastapi-allow` (/api/* z gateway), `ui-from-gateway-only` (UI tylko z gateway). NetworkPolicy: default-deny + intra-ns + ESO/cert-manager->vault:8203 + ingress->web. Pliki: `istio-security.yaml`, `network-policies.yaml`.
+- **Lad:** Kyverno Enforce (zaufane rejestry, requests/limits, bez privileged; przepuszcza `docker.io/istio/*`). Plik: `kyverno-policy.yaml` (+ `kyverno-policies/`).
 
 ```text
-kafka-kraft (bookings-created, email-invoices, marketing-actions)
-  |
-  +--> message-processor (konsument: wysyła e-maile, aktualizuje status w DB)
-  +--> spring-app (panel raportowy Java na tych samych danych)
-  +--> spark-master + spark-worker x2 (analityka marketingowa w tle)
-
-postgres-exporter / kafka-exporter / node-exporter
-  |
-  v
-prometheus (metryki) ---> grafana (wykresy)
-
-promtail (zbiera logi z każdego noda)
-  |
-  v
-loki (magazyn logów) ---> grafana (przeszukiwanie logów)
-
-aplikacje (OpenTelemetry)
-  |
-  v
-tempo (magazyn trace) ---> grafana (podgląd ścieżki requestu)
-
-vault + vault-bootstrap (sejf na sekrety, auto-konfiguracja po starcie)
-  |
-  v
-external-secrets (SecretStore + ExternalSecret + VaultDynamicSecret)
-  |
-  v
-Sekrety Kubernetes (davtro-secrets, fastapi-db-creds, message-processor-db-creds)
-  |
-  v
-postgres / fastapi / message-processor / spring-app / pgadmin / postgres-exporter
+klient --:80--> GW --redirect--> :443 TLS (Vault PKI) --mTLS--> backend
+fastapi/UI: tylko z gateway | postgres/redis/kafka: tylko okreslone SA
+vault:8203 wlasny TLS | spark/snapshot: poza meshem | HPA + PDB + Kyverno + NetPol
 ```
+## 15. 🔏 Certyfikaty TLS - kto, co i komu wydaje (3 lancuchy)
 
-## 3. Warstwa aplikacji — opis każdego elementu
-
-### frontend (Nginx)
-- **Co to:** statyczna strona dla gościa (oferta, zdjęcia, kalendarz, formularz).
-- **Po co:** szybkie serwowanie treści bez obciążania API.
-- **Z kim gada:** przeglądarka gościa; formularz woła `/api` na backendzie.
-
-### fastapi-web-app — API (Python FastAPI, 3 repliki na produkcji)
-- **Co to:** główne API rezerwacji (`POST /api/...`, `GET /api/health` do sond).
-- **Po co:** przyjmuje rezerwacje, waliduje terminy, zapisuje do bazy, odkłada event na kolejkę.
-- **Z kim gada:** `postgres-clusterip:5432` (zapis rezerwacji), `redis:6379` (cache dostępności / idempotencja), `kafka-kraft:9092` (publikacja eventu). Konfiguracja z `ConfigMap fastapi-config`, sekrety z `davtro-secrets` + dynamiczne credsy z `/etc/db-creds`.
-- **Odporność:** `HPA 2-8 (CPU 70%)`, `PDB minAvailable: 1`, sondy `readiness/liveness /api/health`.
-
-### message-processor (Python consumer)
-- **Co to:** pracownik w tle, konsument Kafki.
-- **Po co:** odbiera event rezerwacji, wysyła e-mail (potwierdzenie + faktura proforma) i przestawia status rezerwacji w bazie; konsumuje też zgody marketingowe. Bez niego rezerwacja zostałaby w statusie "oczekująca".
-- **Z kim gada:** `kafka-kraft:9092` (konsumpcja), `postgres-clusterip:5432` (update statusu), SMTP (wysyłka).
-
-### spring-app-deployment (Java Spring Boot `:8081`)
-- **Co to:** panel raportowo-administracyjny na tych samych danych co FastAPI.
-- **Po co:** zestawienia, raporty, obsługa obiektu w technologii Java.
-- **Z kim gada:** `postgres-clusterip`, `kafka-kraft`.
-
-### spark-master + spark-worker x2 (Apache Spark 3.5)
-- **Co to:** silnik obliczeń batch (master `:7077`, UI `:8082` + 2 workery).
-- **Po co:** analityka marketingowa (`spark-jobs/marketing_analytics.py`), np. agregacje zgód / kampanii. Odciąża bazę transakcyjną od ciężkich zapytań.
-- **Z kim gada:** workerzy łączą się do `spark://spark-master-svc:7077`.
-
-## 4. Warstwa danych — po co Postgres, Redis i Kafka
-
-### postgres-db (PostgreSQL 16, StatefulSet 1x + headless Service `postgres-clusterip:5432`)
-- **Co to:** jedyne trwałe źródło prawdy (baza `davtro_rentals`).
-- **Po co:** rezerwacje, statusy, użytkownicy, zgody marketingowe.
-- **Trwałość:** wolumen `pgdata 5Gi` (szablon PVC w StatefulSecie).
-- **Dostęp:** tylko wewnątrz klastra; graficznie przez `pgadmin`, metryki przez `postgres-exporter`.
-
-### redis (Redis 7, Deployment 1x, `redis:6379`)
-- **Co to:** pamięć podręczna klucz-wartość (in-memory).
-- **Po co:** cache dostępności terminów, sesje, bufor eventów, odciążenie Postgresa od powtarzalnych odczytów. Dane ulotne — po restarcie odtwarzane z bazy.
-- **Z kim gada:** wyłącznie `fastapi-web-app` (zmienne `REDIS_HOST/REDIS_PORT` z ConfigMap).
-
-### kafka-kraft (Apache Kafka 3.7, KRaft bez Zookepera, StatefulSet 1x)
-- **Co to:** rozproszony dziennik zdarzeń (kolejka): broker `:9092` + kontroler `:9093`, wolumen `kafka-data 5Gi`.
-- **Po co:** rozprzęga API od wysyłki maili i analityki. API odpowiada gościowi od razu, a ciężka praca (mail, faktura, agregacje) dzieje się asynchronicznie. Topici (po 3 partycje): `bookings-created` (nowe rezerwacje), `email-invoices` (maile/faktury), `marketing-actions` (zgody/akcje marketingowe).
-- **Kto tworzy topici:** `Job kafka-topic-job` (ArgoCD `PostSync` hook, samousuwalny po 300 s).
-- **Kto produkuje / konsumuje:** producent `fastapi-web-app`; konsumenci `message-processor`, `spring-app`, joby Spark.
-- **Podgląd:** `kafka-ui`.
-
-## 5. Bezpieczeństwo i sekrety — po co Vault i External Secrets (bez wartości)
-
-### vault (HashiCorp Vault 1.17, StatefulSet 1x, `:8203` TLS / `:8201` Raft, storage Raft na PVC)
-- **Co to:** sejf na sekrety z szyfrowaniem danych w spoczynku.
-- **Po co:** żadne hasło nie leży w Git. Aplikacje dostają je dopiero w klastrze.
-- **Tryb:** Raft na wolumenie `vault-data 2Gi`, UI włączone, telemetria dla Prometheusa.
-
-### vault-bootstrap (Deployment z pętlą self-heal co 60 s)
-- **Co to:** automatyczny konfigurator sejfu po starcie od zera (cold start).
-- **Po co:** odtwarza cały łańcuch bez klikania: init/unseal, audit do stdout, wpisy KV, auth Kubernetes, polityki i role, silnik bazy danych + wyrównanie hasła z żywym Postgresem. Kończy logiem `DONE - Vault skonfigurowany`.
-
-### vault-snapshot (CronJob `0 3 * * *` + PVC `vault-backup 2Gi`)
-- **Co to:** nocna kopia Rafta (`snapshot-STAMP.snap`, retencja 14 dni).
-- **Po co:** odtworzenie sejfu po awarii (`raft snapshot restore`).
-- **Uwierzytelnianie:** tokenem krótkoterminowym z logowania JWT ServiceAccount (rola snapshotowa), bez stałych sekretów w YAML.
-
-### SecretStore `vault-backend` / `vault-dynamic` + ExternalSecret + VaultDynamicSecret
-- **Co to:** most `Vault -> Kubernetes Secrets` (operator ESO w osobnym namespace `external-secrets`).
-- **Po co:** zamienia wpisy sejfu na natywne Sekrety K8s, które Deploymenty montują jako env/pliki:
-  - `davtro-secrets` (statyczne: login/hasło DB + SMTP),
-  - `fastapi-db-creds` / `message-processor-db-creds` (dynamiczne, rotowane konta DB z silnika `database/creds/...`).
-- **Rotacja:** statyczne co 1 h, dynamiczne co 30 min; aplikacje Python przeładowują pule połączeń w locie.
-
-## 6. Obserwowalność — po co Prometheus, Grafana, Loki, Promtail i Tempo
-
-### prometheus (`prometheus:9090`)
-- **Co to:** baza metryk liczbowych (scrape co 15 s).
-- **Po co:** odpowiada na pytania "ile requestów?", "jaki czas odpowiedzi?", "czy baza/Kafka żyją?".
-- **Skąd zbiera:** `fastapi-web-app-svc:80`, `postgres-exporter:9187`, `kafka-exporter:9308`, `node-exporter:9100`.
-
-### postgres-exporter / kafka-exporter / node-exporter
-- **Co to:** tłumacze stanu na metryki dla Prometheusa.
-- **Po co:** osobno widać kondycję bazy, kolejek i samego węzła (CPU/RAM/dysk/sieć).
-
-### grafana (`grafana:3000`, gotowy dashboard `Davtro Platform Overview`)
-- **Co to:** jedno okno na metryki + logi + trace (źródła: Prometheus, Loki, Tempo).
-- **Po co:** diagnoza "co się stało?" bez grzebania po podach. Wystawiona pod `/grafana`.
-
-### loki (`loki:3100`) + promtail (DaemonSet na każdym nodzie)
-- **Co to:** magazyn logów (Loki) + zbieracz logów (Promtail czyta `/var/log/containers/*.log` i wysyła do Loki).
-- **Po co:** przeszukiwanie logów wszystkich podów (API, konsument, Vault audit ze stdout) z jednego miejsca w Grafanie.
-
-### tempo (`tempo:3200`)
-- **Co to:** magazyn trace rozproszonych (OpenTelemetry, protokoły OTLP http+grpc).
-- **Po co:** pokazuje ścieżkę jednego requestu przez system (frontend -> API -> DB/Kafka -> konsument), więc widać, który krok spowalnia rezerwację.
-
-### kafka-ui (`:8080`, ścieżka `/kafka-ui`) i pgadmin (`:80`, ścieżka `/pgadmin`)
-- **Po co:** szybki podgląd "czy eventy płyną?" (Kafka) i "co leży w bazie?" (Postgres) bez wchodzenia na pody.
-
-## 7. Wejście, skalowanie, odporność i polityki
-
-- **Ingress:** `davtro-ingress` (klasa `public`, host `davtro.local`) + `spark-ingress` (`spark.davtro.local`). Bez zainstalowanego kontrolera Ingress obiekty istnieją, ale nie dostają adresu — stan oczekiwany w tym środowisku (adnotacja `ignore-healthcheck`).
-- **Skalowanie:** `HPA fastapi-web-app-hpa` (2-8 replik przy CPU 70%), na produkcji bazowo 3 repliki API, 2 repliki frontendu i 2 workery Spark.
-- **Dostępność:** `PDB fastapi-web-app-pdb` (min. 1 dostępny przy pracach na węzłach).
-- **Sieć:** `NetworkPolicy default-deny-ingress` (domyślnie zamknij) + jawne otwarcia: ruch wewnątrz namespacu, ESO (`external-secrets`) i cert-manager do Vaulta (`:8203`, wyłącznie TLS), wejście do API i frontendu (z ns `istio-system`).
-- **Ład:** `ClusterPolicy davtro-baseline-policy` (Kyverno, `Enforce`): obrazy z zaufanych rejestrów, wymagane `requests/limits`, zakaz kontenerów uprzywilejowanych. `ServiceMonitor`y są przygotowane, ale nieaktywne do czasu instalacji Prometheus Operatora.
-
-## 8. GitOps w jednym zdaniu
-
-`push do main -> CI buduje 5 obrazów GHCR (api, consumer, frontend, spark, spring) i podbija tagi w Kustomize -> ArgoCD (Aplikacja davtro-website, auto-sync prune+selfHeal, CreateNamespace) buduje overlay production i odtwarza cały powyższy graf w namespace davtro02`.
+### Lancuch 1 - ZEWNATRZ (przegladarka -> gateway): Vault PKI + cert-manager
+PKI w Vaulcie (role `davtro-ingress` 90d, `davtro-internal`, `davtro-mesh`; zaklada bootstrap) -> ClusterIssuer `vault-issuer` (`pki-issuer.yaml`: `pki/sign/davtro-ingress`, token `cert-manager-vault-token`) -> Certificate `davtro-gateway-tls` (`istio-system/gateway-certificate.yaml`: CN `davtro.local` + 8 SAN: spark/kafka-ui/grafana/pgadmin/tempo/prometheus/loki/spring.davtro.local, 2160h/renew 360h, sekret MUSI byc w ns `istio-system`) -> Gateway (`credentialName`, min TLS 1.2). Rotacja auto (SDS bez restartu).
+### Lancuch 2 - cert SERWERA VAULTA (:8203): self-signed CA (BEZ Vaulta)
+Issuer `vault-selfsigned` -> CA `vault-ca` (10 lat, `rotationPolicy: Never`) -> Issuer `vault-ca` (`vault-server-tls.yaml`) -> Certificate `vault-tls` (lisc 30d/renew 7d, SAN `vault.davtro02.svc...`). Dlaczego nie z Vault PKI: bledne kolo (cert Vaulta wymagalby dzialajacego Vaulta). `ca.crt` ufaja ESO/snapshot/helpers/Transit.
+### Lancuch 3 - WEWNATRZ (pod <-> pod): Istio mTLS (SPIFFE)
+istiod (wlasne CA, certy w RAM sidecarow, ~24h, STRICT). Stare certy aplikacyjne Vault mTLS usuniete - przejelo Istio. Wariant B (Vault PKI jako CA mesh, `istio-csr`) - przygotowany, po dzialajacym Vaultie (`docs/ISTIO.md`).
 
 ```text
-                    +---------------- GitHub HEAD ------------------+
-                    | manifests/overlays/production -> ../../base   |
-                    +---------------+--------------------------------+
-                                    | pull + kustomize build
-                          +---------v-----------+
-                          | ArgoCD davtro-website (ns argocd) |
-                          +---------+-----------+
-                                    | apply -> ns davtro02
-        +---------------------------+-----------------------------+
-        |                           |                             |
-+-------v-------+        +----------v----------+       +----------v----------+
-|   VAULT LAYER |        |     DATA LAYER      |       |     APP LAYER       |
-| vault-0 :8203 |<-------+ postgres-db :5432   |<------+ fastapi-web-app :8080|
-| bootstrap     |  dynamic| redis :6379         |  SQL  | message-processor  |
-| snapshot 03:00|  creds  | kafka-kraft :9092   |  KV   | spring-app :8081   |
-+-------+-------+        +----------+----------+       | frontend nginx :8080 |
-        ^                           ^                  | spark master/worker |
-        | K8s auth                    |                  +----------+----------+
-        | jwt davtro-sa               |                             | Kafka topics
-+-------v---------------------------v-----------------------------v----------+
-| SECRETS LAYER: SecretStore vault-backend/vault-dynamic + ExternalSecret     |
-| davtro-secrets + VaultDynamicSecret db-creds-davtro-app-rw ->               |
-| fastapi-db-creds / message-processor-db-creds                               |
-+--------------------------------+--------------------------------------------+
-                                 |
-        +------------------------v-------------------------------------------+
-        | OBSERVABILITY: prometheus:9090 <- postgres/kafka/node-exporter      |
-        | grafana:3000 (Prometheus+Loki+Tempo) | loki:3100 <- promtail (DS)   |
-        | tempo:3200 | kafka-ui:8080 | pgadmin:80                             |
-        +------------------------------------------------+-------------------+
-                                         |
-                          +--------------v---------------+
-                          | EDGE: Ingress davtro.local   |
-                          | /api->fastapi /->frontend    |
-                          | /grafana /kafka-ui /pgadmin  |
-                          | spark.davtro.local->spark-ui |
-                          +------------+-----------------+
-                                       |
-                    +--------+---------+---------+--------+
-                    | HPA fastapi 2-8 CPU70% | PDB minAvailable:1 |
-                    | NetworkPolicy deny+allow | Kyverno Enforce |
-                    +--------------------------------------------+
+Vault PKI (davtro-ingress) --sign--> cert-manager (vault-issuer)
+  --Certificate--> davtro-gateway-tls [istio-system] --> Gateway :443 (SIMPLE)
+self-signed CA (vault-ca, 10 lat) --sign--> vault-tls --> Vault :8203 (wlasny TLS)
+istiod (wlasne CA) --SPIFFE--> sidecary Envoy (mTLS STRICT, ~24h)
 ```
 
-## 9. Szczegółowy opis architektury i przepływu
+## 16. 🔗 Relacje generowania certyfikatow - co do czego uderza
 
-### 9.1 Diagram przepływu (Full Stack)
+```text
+[1] BOOTSTRAP VAULT PKI (raz, przy cold-start, robi vault-bootstrap):
+  vault secrets enable pki + pki/tune (10 lat) --> root CA davtro-internal
+  --> role davtro-ingress (domeny davtro.local/*.davtro.local, 90d)
+  --> role davtro-internal (svc.cluster.local, mTLS historyczne)
+  --> role davtro-mesh (SPIFFE, Wariant B) + policy pki-issuer
+  + token cert-manager-vault-token --> Secret w ns cert-manager
 
+[2] BOOTSTRAP CA SERWERA VAULTA (cert-manager, bez Vaulta - kolejka PRZED Vaultem):
+  Issuer vault-selfsigned --> Certificate vault-ca (isCA, 10 lat, Never)
+  --> Issuer vault-ca --> Certificate vault-tls (30d/7d, SAN vault*)
+  --> Secret vault-tls {tls.crt, tls.key, ca.crt} [davtro02]
+  --> MONTUJA GO: vault STS (server TLS :8203) + ESO (caProvider)
+      + Transit/snapshot/helpers (zaufanie) + issuers (caProvider do API Vaulta)
+
+[3] RUNTIME - cert Gateway (petla cert-managera, co 90d / renew 15d):
+  Certificate davtro-gateway-tls --CSR--> ClusterIssuer vault-issuer
+  --POST pki/sign/davtro-ingress (token)--> Vault PKI --cert-->
+  Secret davtro-gateway-tls [istio-system] --SDS--> Gateway (bez restartu)
+  --pilnuje--> cert-expiry-exporter --> prometheus --> alertmanager --> mail
+
+[4] RUNTIME - mesh (ciagly, robi istiod, bez Secretow):
+  istiod CA --SPIFFE (cluster.local/ns/davtro02/sa/...)--> Envoy sidecary
+  --mTLS STRICT--> ruch pod<->pod || POLITYKI: postgres/kafka/redis/fastapi-allow
+  + ui-from-gateway-only (kto z kim, L7) || NetworkPolicy (L4, 2. warstwa)
+
+[5] KTO UFA KOMU (kotwice zaufania):
+  przegladarka --ufa--> davtro-gateway-tls (lancuch: Vault PKI root)
+    (LAN: import CA raz przez Client-import-certs-deepseek.sh)
+  ESO/cert-manager/Transit/snapshot --ufaja--> vault-tls/ca.crt (lancuch: vault-ca)
+  pod --ufa--> podowi (lancuch: istiod CA, przez SDS, bez udzialu czlowieka)
 ```
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                    GITHUB (main branch)                                 │
-│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
-│  │ CI/CD Pipeline (.github/workflows/ci-cd.yaml)                                   │   │
-│  │  1. Build 5 obrazów Docker (api, consumer, frontend, spring, spark) -> GHCR     │   │
-│  │  2. kustomize edit set image -> tagi w manifests/base/kustomization.yaml        │   │
-│  │  3. git commit + git push                                                       │   │
-│  └─────────────────────────────────────────────────────────────────────────────────┘   │
-                                          │
-                                          │ webhook / auto-sync (3min)
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                    ARGOCD (namespace: argocd)                          │
-│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
-│  │ Application: davtro-website + davtro-istio-gateway                      │   │
-│  │  source: manifests/overlays/production -> base (ns davtro02)             │   │
-│  │           manifests/istio-system (cert Gateway, ns istio-system)         │   │
-│  │  syncPolicy: automated (prune: true, selfHeal: true)                           │   │
-│  └─────────────────────────────────────────────────────────────────────────────────┘   │
-                                          │
-                                          │ kustomize build + apply
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                              MICROK8S CLUSTER (namespace: davtro02)                     │
-│                                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
-│  │                              EDGE LAYER (Istio Gateway + TLS)             │   │
-│  │  ┌──────────────────────────────────────────────────────────────────────────┐  │   │
-│  │  │ Istio Ingress Gateway (ns istio-system): Gateway + VirtualService      │  │   │
-│  │  │  :80 -> httpsRedirect | :443 TLS 1.2+ SIMPLE (cert davtro-gateway-tls) │  │   │
-│  │  │  Cert: cert-manager x Vault PKI | Hosts: davtro.local, spark.davtro.local│  │   │
-│  │  │  IP LoadBalancera z MetalLB                                             │  │   │
-│  │  └──────────────────────────────────────────────────────────────────────────┘  │   │
-│  │         │                    │                    │                    │          │
-│  │    /api -> fastapi   / -> frontend   /grafana   /kafka-ui   /pgadmin      │
-│  │    spark.davtro.local -> spark-master :8082 (poza mesh, plaintext)         │
-│  └─────────────────────────────────────────────────────────────────────────┘   │
-│                                                                                 │
-│  ┌─ MESH Istio (sidecar Envoy, mTLS STRICT) ────────────────────────────────┐   │
-│  │  AuthorizationPolicy: fastapi-allow | ui-from-gateway-only               │   │
-│  │  NetworkPolicy: allow-istio-gateway-to-ui (2. warstwa, L4)               │   │
-│  └─────────────────────────────────────────────────────────────────────────┘   │
-│                                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
-│  │                              APPLICATION LAYER                                  │   │
-│  │                                                                                 │   │
-│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐              │   │
-│  │  │ fastapi-web-app  │  │ message-processor│  │ spring-app       │              │   │
-│  │  │ (Python/FastAPI) │  │ (Kafka consumer) │  │ (Java/Spring)    │              │   │
-│  │  │ :8080, replicas:3│  │ :8080, replicas:1│  │ :8081, replicas:1│              │   │
-│  │  │ HPA: 2-8, CPU70% │  │                  │  │                  │              │   │
-│  │  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘              │   │
-│  │           │ Kafka produce        │ Kafka consume        │                        │   │
-│  │           ▼                      ▼                      ▼                        │   │
-│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐              │   │
-│  │  │ frontend (nginx) │  │ spark-master     │  │ spark-worker (x2)│              │   │
-│  │  │ :8080, replicas:2│  │ :8082, :4040     │  │ :8083             │              │   │
-│  │  └──────────────────┘  └──────────────────┘  └──────────────────┘              │   │
-│  └─────────────────────────────────────────────────────────────────────────────────┘   │
+## 17. 🌐 Jak wlozyc zewnetrzny certyfikat - profesjonalnie (3 opcje, zweryfikowane)
+
+Kontekst z plikow: Gateway czyta cert wylacznie z sekretu `davtro-gateway-tls` w ns `istio-system` (`credentialName` w `istio-gateway.yaml`). Kto ten sekret wypelni - cert-manager (domyslnie), Ty recznie, czy LE - Gateway nie widzi roznicy. Dla `*.davtro.local` (domeny niepubliczne) zewnetrzny cert NIE MA SENSU (LE nie podpisze `.local`); opcje ponizej sa na dzien, gdy przejdziesz na publiczna domene.
+
+### Opcja A - Import posredniego CA do Vault PKI (zalecane, Vault przejmuja rotacje)
+
+```text
+Twoje CA (firmowe) --podpisuje--> intermediate CSR z Vaulta
+  --> vault write pki/intermediate/set-signed --> Vault PKI lancuch: root firmowy
+  --> rola davtro-ingress BEZ ZMIAN (pki/sign/...) --> cert-manager
+  --> Gateway (jak dzis, zero zmian w manifestach!)
 ```
 
-### 9.2 Data Layer
-
-```
-│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
-│  │                              DATA LAYER                                         │   │
-│  │                                                                                 │   │
-│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐              │   │
-│  │  │ postgres-db      │  │ redis            │  │ kafka-kraft      │              │   │
-│  │  │ (StatefulSet)    │  │ (Deployment)     │  │ (StatefulSet)    │              │   │
-│  │  │ :5432            │  │ :6379            │  │ :9092            │              │   │
-│  │  │ PVC: 5Gi         │  │ cache layer      │  │ topics:          │              │   │
-│  │                                               └──────────────────┘              │   │
-│  └─────────────────────────────────────────────────────────────────────────────────┘   │
-```
-
-### 9.3 Secrets Layer (Vault + ESO)
-
-```
-│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
-│  │                              SECRETS LAYER (Vault + ESO)                         │   │
-│  │                                                                                 │   │
-│  │  ┌──────────────────────────────────────────────────────────────────────────┐  │   │
-│  │  │ vault-0 (StatefulSet, raft storage na PVC 2Gi)                           │  │   │
-│  │  │  :8203 (API, TLS)                                                       │  │   │
-│  │  │  Engines:                                                                │  │   │
-│  │  │   - kv-v2: davtro/db, davtro/smtp (sekrety aplikacji)                   │  │   │
-│  │  │   - database: postgres-clusterip (dynamiczne credsy)                    │  │   │
-│  │  │   - pki: davtro-internal CA (certyfikaty TLS)                            │  │   │
-│  │  │  Auth: kubernetes (SA davtro-sa), token (cert-manager)                   │  │   │
-│  │  └──────────────────────────────────────────────────────────────────────────┘  │   │
-│  │           ▲                                       ▲                              │   │
-│  │           │ K8s auth (jwt)                        │ token auth                   │   │
-│  │           │                                       │                              │   │
-│  │  ┌────────┴───────────────────────────────────────┴─────────────────────────┐  │   │
-│  │  │ vault-bootstrap (Deployment, self-heal co 60s)                           │  │   │
-│  │  │  1. vault operator init (1 key share) -> bootstrap-keys na PVC           │  │   │
-│  │  │  2. vault operator unseal (auto-unseal z pliku)                         │  │   │
-│  │  │  3. kv-v2: davtro/db, davtro/smtp (generuje DB_PASSWORD jeśli brak)     │  │   │
-│  │  │  4. audit: stdout -> promtail -> Loki -> Grafana                         │  │   │
-│  │  │  5. auth/kubernetes/config + role davtro-apps, davtro-snapshot           │  │   │
-│  │  │  6. database engine + role davtro-app-rw (TTL 1h/24h)                    │  │   │
-│  │  │  7. PKI: root CA + roles davtro-ingress, davtro-internal                 │  │   │
-│  │  │  8. Policy pki-issuer + role cert-manager (token auth)                  │  │   │
-│  │  └─────────────────────────────────────────────────────────────────────────┘  │   │
-│  │                                                                                 │   │
-│  │  ┌─────────────────────────────────────────────────────────────────────────┐  │   │
-│  │  │ External Secrets Operator (namespace: external-secrets)                  │  │   │
-│  │  │  SecretStore vault-backend: kv-v2, K8s auth, role davtro-apps           │  │   │
-│  │  │  SecretStore vault-dynamic: database engine (bez path prefix)           │  │   │
-│  │  │                                                                          │  │   │
-│  │  │  ExternalSecret davtro-secrets -> Secret davtro-secrets (refresh: 1h)    │  │   │
-│  │  │   DB_USER, DB_PASSWORD, SMTP_USER, SMTP_PASSWORD                        │  │   │
-│  │  │                                                                          │  │   │
-│  │  │  VaultDynamicSecret db-creds-davtro-app-rw                              │  │   │
-│  │  │   -> ExternalSecret fastapi-db-creds (refresh: 30m)                      │  │   │
-│  │  │   -> ExternalSecret message-processor-db-creds (refresh: 30m)            │  │   │
-│  │  └─────────────────────────────────────────────────────────────────────────┘  │   │
-│  │                                                                                 │   │
-│  │  ┌─────────────────────────────────────────────────────────────────────────┐  │   │
-│  │  │ cert-manager (namespace: cert-manager)                                   │  │   │
-│  │  │  ClusterIssuer vault-issuer:                                             │  │   │
-│  │  │   server: https://vault.davtro02.svc.cluster.local:8203                  │  │   │
-│  │  │   caProvider: Secret vault-tls (key ca.crt)                              │  │   │
-│  │  │   path: pki/sign/davtro-ingress                                          │  │   │
-│  │  │   auth: tokenSecretRef cert-manager-vault-token                          │  │   │
-│  │  │                                                                          │  │   │
-│  │  │  Certificate davtro-gateway-tls (ns istio-system):                        │  │   │
-│  │  │   Secret: davtro-gateway-tls, CN=davtro.local, 90d / renew 15d           │  │   │
-│  │  │   -> konsumuje: Istio Ingress Gateway (credentialName)                   │  │   │
-│  │  │                                                                          │  │   │
-│  │  │  Certificate vault-tls (bootstrapowe CA, NIE z Vault PKI):                │  │   │
-│  │  │   Secret: vault-tls -> TLS serwera Vaulta :8203                          │  │   │
-│  │  └─────────────────────────────────────────────────────────────────────────┘  │   │
-│  └─────────────────────────────────────────────────────────────────────────────────┘   │
-```
-
-### 9.4 Observability Layer + Network Policies + Backup
-
-```
-│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
-│  │                              OBSERVABILITY LAYER                                 │   │
-│  │                                                                                 │   │
-│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐              │   │
-│  │  │ prometheus       │  │ grafana          │  │ loki             │              │   │
-│  │  │ :9090            │  │ :3000            │  │ :3100            │              │   │
-│  │  │ metrics scrape   │  │ dashboards       │  │ log aggregation  │              │   │
-│  │  └──────────────────┘  └──────────────────┘  └──────────────────┘              │   │
-│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐              │   │
-│  │  │ tempo            │  │ promtail         │  │ kafka-ui         │              │   │
-│  │  │ :3200            │  │ (DaemonSet)      │  │ :8080            │              │   │
-│  │  │ trace storage    │  │ log collection   │  │ Kafka management │              │   │
-│  │  └──────────────────┘  └──────────────────┘  └──────────────────┘              │   │
-│  │  ┌──────────────────┐  ┌──────────────────┐                                    │   │
-│  │  │ pgadmin          │  │ exporters        │                                    │   │
-│  │  │ :80              │  │ postgres, kafka, │                                    │   │
-│  │  │ DB management    │  │ node             │                                    │   │
-│  │  └──────────────────┘  └──────────────────┘                                    │   │
-│  └─────────────────────────────────────────────────────────────────────────────────┘   │
-│                                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
-│  │                              NETWORK POLICIES                                    │   │
-│  │  default-deny-ingress (zamyka wszystko)                                          │   │
-│  │  allow-intra-namespace (ruch wewnątrz davtro02)                                  │   │
-│  │  allow-eso-to-vault (external-secrets -> vault:8203)                             │   │
-│  │  allow-certmanager-to-vault (cert-manager -> vault:8203)                         │   │
-│  │  allow-ingress-controller-to-web (ingress -> fastapi/frontend:8080)              │   │
-│  └─────────────────────────────────────────────────────────────────────────────────┘   │
-│                                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
-│  │                              BACKUP LAYER                                        │   │
-│  │  vault-snapshot (CronJob, 03:00 daily) -> PVC vault-backup (retencja 14 dni)     │   │
-│  └─────────────────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 9.5 Odpowiedzialność komponentów
-
-| Komponent | Plik(y) | Odpowiedzialność |
-|-----------|---------|------------------|
-| **ArgoCD** | `argocd/application.yaml`, `argocd/application-istio.yaml` | GitOps: 2 aplikacje (`davtro-website`, `davtro-istio-gateway`). Auto-sync co 3 minuty, self-heal (naprawia ręczne zmiany), prune (usuwa zasoby nie w Git). |
-| **GitHub Actions** | `.github/workflows/ci-cd.yaml` | CI: buduje 5 obrazów Docker (api, consumer, frontend, spring, spark) i push do GHCR. Aktualizuje tagi w `manifests/base/kustomization.yaml`. |
-| **Kustomize** | `manifests/base/kustomization.yaml` | Deklaracja wszystkich zasobów K8s. Overlay production nadpisuje namespace, replica count, image tags. |
-| **Vault** | `vault.yaml`, `vault-bootstrap.yaml` | Centralne zarządzanie sekretami: KV v2 (sekrety aplikacji), database engine (dynamiczne credsy), PKI (certyfikaty TLS), autoryzacja (K8s + token). |
-| **vault-bootstrap** | `vault-bootstrap.yaml` | Automatyczna inicjalizacja Vault: init, unseal, konfiguracja KV/auth/database/PKI. Self-heal co 60s. |
-| **External Secrets Operator** | `secret-store.yaml`, `external-secrets.yaml`, `external-secrets-db-dynamic.yaml` | Most między Vault a Kubernetes: synchronizuje sekrety z Vault do K8s Secrets. |
-| **cert-manager** | `pki-issuer.yaml`, `vault-server-tls.yaml`, `manifests/istio-system/gateway-certificate.yaml` | Zarządzanie certyfikatami TLS: zamawia z Vault PKI (Gateway, certy serwisów), bootstrapowe CA dla Vault, automatycznie odnawia przed wygaśnięciem. |
-| **Istio** | `istio/istio-operator.yaml`, `istio-gateway.yaml`, `istio-security.yaml` | Service mesh: mTLS między podami (STRICT), Ingress Gateway (terminacja TLS `:443`, routing), AuthorizationPolicy (kto z kim), NetworkPolicy jako 2. warstwa. Zastąpił ingress-nginx i stare certy `*-mtls`. |
-| **Kyverno** | `kyverno-policy.yaml` | Polityki bezpieczeństwa: wymagane requests/limits, zakaz kontenerów uprzywilejowanych, zaufane rejestry. |
-
-### 9.6 Przepływ sekretów (Vault -> Aplikacja)
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ VAULT (namespace: davtro02)                                                 │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ KV v2 Engine (mount: davtro)                                        │   │
-│  │  davtro/db: { DB_USER: davtro, DB_PASSWORD: *** }                  │   │
-│  │  davtro/smtp: { SMTP_USER: ***, SMTP_PASSWORD: *** }               │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                              │                                               │
-│                              │ K8s auth (SA davtro-sa, role davtro-apps)   │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ ExternalSecret davtro-secrets (refresh: 1h)                         │   │
-│  │  -> Secret davtro-secrets (namespace: davtro02)                     │   │
-│  │     DB_USER, DB_PASSWORD, SMTP_USER, SMTP_PASSWORD                  │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                              │                                               │
-│                              │ envFrom: secretRef                          │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Aplikacje: fastapi, message-processor, spring-app                   │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ VAULT (namespace: davtro02)                                                 │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Database Engine (mount: database)                                   │   │
-│  │  Role: davtro-app-rw                                                │   │
-│  │    creation: CREATE ROLE ... LOGIN PASSWORD ... VALID UNTIL ...     │   │
-│  │    revocation: DROP ROLE ...                                        │   │
-│  │    default_ttl: 1h, max_ttl: 24h                                    │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                              │                                               │
-│                              │ K8s auth (SA davtro-sa, role davtro-apps)   │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ VaultDynamicSecret db-creds-davtro-app-rw                           │   │
-│  │  -> POST /v1/database/creds/davtro-app-rw                          │   │
-│  │  -> generuje: { username: v-token-davtro-app-rw-xxx, password: *** }│   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                              │                                               │
-│                              │ ExternalSecret (refresh: 30m)              │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Secrets: fastapi-db-creds, message-processor-db-creds               │   │
-│  │  zawartość: { username: ..., password: ... }                        │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                              │                                               │
-│                              │ volumeMount: /etc/db-creds (read-only)     │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Aplikacje:                                                          │   │
-│  │  fastapi: DB_USER_FILE=/etc/db-creds/username                       │   │
-│  │           DB_PASSWORD_FILE=/etc/db-creds/password                   │   │
-│  │           (main.py watch_db_creds: przeladowuje pool przy zmianie)  │   │
-│  │  message-processor: DB_USER_FILE, DB_PASSWORD_FILE                  │   │
-│  │                      (db.py: przeladowuje SQLAlchemy)               │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 9.7 Przepływ certyfikatów (Vault PKI -> Istio Ingress Gateway)
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ VAULT PKI (namespace: davtro02)                                            │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ PKI Engine (mount: pki)                                             │   │
-│  │  Root CA: davtro-internal (self-signed, homelab)                    │   │
-│  │   CN=davtro-internal CA, TTL=87600h (10 lat)                        │   │
-│  │                                                                     │   │
-│  │  Roles:                                                             │   │
-│  │   davtro-ingress:                                                   │   │
-│  │     allowed_domains: davtro.local, spark.davtro.local               │   │
-│  │     allow_subdomains: true, max_ttl: 2160h (90d)                    │   │
-│  │   davtro-internal:                                                  │   │
-│  │     allowed_domains: svc.cluster.local, cluster.local               │   │
-│  │     allow_any_name: true, enforce_hostnames: false                  │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                              │                                               │
-│                              │ token auth (cert-manager-vault-token)       │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ ClusterIssuer vault-issuer (cert-manager)                           │   │
-│  │  server: https://vault.davtro02.svc.cluster.local:8203              │   │
-│  │  caProvider: Secret vault-tls (key ca.crt)                          │   │
-│  │  path: pki/sign/davtro-ingress                                      │   │
-│  │  auth: tokenSecretRef cert-manager-vault-token                      │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                              │                                               │
-│                              │ Certificate resources                        │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Certificate davtro-gateway-tls (ns istio-system)                    │   │
-│  │  Secret: davtro-gateway-tls, CN=davtro.local                        │   │
-│  │  duration: 2160h (90d), renewBefore: 360h (15d)                     │   │
-│  │                                                                     │   │
-│  │ Certificate vault-tls (bootstrapowe CA, NIE z Vault PKI)            │   │
-│  │  Secret: vault-tls -> TLS serwera Vaulta :8203                      │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                              │                                               │
-│                              │ cert-manager generuje Secret z tls.crt/tls.key
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Secrets: davtro-gateway-tls (type: kubernetes.io/tls)               │   │
-│  │  zawartość: { tls.crt: <cert PEM>, tls.key: <key PEM> }             │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                              │                                               │
-│                              │ Gateway spec.tls.credentialName               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Istio Ingress Gateway (ns istio-system)                             │   │
-│  │  TLS termination na poziomie Gateway (:443, SIMPLE, TLS 1.2+)       │   │
-│  │  Hosts: davtro.local, spark.davtro.local                            │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 9.8 Co jest potrzebne poza projektem (wymagania zewnętrzne)
-
-Kolejność instalacji ma znaczenie – operatorzy z CRD muszą być przed pierwszym synciem ArgoCD
-(inaczej `SyncError` blokuje cały deployment, tzw. GitOps deadlock). Szczegółowe komendy:
-sekcja „# Schematy i auto-wdrożenie przez ArgoCD" na końcu README.
-
-| # | Komponent | Instalacja | Po co / status w projekcie |
-|---|-----------|------------|---------------------------|
-| 1 | **MicroK8s** | `snap install microk8s --classic` | runtime klastra |
-| 2 | **MetalLB** | `microk8s enable metallb` | LoadBalancer dla **Istio Ingress Gateway** (adres IP dla `davtro.local`) |
-| 3 | **cert-manager** | `helm install jetstack/cert-manager -n cert-manager --set crds.enabled=true` | CRD `Certificate`/`ClusterIssuer`; certy Gateway (`davtro-gateway-tls`), certy serwera Vaulta (`vault-tls`), Wariant B mesh |
-| 4 | **External Secrets Operator** | `helm install external-secrets/external-secrets -n external-secrets` | CRD `ExternalSecret`/`SecretStore`/`VaultDynamicSecret`; sekrety i dynamiczne credsy z Vaulta |
-| 5 | **Kyverno** | `helm install kyverno/kyverno -n kyverno` | CRD `ClusterPolicy`; musi przepuszczać `docker.io/istio/*` (już dodane w `kyverno-policies/`) |
-| 6 | **Istio** | `istioctl install -f istio/istio-operator.yaml` | mesh mTLS + Ingress Gateway; **bez tego nie ma wejścia na stronę** (ingress-nginx zastąpiony) |
-| 7 | **ArgoCD** | `helm install argo/argo-cd -n argocd` | 2 Application: `davtro-website`, `davtro-istio-gateway` (auto-sync) |
-| 8 | **GitHub Actions secret** | `GHCR_PAT_02` (Settings → Secrets → Actions) | build i push 5 obrazów do GHCR + commit nowych tagów |
-| 9 | **GHCR packages = PUBLIC** | UI GitHub: Package settings → Change visibility (REST API nie zmienia widoczności) | klaster pobiera obrazy bez `imagePullSecret` |
-| 10 | **Sekret repo dla ArgoCD** | `davtro-github-repo` w ns `argocd` (PAT `Contents: Read`) | ArgoCD czyta manifesty z prywatnego repo |
-| 11 | **DNS / hosts** | wpisy A dla `davtro.local`, `spark.davtro.local` → IP MetalLB | dostęp z zewnątrz |
-
-> Nie trzeba już `microk8s enable ingress` – ingress-nginx został zastąpiony przez
-> Istio Ingress Gateway (po weryfikacji Gateway starego można wyłączyć).
-
-### 9.9 Czy działa full automatic deployment?
-
-**TAK** – po jednorazowej instalacji komponentów z sekcji 9.8 cały pipeline działa bez kroków ręcznych:
-
-```
-1. Developer push do main branch
-2. GitHub Actions buduje 5 obrazów Docker (api, consumer, frontend, spring, spark)
-   -> GHCR (:latest + :<sha>)
-3. GitHub Actions: kustomize edit set image -> commit tagów w
-   manifests/base/kustomization.yaml (autorem github-actions[bot],
-   żeby nie zapętlać buildów) -> git push
-4. ArgoCD wykrywa zmiany (poll co 3 min / webhook) -> kustomize build -> apply
-   - davtro-website         -> manifests/overlays/production (ns davtro02)
-   - davtro-istio-gateway   -> manifests/istio-system (certyfikat Gateway)
-5. Pody robią rolling update z nowymi obrazami pobranymi z GHCR
-6. Istio: nowe/zbudowane pody dostają sidecar (ns ma istio-injection: enabled),
-   mTLS jest wymuszane przez PeerAuthentication (STRICT)
-7. cert-manager monitoruje Certificate -> odnawia TLS (Gateway 90d, vault-tls long-TTL)
-8. ESO synchronizuje sekrety z Vault: KV co 1h, dynamiczne credsy DB co 30 min
-9. vault-bootstrap (pętla co 60s) self-heal: init/unseal/konfiguracja Vaulta
-10. vault-snapshot CronJob codziennie 03:00 -> backup raft na PVC
-```
-
-**Warunki, żeby to działało:** sekret `GHCR_PAT_02` w Actions, pakiety GHCR = PUBLIC,
-sekret `davtro-github-repo` w ArgoCD, CRD operatorów (cert-manager/ESO/Kyverno) i Istio
-zainstalowane przed pierwszym synciem. Weryfikacja: `kubectl -n argocd get applications`
--> obie `Synced/Healthy`.
-
-
-### 9.10 Czy można wstawić zewnętrzne certyfikaty?
-
-**TAK** — 3 opcje:
-
-**Opcja A: Import do Vault PKI (zalecane)**
 ```bash
-# Wygeneruj CSR przez cert-manager, podpisz zewnętrznym CA, importuj do Vault
-vault write pki/intermediate/set-signed certificate=@intermediate.cert.pem
-# Vault PKI przejmuje zarządzanie rotacją
+# 1. CSR posredniego CA w Vaulcie (w podzie vault-0):
+microk8s.kubectl -n davtro02 exec vault-0 -- vault write -format=json pki/intermediate/generate/intermediate common_name="davtro-intermediate" | tee inter.json
+# 2. Podpisz zewnetrznym CA (procedura Twojego CA) -> intermediate.cert.pem
+# 3. Wgraj podpisany lancuch z powrotem:
+microk8s.kubectl -n davtro02 exec vault-0 -- vault write pki/intermediate/set-signed certificate=@intermediate.cert.pem
+# 4. Nic nie zmieniasz w Gicie: vault-issuer dalej bije w pki/sign/davtro-ingress,
+#    a wystawiane certy maja juz lancuch do Twojego root CA. Restart niepotrzebny -
+#    cert-manager odnowi Gateway przy kolejnym renew (lub wymus: kubectl delete secret -n istio-system davtro-gateway-tls).
 ```
 
-**Opcja B: Ręczny Secret (bez cert-manager)**
+| Dlaczego tak? | Vault PKI dalej zarzadza cyklem zycia (TTL, renew, revoke, CRL); wymieniasz tylko kotwice. Revoke jednego liscia nie rusza reszty. |
+
+### Opcja B - Reczny Secret (szybko, ale bez auto-rotacji)
+
 ```yaml
 apiVersion: v1
 kind: Secret
 metadata:
-  name: davtro-gateway-tls
-  namespace: istio-system
+  name: davtro-gateway-tls      # TA SAMA nazwa - Gateway nic nie zmienia
+  namespace: istio-system       # TEN SAM namespace - Gateway stamtad czyta
 type: kubernetes.io/tls
 data:
-  tls.crt: <base64 encoded cert>
-  tls.key: <base64 encoded key>
+  tls.crt: <base64 cert (lancuch: lisc + intermediate)>
+  tls.key: <base64 klucz>
 ```
-Następnie zmień `manifests/istio-system/gateway-certificate.yaml` (lub wskaz `credentialName`
-w `manifests/base/istio-gateway.yaml` na istniejący Secret). **Uwaga**: brak auto-rotacji — trzeba ręcznie aktualizować.
 
-**Opcja C: cert-manager + Let's Encrypt (dla publicznych domen)**
+```bash
+kubectl create secret tls davtro-gateway-tls -n istio-system --cert=lisc.pem --key=klucz.pem --dry-run=client -o yaml | kubectl apply -f -
+# WYLACZ zrodlo: zakomentuj gateway-certificate.yaml w manifests/istio-system/kustomization.yaml,
+# inaczej cert-manager nadpisze sekret przy renew! (GitOps deadlock w druga strone)
+# Rotacja = reczny re-apply + rollout restart gateway (Istio SDS zaladuje sam, ale pilnowac dat recznie).
+```
+
+| Dlaczego NIE na stale? | Brak renew = musisz pamietac o dacie (cert-expiry-exporter przypomni mailem). Jeden blad = strona lezy o polnocy. Opcja awaryjna / migracyjna. |
+
+### Opcja C - cert-manager + Let's Encrypt (tylko domeny PUBLICZNE)
+
 ```yaml
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -786,640 +450,175 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: admin@davtro.local
-    privateKeySecretRef:
-      name: letsencrypt-prod
+    email: admin@twoja-domena.pl
+    privateKeySecretRef: { name: letsencrypt-prod }
     solvers:
-    - http01:
-        ingress:
-          class: public
+    - http01: { ingress: { class: istio } }   # challenge przez Gateway (nie ingress-nginx!)
 ```
-
-
-### 9.11 Rotacja certyfikatów, tokenów i kluczy
-
-| Zasób | Mechanizm rotacji | Lokalizacja | Częstotliwość |
-|-------|-------------------|-------------|---------------|
-| **Certyfikat Gateway** (`davtro-gateway-tls`) | cert-manager odnawia automatycznie `renewBefore: 360h (15d)` przed expiry (Vault PKI) | Secret: `davtro-gateway-tls` (ns istio-system) | Co 90 dni (auto) |
-| **Certyfikaty mTLS w mesh** (fastapi, frontend, spring, postgres, kafka, …) | Istio/istiod wydaje certy workloadów w RAM sidecara (SPIFFE), rotacja automatyczna | brak Secretów – certy w pamięci Envoy | Co 24h (auto) |
-| **Certy serwera Vaulta** (`vault-tls`) | bootstrapowe CA (`rotationPolicy: Never`), liść z długim TTL | Secret: `vault-tls` (ns davtro02) | Ręcznie / rzadko (10 lat CA) |
-| **Vault PKI Root CA** | Brak auto-rotacji (10 lat TTL). Rotacja ręczna: nowy CA + re-sign wszystkich certów | Vault PKI engine | Ręcznie (rocznie) |
-| **Dynamiczne credsy DB** | Vault database engine generuje nowe przy każdym request. Stare TTL 1h -> automatycznie wygasa | Secret: `fastapi-db-creds`, `message-processor-db-creds` (ns davtro02) | Co 30 min (ESO refresh) |
-| **KV sekrety** (davtro/db, davtro/smtp) | ESO synchronizuje z Vault. Ręczna zmiana w Vault -> ESO podłapie | Secret: `davtro-secrets` (ns davtro02) | Co 1h (ESO refresh) |
-| **cert-manager-vault-token** | Ręczna: `vault token create` -> update Secret | Secret: `cert-manager-vault-token` (ns cert-manager) | Ręcznie (rocznie) |
-| **Vault unseal key** | Na PVC `/vault/data/bootstrap-keys` (tryb 1-of-1, homelab). Produkcja: auto-unseal (cloud KMS) | PVC: vault-data-vault-0 | Ręcznie (po każdym restarcie) |
-| **Vault snapshot** | CronJob codziennie 03:00, retencja 14 dni | PVC: vault-backup | Codziennie |
-| **Docker obrazy** | GitHub Actions po każdym push do main | GHCR | Każdy commit |
-
-### 9.12 Gdzie są przechowywane sekrety i certyfikaty
-
-```
-PRZECHOWYWANIE SEKRETÓW
-
-  VAULT (namespace: davtro02)
-   /vault/data/ (PVC 2Gi)
-    - bootstrap-keys (unseal key + root token, chmod 600)
-    - raft/ (stan Vault: KV, auth, policies)
-
-  KUBERNETES SECRETS (namespace: davtro02)
-   davtro-secrets: DB_USER, DB_PASSWORD, SMTP_USER, SMTP_PASSWORD
-   fastapi-db-creds: username, password (dynamiczne)
-   message-processor-db-creds: username, password (dynamiczne)
-   vault-tls: tls.crt, tls.key, ca.crt (TLS serwera Vaulta, bootstrapowe CA)
-   vault-ca: certyfikat CA (isCA, 10 lat)
-
-  KUBERNETES SECRETS (namespace: istio-system)
-   davtro-gateway-tls: tls.crt, tls.key (terminacja TLS na Istio Gateway)
-
-  KUBERNETES SECRETS (namespace: cert-manager)
-   cert-manager-vault-token: token (Vault auth dla cert-manager)
-
-  MESH ISTIO (brak Secretów)
-   certy workloadów mTLS: w RAM sidecara Envoy, rotacja co 24h, tożsamość SPIFFE
-
-  PVC (namespace: davtro02)
-   vault-backup: snapshot-*.snap (codziennie, retencja 14 dni)
-```
-
-
-### 9.13 Potwierdzenie działania (stan aktualny)
-
-```
-CERTYFIKATY:
-  davtro-gateway-tls (ns istio-system): Ready=True, CN=davtro.local, Issuer=vault-issuer
-  vault-tls / vault-ca (ns davtro02):   Ready=True (bootstrapowe CA)
-
-CLUSTERISSUER:
-  vault-issuer: Ready=True (token auth, https :8203 + caProvider)
-  vault-issuer-internal: Ready=True (token auth, path pki/sign/davtro-internal)
-  vault-issuer-mesh: przygotowany (Wariant B - cert-manager-istio-csr)
-
-MESH ISTIO:
-  PeerAuthentication default/vault: aktywne (STRICT; port 8203 PERMISSIVE)
-  AuthorizationPolicy: postgres-allow, kafka-allow, redis-allow,
-    fastapi-allow, ui-from-gateway-only
-  Gateway davtro-gateway + VirtualService davtro-routes/spark-routes: aktywne
-  (stare certy fastapi-mtls / message-processor-mtls / spring-app-mtls zostaly
-   usuniete - zastapione przez mTLS Envoy)
-
-ARGOCD:
-  davtro-website:       SYNC=Synced, HEALTH=Healthy
-  davtro-istio-gateway: SYNC=Synced, HEALTH=Healthy
-
-PODY (23 Running, 0 Errors, każdy ze sidecarem Envoy poza spark/vault-snapshot):
-  fastapi-web-app (3 replicas), frontend (2), message-processor, spring-app
-  postgres-db, redis, kafka-kraft, kafka-ui
-  vault-0, vault-bootstrap
-  spark-master, spark-worker (2)   [poza mesh, inject=false]
-  prometheus, grafana, loki, tempo, promtail
-    postgres-exporter, kafka-exporter, node-exporter
-  pgadmin
-```
-
-### 9.14 Szyfrowanie PII — Vault Transit Engine (Krok 4)
-
-**Stan:** ✅ Aktywne. Wrażliwe dane osobowe (imię gościa, e-mail, telefon) są
-szyfrowane **w locie** w Vault Transit Engine (klucz `davtro-app`, `aes256-gcm96`,
-auto-rotacja co 30 dni) przed zapisem do PostgreSQL, a odszyfrowywane przy odczycie.
-
-**Artykuły w repo:**
-- `backend-fastapi/app/transit_client.py` — klient Python (Kubernetes auth → Vault,
-  token odswieżany po 403/TTL, retry po wygaśnięciu).
-- `backend-fastapi/requirements.txt` — `requests==2.32.3` (klient HTTP do Transit).
-- `manifests/base/transit-helpers.yaml` — ConfigMap `transit-helpers` (skrypty
-  `transit_encrypt`/`transit_decrypt`/`transit_datakey` + `vault_agent_config.hcl`)
-  oraz `SecretStore vault-transit`.
-- `manifests/base/vault-bootstrap.yaml` — konfiguruje Vault: `vault secrets enable
-  transit`, klucz `davtro-app`, politykę `davtro-transit` i K8s-rolę `davtro-transit`
-  (SA `davtro-sa`, TTL 1h).
-
-**Jak szyfruje w FastAPI (`backend-fastapi/app/main.py`):**
-- w `create_booking()` przed `INSERT INTO bookings` pola `guest_name`, `email`,
-  `phone` przechodzą przez `encrypt_pii()` → w bazie zapisywane jako `vault:v1:...`
-  (ciphertext). Kafka i Redis dalej dostają plaintext — `message-processor`
-  wysyła z nich e-maile potwierdzające i faktury.
-- w `get_bookings()` pola `guest_name`, `email` są deszyfrowane przez `decrypt_pii()`
-  (stare wiersze w plaintextie zwracane bez zmian — recognizowane po braku prefiksu
-  `vault:v`).
-
-**Env w deploymentie (`deployment.yaml`):**
-| Env | Wartość |
-|---|---|
-| `VAULT_TRANSIT_ADDR` | `https://vault.davtro02.svc.cluster.local:8203` (od KROK 9/10) |
-| `VAULT_TRANSIT_CA_FILE` | `/etc/vault-tls/ca.crt` (CA `davtro-vault-ca` z sekretu `vault-tls`) |
-| `VAULT_TRANSIT_KEY` | `davtro-app` |
-| `VAULT_TRANSIT_AUTH_ROLE` | `davtro-transit` |
-| `VAULT_TRANSIT_TIMEOUT` | `30` (login robi TokenReview na apiserverze – 10 s bywało za mało) |
-| `VAULT_TRANSIT_ENABLED` | `true` (można wyłączyć, by zapisywać plaintext) |
-
-**FIX (KROK 9/10) — dlaczego właściciel widział `vault:v1:...` w „Moje Rezerwacje”:**
-Po przełączeniu Vaulta na TLS (`:8203`) `verify` (CA) przekazywało tylko
-`TransitClient._request()`, a `VaultTokenProvider.get_token()` wołało
-`requests.post()` **bez `verify=`** — czyli z systemowym store CA. Cert serwera
-Vaulta pochodzi z wewnętrznego CA `davtro-vault-ca`, więc logowanie
-`auth/kubernetes/login` padało z:
-
-```
-SSLError(... CERTIFICATE_VERIFY_FAILED ... unable to get local issuer certificate)
-```
-
-Skutek: brak tokena → `encrypt_pii()`/`decrypt_pii()` zawsze wracały z fallbacku,
-czyli panel „Moje Rezerwacje” pokazywał surowy ciphertext zamiast danych gościa
-(obce rezerwacje maskowane prawidłowo, bo tam deszyfrowanie w ogóle nie jest
-wywoływane). Poprawka: adres + `verify` są liczone w jednym miejscu
-(`vault_tls_config()` w `transit_client.py`) i używane przez **oba** klienty
-(login oraz `transit/*`), plus ostrzeżenie w logu, gdy plik CA nie istnieje.
-Diagnostyka: `python -c "import requests; print(requests.get('https://vault.davtro02.svc.cluster.local:8203/v1/sys/health', verify='/etc/vault-tls/ca.crt').status_code)"`.
-
-**Fail-safe:** gdy Vault lub auth jest chwilowo niedostępny (startup, rotacja tokena,
-awaria), aplikacja **loguje błąd i zapisuje odczytane/zapisywane dane jako plaintext**
-— API nie przestaje działać. Dzięki temu nie ma ryzyka, że awaria sejfu zerwie
-rezerwacje. Szyfrowanie wznawia się automatycznie po przywróceniu łączności.
-
-**Polityka Vault (`davtro-transit.hcl`):**
-```
-path "transit/encrypt/davtro-app" { capabilities = ["update"] }
-path "transit/decrypt/davtro-app" { capabilities = ["update"] }
-path "transit/rewrap/davtro-app"  { capabilities = ["update"] }
-path "transit/datakey/davtro-app" { capabilities = ["update"] }
-path "davtro/data/*"              { capabilities = ["read"] }
-path "database/creds/davtro-app-rw" { capabilities = ["read"] }
-```
-
-**Weryfikacja po wdrożeniu:**
-```bash
-# healthcheck pokaże "transit": true
-kubectl -n davtro02 port-forward svc/fastapi-web-app 8080
-curl -s http://localhost:8080/api/health
-
-# utwórz rezerwację...
-curl -X POST http://localhost:8080/api/bookings \
-  -H 'Content-Type: application/json' \
-  -d '{"property_id":1,"guest_name":"Jan Kowalski","email":"jk@example.com","phone":"+48123456789","guests":2,"check_in":"2026-01-01","check_out":"2026-01-05","total_price":1000}'
-
-# ...i sprawdź, że w DB email jest zaszyfrowany (vault:v1:...), a nie plaintext:
-kubectl -n davtro02 exec postgres-db-0 -- psql -U davtro -d davtro_rentals -c \
-  'SELECT id, guest_name, email, phone FROM bookings LIMIT 1;'
-```
-Po poprawnym wdrożeniu `email` powinno zaczynać się od `vault:v1:` — a w odpowiedzi
-`GET /api/bookings` ponownie będzie to czytelny adres e-mail.
-
-
-**Wyciganie haseł postgresql i aplikacji:**
-```bash
-# ... hasło do bazy postgresql
-kubectl -n davtro02 get secret davtro-secrets -o jsonpath='{.data.DB_PASSWORD}' 2>&1 | base64 -d; echo; echo ---USER---; /snap/bin/microk8s kubectl -n davtro02 get secret davtro-secrets -o jsonpath='{.data.DB_USER}' 2>&1 | base64 -d; echo
-
-# ... wyciganie haseł admin dla app: platforma wynajmu krótkoterminowego
-kubectl -n davtro02 get secret davtro-secrets \
-  -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d; echo
-```
-
-
----
-
-# KROK 5/5b (Auth) – logowanie rezerwujących + hasło admina z Vaulta
-
-## Logowanie i prywatność danych gości
-- Rezerwacja wymaga zalogowania (`POST /api/bookings` -> 401 bez tokenu).
-- Sesje: token w Redis (`session:<token>`, TTL 24 h), przesyłany jako `Authorization: Bearer`.
-- Hasła: PBKDF2-HMAC-SHA256 (260 tys. iteracji, losowa sól) – `backend-fastapi/app/auth.py`, stdlib, zero nowych zależności.
-- Endpointy: `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`.
-- Prywatność: pełne dane gościa (imię, e-mail, telefon, kwota) widzi **tylko właściciel rezerwacji i admin**; pozostali dostają wiersz zamaskowany ("Zastrzeżone", kwota "–"). Daty zostają widoczne (kalendarz dostępności).
-- Własne rezerwacje dostają odznakę **"Moja rezerwacja"** (flaga `mine` z API).
-- Zakładka Admin dla zwykłego użytkownika to "Moje Rezerwacje" (tylko admin widzi pełny panel).
-- Kalendarz per nieruchomość: combobox "Nieruchomość" w formularzu rezerwacji przełącza kalendarz (czerwone dni = zajęte dla danej nieruchomości).
-
-## Schemat bazy (migracje automatyczne w `init_db`)
-- Tabela `users` (username UNIQUE, password_hash, role user/admin, full_name+email szyfrowane Vault Transitem).
-- Kolumny `bookings.user_id` / `bookings.username` – powiązanie rezerwacji z kontem.
-- Świeże instalacje: kolumny są od razu w `CREATE TABLE`; istniejące bazy: `vault-bootstrap` robi idempotentny `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` jako właściciel bazy (dynamiczne credsy z Vaulta nie mają praw ALTER).
-- **Backfill**: rezerwacje powstałe przed migracją są przypisywane do kont po e-mailu gościa (Vault Transit deszyfruje obie strony) – log: `init_db: backfill - przypisano N rezerwacji do kont`.
-
-## Hasło admina – WYŁĄCZNIE z Vaulta (zero haseł w repo)
-- Kolejność pobierania: plik `ADMIN_PASSWORD_FILE` (ESO/Vault) -> env `ADMIN_PASSWORD` (z Secretu `davtro-secrets`) -> **brak? = losowe generowane przy starcie** (jednorazowo widoczne w logu, jak `DB_PASSWORD` w bootstrapie).
-- Bootstrap generuje `davtro/auth` (ADMIN_PASSWORD, 24 znaki) jeśli klucz nie istnieje; istniejący NIGDY nie jest nadpisywany.
-- ESO: `external-secrets.yaml` dociąga `ADMIN_PASSWORD` z KV `davtro/auth` do `davtro-secrets` (deployment ma to w `envFrom`).
-- Szybki test / zmiana hasła ręcznie:
-```bash
-vault kv put davtro/auth ADMIN_PASSWORD='TwojeSilneHaslo'
-kubectl -n davtro02 annotate externalsecret davtro-secrets external-secrets.io/force-sync=$(date +%s) --overwrite
-kubectl -n davtro02 rollout restart deploy/fastapi-web-app
-```
-- Konto admin seeduje się, gdy go nie ma (również awaryjnie przy próbie logowania).
-
-## Zmiana hasła z UI
-- Każdy zalogowany: sekcja "Zaloguj" -> karta "Zmiana własnego hasła" (`POST /api/auth/change-password`, wymaga aktualnego hasła, min. 6 znaków).
-- Admin: zakładka Admin -> karta "Zmiana hasła użytkownika" (`POST /api/auth/admin/set-password`, 403 dla nie-admina) – ustawia hasło dowolnemu kontu.
-
-# KROK 7 – alerty o wygasających certyfikatach (cert-expiry-exporter)
-
-Cert-manager + Vault PKI renewuje certyfikaty automatycznie (ingress 90d/renew 15d, mTLS 30d/renew 7d). Nowy eksporter daje **widoczność**, gdyby renew się nie wydarzył:
-
-- `manifests/base/cert-expiry-exporter.yaml`: eksporter (Python stdlib) skanuje co 60 s Secrety `kubernetes.io/tls` w `davtro02` i wystawia metryki:
-  - `davtro_cert_not_after_seconds{secret=...}` – unix timestamp wygaśnięcia,
-  - `davtro_cert_days_remaining{secret=...}` – dni do końca TTL.
-  Własny ServiceAccount + Role (tylko `get/list secrets` w namespace) – minimalne uprawnienia.
-- `prometheus.yaml`: scrape job `cert-expiry-exporter:9887` + `rule_files: cert-alerts.yml` z alertami:
-
-| Alert | Próg | Poziom |
-|---|---|---|
-| `DavtroCertExpiringSoon` | < 14 dni | warning |
-| `DavtroCertExpiringCritical` | < 3 dni | critical |
-| `DavtroCertExpired` | <= 0 (wygasł) | critical |
-
-- Alerty widoczne w Prometheus UI (`/alerts`, port 9090); po dołożeniu Alertmanagera ruszą powiadomienia.
-- Test:
-```bash
-kubectl -n davtro02 port-forward svc/cert-expiry-exporter 9887:9887 &
-curl -s localhost:9887/metrics
-```
-
-# Dostęp HTTPS z LAN – `scripts/port-forward.sh`
-```bash
-./scripts/port-forward.sh https-fastapi  8443   # https://<IP>:8443 (Istio Gateway -> /api)
-./scripts/port-forward.sh https-frontend 8444   # https://<IP>:8444 (Istio Gateway -> /)
-./scripts/port-forward.sh https-spring   8445   # panel raportowy (wewnątrz mesh)
-./scripts/port-forward.sh https-vault    8243   # Vault (wyłącznie HTTPS)
-```
-Certy Gateway (`davtro-gateway-tls`) podpisuje Vault PKI przez cert-manager i sam je odnawia;
-w przeglądarce zaakceptuj self-signed CA przy pierwszym wejściu. Docelowy dostęp z LAN to
-`https://davtro.local` przez Istio Ingress Gateway (IP MetalLB), a nie port-forward.
-
-
-
----
-
-# KROK 8 – Alertmanager (powiadomienia email z alertow)
-
-- `manifests/base/alertmanager.yaml`: Deployment `prom/alertmanager` + Service `alertmanager:9093`.
-- **Sekrety SMTP nie sa w ConfigMapie**: `alertmanager.yml` jest TEMPLATEM, a `start.sh` podstawia przy starcie `SMTP_HOST/PORT/USER/PASSWORD` (z Vaulta przez ESO, Secret `davtro-secrets`) i `FROM_EMAIL`. Odbiorca: env `ALERT_EMAIL_TO` (domyslnie FROM_EMAIL).
-- Bez skonfigurowanego SMTP alerty sa widoczne w UI Alertmanagera (port 9093), email ruszy po ustawieniu sekretow SMTP w Vault (`vault kv put davtro/smtp SMTP_HOST=... SMTP_USER=... SMTP_PASSWORD=...` + restart).
-- Prometheus: `alerting.alertmanagers -> alertmanager:9093`; nowa grupa regul `target-health` - alert `DavtroTargetDown` gdy scrape target (fastapi/postgres-exporter/kafka-exporter/node-exporter/cert-expiry) lezy 5 min.
-- Routing: severity=critical -> receiver email-critical (grupowanie po alertname+secret, repeat 4h).
-- UI: `./scripts/port-forward.sh` (nowa linia `start alertmanager 9093`) albo bezposrednio `kubectl -n davtro02 port-forward svc/alertmanager 9093:9093` -> http://localhost:9093
-- Test: `amtool` nie jest potrzebny - wystarczy wymusic alert: tymczasowo obniz prog w `cert-alerts.yml` albo wylacz pod cert-expiry-exporter (pojawi sie `DavtroTargetDown` i mail).
-
-# Roadmapa TLS (Etap 4+ – do zrobienia)
-- [x] Alertmanager (email) dla regul `cert-expiry` i `target-health` (KROK 8).
-- [x] Vault HTTPS: listener TLS :8203, bez HTTP :8200 (KROK 10).
-- [x] Kafka: szyfrowanie i uwierzytelnianie przez **Istio mTLS** (listener PLAINTEXT `:9092` + `AuthorizationPolicy/kafka-allow`); własny listener SSL `:9094` zbędny — usunięty (KROK 11, patrz `docs/ISTIO.md`).
-- [ ] Redis TLS (wymaga obrazu z TLS lub sidecar stunnel – stock `redis` nie ma TLS).
-- [ ] Dynamiczne credsy Redis/Kafka z Vaulta (redis-database / SASL-SCRAM).
-- [ ] Auto-unseal Vaulta (cloud KMS / transit) zamiast klucza na PVC.
-
----
-
-# KROK 9–10 – Vault HTTPS, finalnie TLS-only (:8203)
-
-- **Serwer** (`vault.yaml`): od KROK 10 istnieje wyłącznie listener TLS `0.0.0.0:8203` (`tls_cert_file=/vault/tls/tls.crt`, min TLS 1.2). Port HTTP `8200` nie występuje w ConfigMap, kontenerze ani Service; `8201` pozostaje wewnętrznym `cluster_address` dla Raft.
-- **Certyfikat SERWERA Vaulta** (`vault-server-tls.yaml`) — **NIE z Vault PKI!** Cert-manager podpisuje przez Vault PKI (`pki/sign/...`), czyli musi najpierw połączyć się z działającym Vaultem, a Vault bez własnego certyfikatu nie wstaje z listenerem TLS — błędne koło. Rozwiązanie: własne bootstrapowe CA (`Issuer vault-selfsigned` → `Certificate vault-ca` isCA, 10 lat, `rotationPolicy: Never`) → `Issuer vault-ca` → `Certificate vault-tls` (CN `vault.davtro02.svc` + SAN-y `vault.davtro02.svc`, `vault.davtro02.svc.cluster.local`, `vault`, `vault-0...vault-5`). Sekret `vault-tls` zawiera `tls.crt`/`tls.key`/`ca.crt`. Sekret istnieje **zanim** Vault wystartuje, a długie TTL + `rotationPolicy: Never` = stabilne zaufanie przy rotacji liścia. Certy usług wewnętrznych (mTLS fastapi/spring, Ingress) **dalej** wystawia PKI Vaulta (`pki/davtro-internal`) — bootstrapowe CA służy wyłącznie do TLS servera Vaulta.
-- **Klienci przelaczeni na `https://vault.davtro02.svc.cluster.local:8203`:**
-  - ESO: `secret-store.yaml` (2 store'y), `external-secrets-db-dynamic.yaml` (VaultDynamicSecret) - `caProvider` typ Secret `vault-tls` key `ca.crt` (CA czytane z sekretu, nic w Git).
-  - FastAPI: `deployment.yaml` - env `VAULT_TRANSIT_ADDR=https...:8203`, `VAULT_TRANSIT_CA_FILE=/etc/vault-tls/ca.crt`, mount `vault-tls`; `transit_client.py` weryfikuje CA (fail-safe: bez certu fallback plaintext z logiem, jak KROK 4).
-  - **FIX (transit po TLS):** `verify` jest liczony w `vault_tls_config()` i podawany **także w loginie** `auth/kubernetes/login` (`VaultTokenProvider`) - wcześniej login szedł z systemowym store CA i padał na `unable to get local issuer certificate`, przez co `encrypt_pii`/`decrypt_pii` były zawsze w fallbacku (panel pokazywał `vault:v1:...`, a nowe dane zapisywały się jako plaintext).
-  - Spring + message-processor: te same env + mount (po stronie kodu Java wymaga wsparcia CA_FILE - do weryfikacji przy wdrozeniu).
-  - transit-helpers (`transit-helpers.yaml`): `SecretStore/vault-transit` — `VAULT_ADDR`/`server: https://vault.davtro02.svc.cluster.local:8203` + `caProvider { type: Secret, name: vault-tls, key: ca.crt }` (ten sam mechanizm co ESO, sekret CA czytany z K8s, nic w Git).
-  - Snapshot CronJob: `VAULT_ADDR=https...:8203` + `VAULT_CACERT` + mount.
-- **KROK 10 — Vault TLS-only (zamknięcie dual-listenera):**
-  - `vault.yaml` ma wyłącznie listener TLS `0.0.0.0:8203`; port `8200` nie jest już w ConfigMap, kontenerze ani Service.
-  - Secret `vault-tls` jest wymaganym volumeMount. Bez niego kubelet nie uruchamia Vaulta, więc nie istnieje fallback HTTP.
-  - Bootstrap łączy się przez `https://vault.davtro02.svc.cluster.local:8203` i używa `VAULT_CACERT=/etc/vault-tls/ca.crt`.
-  - `ClusterIssuer/vault-issuer` i `vault-issuer-internal` używają HTTPS :8203 oraz `inject-ca-from-secret: davtro02/vault-ca`; cainjector aktualizuje `caBundle` po zmianie CA.
-  - NetworkPolicy przepuszcza do Vaulta tylko TCP 8203 dla ESO i cert-managera.
-  - Dostęp lokalny: `./scripts/port-forward.sh https-vault 8243` (forward 8243 → 8203), z CA z `vault-tls`.
-### Automatyczne odblokowanie po restarcie Vaulta
-
-Bootstrap (`vault-bootstrap.yaml`) działa jako Deployment z pętlą co 60 s i automatycznie wykonuje `vault operator unseal` przy stanie `sealed=true`. Ważne: `vault status` zwraca kod wyjścia `2` dla zapieczętowanego Vaulta — jest to prawidłowa odpowiedź, nie błąd połączenia. Skrypt `read_status` traktuje kody `0` i `2` jako odpowiedź serwera, a dopiero inne kody jako błąd TLS/sieci.
-
-Po odblokowaniu bootstrap sprawdza token z `/vault/data/bootstrap-keys` przez `vault token lookup`. Jeżeli token jest pusty lub nieaktualny, nie wykonuje dalszej konfiguracji i zapisuje konkretny komunikat zamiast ogólnego `BLAD`.
-
-Aby wymusić ponowienie pętli po wdrożeniu poprawki:
 
 ```bash
-kubectl -n davtro02 rollout restart deployment/vault-bootstrap
-kubectl -n davtro02 logs deployment/vault-bootstrap -c ensure --tail=50
+# Gateway MUSI byc osiagalny z internetu (:80 na IP MetalLB + DNS A na Twoja domene)
+# W gateway-certificate.yaml: issuerRef.name: letsencrypt-prod (zamiast vault-issuer)
+# + dnsNames: Twoje FQDN (nie *.davtro.local). LE odnowi sam (renewBefore jak dzis).
 ```
 
-W prawidłowym stanie log powinien zawierać `OK - nastepny check za 60s`. Plik `bootstrap-keys` ma pozostać na PVC `vault-data-vault-0`; nie należy go usuwać ani ponownie inicjalizować Vaulta.
+| Dlaczego tak? | Zero kosztow, pelna automatyka, zaufanie globalne. Wymaga: publicznej domeny, portu 80 z internetu i dzialajacego Gateway (chicken-egg przy pierwszym wdrazaniu - najpierw Vault CA, potem przepinka na LE). |
+## 18. ♻️ Rotacja certyfikatow, tokenow i kluczy
 
+| Zasob | Mechanizm rotacji | Gdzie lezy | Czestotliwosc |
+|---|---|---|---|
+| Certyfikat Gateway (`davtro-gateway-tls`) | cert-manager odnawia `renewBefore: 360h (15d)` przed expiry (Vault PKI); SDS bez restartu | Secret `davtro-gateway-tls` (ns `istio-system`) | co 90d, auto |
+| Certyfikaty mTLS w meshu | istiod wydaje certy workloadow w RAM sidecara (SPIFFE) | brak Secretow (pamiec Envoy) | co ~24h, auto |
+| Cert serwera Vaulta (`vault-tls`) | bootstrapowe CA (`rotationPolicy: Never`), lisc z dlugim TTL | Secret `vault-tls` (ns `davtro02`) | rzadko (CA 10 lat) |
+| Vault PKI Root CA | brak auto-rotacji (10 lat TTL); recznie: nowy CA + re-sign | Vault PKI engine | recznie (rocznie) |
+| Dynamiczne credsy DB | Vault database engine generuje nowe na kazdy request; stare wygasaja (TTL 1h) | `fastapi-db-creds`, `message-processor-db-creds` | co 30 min (ESO) |
+| KV sekrety (davtro/db, davtro/smtp, davtro/auth) | ESO synchronizuje; reczna zmiana w Vault -> ESO podlapie w refresh | `davtro-secrets` | co 1h (ESO) |
+| `cert-manager-vault-token` | recznie: `vault token create` -> update Secret | Secret w ns `cert-manager` | recznie (rocznie) |
+| Vault unseal key | na PVC `/vault/data/bootstrap-keys` (1-of-1, homelab); prod: auto-unseal KMS | PVC `vault-data-vault-0` | po kazdym restarcie (auto przez bootstrap) |
+| Vault snapshot | CronJob 03:00, retencja 14 dni | PVC `vault-backup` | codziennie |
+| Obrazy Dockera | Actions po kazdym push do main | GHCR | kazdy commit |
+| Klucz Transit (`davtro-app`, aes256-gcm96) | auto-rotacja klucza w Vault (stare wersje deszyfruja dalej) | Vault Transit engine | co 30 dni |
 
-1. **NetworkPolicy `allow-eso-to-vault` musi przepuszczać TCP 8203** (`network-policies.yaml`).
-   Po przełączeniu klientów na `:8203` samo `namespaceSelector` na `:8200/8201` było za mało —
-   ESO dostawał `context deadline exceeded` (policy `default-deny` odrzucała połączenie), więc
-   `davtro-secrets` nie powstawał i kaskada: pody postgres / alertmanager / pgadmin / spring-app /
-   postgres-exporter / fastapi wpadały w `CreateContainerConfigError` (brakujący secret) lub `CrashLoopBackOff`.
-2. **Każdy store wskazujący na `https://...:8203` musi mieć `caProvider`** wskazujący na sekret `vault-tls`, klucz `ca.crt`
-   (`secret-store.yaml` ×2, `transit-helpers.yaml` → `SecretStore/vault-transit`).
-   Bez tego: `x509: certificate signed by unknown authority` → `SecretStore` = `Degraded`.
-3. **Pułapka GitOps**: obie poprawki były już w `main`, ale `vault-transit` bez `caProvider` blokował
-   `argocd` sync (`Failed` po 5 retryach) → ArgoCD nigdy nie dostarczył poprawek do klastra,
-   a live namespace pozostawał stary (tzw. GitOps deadlock: błąd w sync nie da się naprawić przez sync).
-   Rozwiązanie tymczasowe: ręczny `kubectl apply` plików, aż ArgoCD wróci do `Synced/Healthy`.
-4. **`namespaceSelector` bez `podSelector`** w elemencie `from` — kombinacja obu w jednym elemencie to AND,
-   czyli wymagałaby podu będącego jednocześnie w ns ESO i ns target; stąd dwa osobne elementy `from`.
+```text
+90d Gateway (auto) | 24h mesh (auto) | 30d Vault lisc (auto, CA 10 lat)
+1h sekrety (ESO) | 30min credsy (auto) | 30d Transit key | 03:00 backup | alerty mail
+```
 
-**Status weryfikacji (live, ns `davtro02`)**: ArgoCD `davtro-website` = `Synced/Healthy`; wszystkie pody `Running/Completed`;
-`SecretStore` `vault-backend` / `vault-dynamic` / `vault-transit` = `Valid=True`; wszystkie `ExternalSecret` = `SecretSynced=True`;
-`Certificate vault-tls` i `vault-ca` = `True`. Sprawdzenie TLS od strony poda:
+## 19. 🗄️ Gdzie sa przechowywane sekrety i certyfikaty
+
+```text
+VAULT (ns davtro02) - /vault/data/ (PVC 2Gi):
+  bootstrap-keys (unseal + root, chmod 600) | raft/ (KV, auth, policies)
+
+SECRETS K8s (ns davtro02):
+  davtro-secrets: DB_USER, DB_PASSWORD, SMTP_*, ADMIN_PASSWORD
+  fastapi-db-creds / message-processor-db-creds: username, password (dynamiczne)
+  vault-tls: tls.crt, tls.key, ca.crt (TLS serwera Vaulta, bootstrapowe CA)
+  vault-ca: cert CA (isCA, 10 lat)
+
+SECRETS K8s (ns istio-system):
+  davtro-gateway-tls: tls.crt, tls.key (terminacja TLS na Gateway)
+
+SECRETS K8s (ns cert-manager):
+  cert-manager-vault-token: token (auth Vaulta dla cert-managera)
+
+MESH (brak Secretow): certy mTLS w RAM Envoy, rotacja ~24h, SPIFFE
+PVC (ns davtro02): vault-backup: snapshot-*.snap (codziennie, 14 dni)
+```
+## 20. 👤 Auth, faktura, hasla admina (+ Transit PII)
+
+### Logowanie i prywatnosc gosci
+Rezerwacja wymaga logowania (`POST /api/bookings` -> 401 bez tokenu). Sesje w Redis (`session:<token>`, TTL 24h, `Authorization: Bearer`). Hasla: PBKDF2-HMAC-SHA256 (260k iteracji, sol) - `backend-fastapi/app/auth.py`, stdlib. Endpointy: `register/login/logout/me` + `change-password` (min. 6) + admin `admin/set-password` (403 dla nie-admina). Prywatnosc: pelne dane widzi wlasciciel + admin; reszta widzi "Zastrzezone" (daty jawne - kalendarz). Flaga `mine` = "Moja rezerwacja"; zwykly user widzi zakladke "Moje Rezerwacje". Kalendarz per nieruchomosc (czerwone = zajete).
+### Schemat bazy (`init_db` migruje sam)
+Tabela `users` (username UNIQUE, password_hash, role, full_name+email szyfrowane Transitem). Kolumny `bookings.user_id/username` (wlasciciel); swieze instalacje maja je w CREATE TABLE, stare dostaja idempotentny ALTER od bootstrapu (credsy Vaulta nie maja praw ALTER). Backfill: stare rezerwacje przypisywane po e-mailu (Transit deszyfruje obie strony).
+### Haslo admina - WYLACZNIE z Vaulta
+Kolejnosc: plik `ADMIN_PASSWORD_FILE` (ESO) -> env `ADMIN_PASSWORD` (sekret) -> losowe przy starcie (widoczne raz w logu). Bootstrap generuje `davtro/auth` (24 znaki) jesli brak; istniejacego NIGDY nie nadpisuje. ESO dociaga do `davtro-secrets` (envFrom). Zmiana: `vault kv put davtro/auth ADMIN_PASSWORD='...'` + force-sync ESO + restart fastapi. Konto admin seeduje sie tez awaryjnie przy logowaniu.
 
 ```bash
-kubectl -n davtro02 exec vault-0 -- vault status \
-  -address=https://127.0.0.1:8203 -cacert=/vault/tls/ca.crt
+# haslo bazy + user:
+kubectl -n davtro02 get secret davtro-secrets -o jsonpath='{.data.DB_PASSWORD}' | base64 -d; echo
+kubectl -n davtro02 get secret davtro-secrets -o jsonpath='{.data.DB_USER}' | base64 -d; echo
+# haslo admina panelu:
+kubectl -n davtro02 get secret davtro-secrets -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d; echo
 ```
 
+### Szyfrowanie PII - Vault Transit (aktywne)
+Imie/e-mail/telefon szyfrowane w locie (`transit_client.py`, klucz `davtro-app` aes256-gcm96, rotacja 30d) przed INSERT (`vault:v1:...` w bazie), deszyfrowane przy odczycie (stare plaintexty przechodza bez zmian). Env: `VAULT_TRANSIT_ADDR=https://vault.davtro02.svc:8203`, `VAULT_TRANSIT_CA_FILE=/etc/vault-tls/ca.crt`, `VAULT_TRANSIT_KEY=davtro-app`, `TIMEOUT=30` (TokenReview wolny), `ENABLED=true` (off = plaintext). FIX po TLS: `verify` liczone w `vault_tls_config()` i uzywane tez w loginie (wczesniej login padal na `unable to get local issuer certificate` i panel pokazywal `vault:v1:...`). Fail-safe: awaria Vaulta = plaintext + log (API nie staje). Weryfikacja: health `transit:true` -> POST booking -> SELECT pokazuje `vault:v1:`.
 
-
-# KROK 11 (Kafka) - wersja Istio
-
-Kafka ma jeden listener klientów: `kafka-kraft:9092` (PLAINTEXT na poziomie aplikacji). Szyfrowanie i
-uwierzytelnianie zapewnia mesh: sidecary Envoy ustanawiają mTLS (TLS 1.3, tożsamość SPIFFE), a to, kto może
-rozmawiać z brokerem, określa `AuthorizationPolicy/kafka-allow`. Listener SSL `:9094`, keystore/truststore,
-initContainery `openssl`/`keytool` i certyfikat `kafka-server-tls` zostały usunięte. Szczegóły: `docs/ISTIO.md`.
-
-
-# Istio – stopień wdrożenia, szyfrowanie (TLS/mTLS) i wykorzystanie Vaulta
-
-> Analiza na podstawie manifestów w repo (w tym środowisku nie było `kubectl`, więc nie dotyczy żywego klastra).
-> Instalacja mesh krok po kroku: `docs/ISTIO.md`. Schematy i checklista instalacji: sekcje niżej.
-
-## 1. Stopień wdrożenia Istio — stan: **zaawansowany (kompletne manifesty + GitOps), ale wariant domylny to własne CA Istio**
-
-**Co jest przygotowane:**
-
-| Element | Plik | Status |
-|---|---|---|
-| Instalacja Istio (Wariant A – CA istiod) | `istio/istio-operator.yaml` | gotowy, `istioctl install -f` (ręczny krok) |
-| Wariant B – Vault PKI jako CA mesh | `istio/istio-operator-vault-ca.yaml` + `istio/istio-csr-values.yaml` (cert-manager-istio-csr) | gotowy, ale **opcjony** – wymagaVaulta działającego przed mesh (opisany w `docs/ISTIO.md`) |
-| Namespace z iniekcją | `manifests/base/namespace.yaml` → `istio-injection: enabled` | tak (overlay zmienia ns na `davtro02`) |
-| Gateway + routing (zastąpił ingress-nginx) | `manifests/base/istio-gateway.yaml` – `Gateway` + 2 `VirtualService` | tak |
-| Bezpieczeństwo mesh | `manifests/base/istio-security.yaml` | 2× PeerAuthentication, 1× DestinationRule, 5× AuthorizationPolicy |
-| Patche sidecarów | `manifests/base/kustomization.yaml` | `holdApplicationUntilProxyStarts` dla fastapi, message-processor, spring, vault-bootstrap, vault, kafka-topic-job |
-| Cert dla Gateway | `manifests/istio-system/gateway-certificate.yaml` + `argocd/application-istio.yaml` | tak, ArgoCD auto-sync |
-| Dokumentacja | `docs/ISTIO.md` | bardzo szczegółowa (pułapki, kolejność, weryfikacja) |
-
-**Czego NIE ma (luki):**
-- brak `RequestAuthentication` (JWT/authn na gwiazdzie) – tylko tożsamości SPIFFE;
-- `outboundTrafficPolicy: ALLOW_ANY` (nie REGISTRY_ONLY) – brak kontroli egress, brak `Sidecar`/`ServiceEntry`;
-- brak AuthorizationPolicy dla grafana/loki/tempo/promtail/spring-app (te są tylko za mTLS + NetworkPolicy);
-- README: sekcje historyczne (stare certy `fastapi-mtls`, `davtro-tls`, checklistę Kafka SSL) zaktualizowano do wersji Istio; źródłem prawdy o mesh pozostaje `docs/ISTIO.md`;
-- SPIFFE w `istio-security.yaml` sztywno wpisuje ns `davtro02` – staging overlay tego nie nadpisuje.
-
-## 2. Mapa TLS/mTLS per usługa
-
-**Wewnątrz klastra (między podami):**
-
-| Usługa | W mesh? | Szyfrowanie wewnątrz |
-|---|---|---|
-| **fastapi (api)** | ✅ sidecar | **mTLS STRICT** (Envoy, SPIFFE); app → PLAINTEXT |
-| **frontend** | ✅ | **mTLS STRICT** |
-| **spring** | ✅ | **mTLS STRICT** |
-| **message-processor** | ✅ | **mTLS STRICT** |
-| **postgresql** | ✅ | **mTLS STRICT** + `AuthorizationPolicy/postgres-allow` (SA `davtro-sa`, `default`); Postgres bez własnego SSL |
-| **redis** | ✅ | **mTLS STRICT** + `AuthorizationPolicy/redis-allow` (tylko `davtro-sa`); brak własnego TLS Redis |
-| **kafka** | ✅ | **mTLS STRICT** – broker celowo `PLAINTEXT://:9092`, szyfruje Envoy (usunięto listener SSL 9094) + `kafka-allow` |
-| **vault** | ⚠️ częściowo | port **8203 API = własne TLS** (cert-manager, bootstrap CA `vault-tls`), **bez sidecara** (`excludeInboundPorts: 8203`, `PeerAuthentication/vault` → portLevelMtls PERMISSIVE, `DestinationRule/vault-own-tls` = DISABLE). Port **8201 raft = mTLS STRICT** mesh |
-| **pgadmin, kafka-ui, grafana** | ✅ | **mTLS STRICT** + polityka `ui-from-gateway-only` (tylko z ingress gateway) |
-| **loki, tempo, prometheus, promtail, eksportery** | ✅ (poza `node-exporter`) | **mTLS STRICT** (auto-mTLS), własne TLS nieszyfrowane w manifestach |
-| **spark (master/worker)** | ❌ `sidecar.istio.io/inject: "false"` | **brak TLS/plaintext** – losowe porty RPC |
-| **vault-snapshot CronJob** | ❌ inject=false | **własny TLS** do :8203 (PERMISSIVE) |
-| **ESO, cert-manager** (poza ns) | ❌ | **własny TLS** HTTPS :8203 do Vaulta |
-| **node-exporter** (hostNetwork) | ❌ | plaintext (auto-mTLS obniża do TLS bez mTLS) |
-
-**Z zewnątrz (north-south):**
-- **Jedyne wejście: Istio Ingress Gateway** – port 80 → `httpsRedirect: true`, port 443 **TLS SIMPLE (bez mTLS)**, `minProtocolVersion: TLSV1_2`, certyfikat `davtro-gateway-tls` (cert-manager podpisany przez **Vault PKI**). Certyfikat wystawia serwis w ns `istio-system`, nie `davtro02`.
-- Gateway → backend: ruch wewnątrz przechodzi mTLS mesh (gateway jest w mesh), dodatkowo warstwa NetworkPolicy (`allow-istio-gateway-to-ui`, `allow-ingress-controller-to-*`).
-- Podsumowując: **zewnętrznie = TLS (serwer), wewnętrznie = mTLS**; client-side mTLS na zewnątrz nie występuje (nikt nie ma cliente certs do Gateway).
-
-## 3. Kto korzysta z Vaulta
-
-| Konsument | Co pobiera | Ścieżka |
-|---|---|---|
-| **External Secrets Operator** (`secret-store.yaml`) | KV `davtro/*` → Secret `davtro-secrets` (DB_USER/DB_PASSWORD, `davtro/auth/ADMIN_PASSWORD`) | HTTPS :8203, Kubernetes auth |
-| **ESO dynamic** (`external-secrets-db-dynamic.yaml`) | `VaultDynamicSecret` – `database/creds/davtro-app-rw` (rotowane credsy PG) | HTTPS :8203 |
-| **fastapi** | Transit PII (`transit/encrypt|decrypt/davtro-app`, k8s auth rola `davtro-transit`) + dynamiczne credsy DB z plików ESO + hasło admina | `transit_client.py`, CA `/etc/vault-tls/ca.crt` |
-| **message-processor** | Transit (szyfrowanie wiadomości/PII), credsy DB (`message-processor-db-creds`) | env `VAULT_TRANSIT_*` |
-| **spring-app** | Transit (KROK 6), `envFrom: davtro-secrets` | env `VAULT_TRANSIT_*` |
-| **cert-manager** (`pki-issuer.yaml`) | `vault-issuer` (certy Gateway), `vault-issuer-internal` (certy serwisów), `vault-issuer-mesh` (Wariant B) | HTTPS :8203, token auth |
-| **Prometheus** | scrap metryk `vault:8203` + alerty (`DavtroVaultTransitStale` itd.) | TLS z `vault-tls/ca.crt` |
-| **vault-bootstrap** | konfiguruje silniki: KV, Transit, database, PKI, roles/policies Kubernetes auth | Job w mesh |
-| **vault-snapshot** CronJob | snapshot storage | HTTPS :8203 (bez sidecara) |
-| **Vault → PostgreSQL** | database engine, `sslmode=disable` (szyfruje sidecar Vaulta, Postgres w STRICT to akceptuje) | przez mesh |
-| **transit-helpers** (ConfigMap) | skrypty `transit_encrypt/decrypt/datakey` | HTTPS :8203 |
-| ❌ **Nie używają Vaulta** | grafana, loki, tempo, promtail, spark, frontend (dostaje dane przez API), pgadmin, kafka-ui | – |
-
-## Podsumowanie stopnia wdrożenia
-- **Definicje: ~90%** – pełen mesh mTLS STRICT, Gateway zamiast ingress, polityki L7 dla kluczowych serwisów, GitOps (ArgoCD), dokumentacja.
-- **Świadome wyłączenia:** Spark (poza mesh), Vault :8203 (własny TLS), vault-snapshot/ESO/cert-manager (poza mesh, własne TLS) – to **celowe i udokumentowane**, nie braki.
-- **Realne luki:** brak JWT (`RequestAuthentication`), brak kontroli egress (ALLOW_ANY), brak authz dla obserwowalności (grafana/loki/tempo), nieaktualne fragmenty README, wariant B (Vault jako CA mesh) tylko przygotowany.
-
----
-
-# Schematy i auto-wdrożenie przez ArgoCD (obrazy z GitHub / GHCR)
-
-## Schemat 1 – Pipeline auto-wdrożenia (GitOps)
-
+```text
+CREATE booking --> encrypt_pii() --> vault:v1:... --> INSERT
+GET bookings --> decrypt_pii() --> czytelny mail (obce: Zastrzezone)
+Vault pada --> plaintext + log (API zyje) --> po powrocie znow szyfruje
 ```
- Developer                GitHub (main)              GitHub Container Registry
-    │                          │                              ▲
-    │ git push                 │                              │ push 5 obrazów
-    ▼                          ▼                              │ (:latest + :<sha>)
- ┌──────────────────────────────────────────────┐   ┌─────────┴──────────┐
- │ .github/workflows/ci-cd.yaml                 │──►│ ghcr.io/<owner>/   │
- │  1. build: api, consumer, frontend,          │   │  ...-sp02          │
- │     spring, spring->mvn, spark->sbt          │   │  ...-sp02-frontend │
- │  2. kustomize edit set image                 │   │  ...-sp02-consumer │
- │     -> tagi SHA w manifests/base/kustomization│  │  ...-sp02-spring   │
- │  3. git commit + push (github-actions[bot])  │   │  ...-sp02-spark    │
- └──────────────────────────────────────────────┘   └────────────────────┘
-    │                          │
-    │ webhook / poll (3 min)   │
-    ▼                          ▼
- ┌───────────────────────────────────────────────────────────────────────┐
- │ ARGOCD (ns argocd) – 2 Application (auto-sync, prune, selfHeal)       │
- │                                                                       │
- │  davtro-website            -> manifests/overlays/production  (ns      │
- │                               davtro02: aplikacje + mesh polityki)    │
- │  davtro-istio-gateway      -> manifests/istio-system        (ns       │
- │                               istio-system: cert dla Gateway)         │
- │  źródło: repo GitHub (sekret davtro-github-repo, PAT Contents:Read)   │
- └───────────────────────────────┬───────────────────────────────────────┘
-                                 │ kustomize build -> apply
-                                 ▼
- ┌───────────────────────────────────────────────────────────────────────┐
- │ MICROK8S + ISTIO (ns davtro02, istio-injection: enabled)              │
- │  pody pobierają obrazy z GHCR (pull razem z nowym tagiem SHA)         │
- │  -> rolling update, bez kroków ręcznych                               │
- └───────────────────────────────────────────────────────────────────────┘
+## 20. Auth, faktura, hasla admina (+ Transit PII)
 
- UWAGA: jeśli pakiet GHCR jest PRIVATE – trzeba w ns utworzyć imagePullSecret
- i powiązać z ServiceAccount; w tym repo pakiety mają być PUBLIC
- (w UI GitHuba: Package settings -> Change visibility -> PUBLIC,
- bo REST API tego nie zmienia).
+### Logowanie i prywatnosc gosci
+Rezerwacja wymaga logowania (401 bez tokenu). Sesje w Redis (TTL 24h, Bearer). Hasla PBKDF2 (260k iteracji) - `app/auth.py`. Endpointy: register/login/logout/me + change-password (min. 6) + admin set-password (403 dla nie-admina). Pelne dane widzi wlasciciel + admin; reszta widzi Zastrzezone (daty jawne - kalendarz). Flaga `mine` = Moja rezerwacja. Kalendarz per nieruchomosc (czerwone = zajete).
+### Schemat bazy (`init_db` migruje sam)
+Tabela `users` (username UNIQUE, role, dane szyfrowane Transitem). Kolumny `bookings.user_id/username`; swieze instalacje maja je w CREATE TABLE, stare dostaja ALTER od bootstrapu (credsy Vaulta nie maja praw ALTER). Backfill: stare rezerwacje przypisywane po e-mailu.
+### Haslo admina - WYLACZNIE z Vaulta
+Kolejnosc: plik ADMIN_PASSWORD_FILE -> env ADMIN_PASSWORD -> losowe przy starcie (raz w logu). Bootstrap generuje `davtro/auth` (24 znaki) jesli brak; istniejacego NIGDY nie nadpisuje. Zmiana: `vault kv put davtro/auth ...` + force-sync ESO + restart fastapi. Konto seeduje sie tez awaryjnie przy logowaniu.
+```bash
+# haslo bazy + user + haslo admina panelu:
+kubectl -n davtro02 get secret davtro-secrets -o jsonpath='{.data.DB_PASSWORD}' | base64 -d; echo
+kubectl -n davtro02 get secret davtro-secrets -o jsonpath='{.data.DB_USER}' | base64 -d; echo
+kubectl -n davtro02 get secret davtro-secrets -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d; echo
 ```
 
-## Schemat 2 – Szyfrowanie: z zewnątrz (TLS) i wewnątrz (mTLS)
+### Szyfrowanie PII - Vault Transit (aktywne)
+Imie/mail/telefon szyfrowane w locie (klucz `davtro-app` aes256-gcm96, rotacja 30d) przed INSERT (`vault:v1:...`), deszyfrowane przy odczycie (stare plaintexty przechodza). Env: `VAULT_TRANSIT_ADDR=https://vault.davtro02.svc:8203`, CA `/etc/vault-tls/ca.crt`, TIMEOUT 30, ENABLED true (off = plaintext). FIX po TLS: `verify` tez w loginie (wczesniej padal na `unable to get local issuer certificate` i panel pokazywal `vault:v1:...`). Fail-safe: awaria Vaulta = plaintext + log (API nie staje).
 
+```text
+CREATE --> encrypt_pii() --> vault:v1:... --> INSERT
+GET --> decrypt_pii() --> czytelny mail (obce: Zastrzezone)
+Vault pada --> plaintext + log --> po powrocie znow szyfruje
 ```
-  ZEWNĄTRZ (Internet/LAN)                 ns davtro02 (mesh Istio)
- ───────────────────────                 ─────────────────────────────
- klient                                   sidecar Envoy każdego poda
-   │  :80  -> httpsRedirect                 │
-   │  :443 TLS 1.2+ (SIMPLE,               │  mTLS STRICT (PeerAuthentication/default)
-   │  cert davtro-gateway-tls,              │  tożsamość SPIFFE = cluster.local/ns/.../sa/...
-   │  cert-manager x Vault PKI)             ▼
-   ▼                              ┌────────────────────────────┐
- ┌──────────────────────────┐     │  fastapi  frontend  spring │
- │ Istio Ingress Gateway    │     │  message-processor  vault  │
- │ (istio-system)           │────►│  postgres redis kafka      │
- │ terminacja TLS,          │ :80 │  grafana pgadmin kafka-ui  │
- │ Gateway+VirtualService   │     │  loki tempo prometheus     │
- └──────────────────────────┘     └────────────────────────────┘
-                                        │
-   Wyjątki (poza mesh / bez mTLS):      │
-   • Vault :8203  – własny TLS (cert vault-tls), port wyłączony
-     z sidecara, DestinationRule/vault-own-tls = DISABLE, port 8203 PERMISSIVE
-   • Spark (inject=false)               – plaintext, UI przez Gateway
-   • vault-snapshot CronJob (inject=false) – własne HTTPS do :8203
-   • ESO / cert-manager (inny namespace) – własne HTTPS do :8203
-   • node-exporter (hostNetwork)         – plaintext (auto-mTLS)
+## 21. Alerty o certyfikatach i Alertmanager
 
- AuthorizationPolicy (kto z kim może rozmawiać, L7/SPIFFE):
-   postgres-allow | kafka-allow | redis-allow | fastapi-allow | ui-from-gateway-only
+cert-manager renewuje sam (Gateway 90d/15d, Vault lisc 30d/7d), ale eksporter daje widocznosc gdyby renew padl. `cert-expiry-exporter.yaml`: skan co 60 s Secretow `kubernetes.io/tls`, metryki `davtro_cert_not_after_seconds` + `davtro_cert_days_remaining` (wlasny SA, tylko get/list secrets). `prometheus.yaml`: scrape `:9887` + reguly: `DavtroCertExpiringSoon` (<14d warning), `Critical` (<3d), `Expired` (<=0). Test: port-forward 9887 + `curl /metrics`.
+
+Alertmanager (`alertmanager.yaml`, `:9093`): `alertmanager.yml` to TEMPLATE - `start.sh` podstawia SMTP z Vaulta (Secret `davtro-secrets`) + `ALERT_EMAIL_TO`. Bez SMTP alerty tylko w UI; mail rusza po `vault kv put davtro/smtp ...` + restart. Prometheus wskazuje `alertmanager:9093`; regula `target-health` (`DavtroTargetDown` po 5 min); critical -> mail co 4h. UI: linia `start alertmanager 9093` w `port-forward.sh`.
+
+```text
+cert-expiry:9887 --> prometheus (reguly 14d/3d/0) --> alertmanager:9093
+  --SMTP z Vaulta--> e-mail || bez SMTP: tylko UI :9093
 ```
+## 22. Vault HTTPS (TLS-only) + Kafka/Istio + pulapki
 
-## Schemat 3 – Kto korzysta z Vaulta
+Serwer (`vault.yaml`): wylacznie listener TLS `0.0.0.0:8203` (min 1.2); `:8200` nie istnieje (ConfigMap/kontener/Service), `:8201` to wewnetrzny raft. Klienci na `https://vault.davtro02.svc.cluster.local:8203` + `caProvider` (sekret `vault-tls`/`ca.crt`): ESO x2, VaultDynamicSecret, FastAPI (`VAULT_TRANSIT_*` + mount), Spring/consumer (te same env), transit-helpers (`vault-transit`), snapshot (`VAULT_CACERT` + mount). Issuerzy po HTTPS + `inject-ca-from-secret`. NetPol: tylko TCP 8203 dla ESO/cert-managera. LAN: `port-forward.sh https-vault 8243`.
 
+Pulapki (odkryte na zywym klastrze): NetPol bez TCP 8203 = `context deadline exceeded`, `davtro-secrets` nie powstaje, kaskada CrashLoop (postgres/pgadmin/spring/exporter/fastapi). Store bez `caProvider` = `unknown authority` = Degraded. GitOps deadlock: blad w sync blokuje dostarczenie poprawki - wtedy reczny `kubectl apply` az do Healthy. `namespaceSelector` + `podSelector` w jednym `from` = AND (dlatego dwa osobne elementy). Unseal: `vault status` kod 2 = sealed (nie blad!), bootstrap robi unseal sam; `rollout restart vault-bootstrap` + log `OK - nastepny check za 60s`. TLS check: `exec vault-0 -- vault status -address=https://127.0.0.1:8203 -cacert=/vault/tls/ca.crt`.
+
+Kafka/Istio: jeden listener `kafka-kraft:9092` PLAINTEXT; szyfruje Envoy (mTLS 1.3, SPIFFE), dopuszcza `kafka-allow`. SSL `:9094`/keystore/initContainery/`kafka-server-tls` usuniete. Roadmapa: [x] Alertmanager [x] Vault TLS-only [x] Kafka/Istio; [ ] Redis TLS (stock redis bez TLS) [ ] credsy Redis/Kafka z Vaulta [ ] auto-unseal KMS.
+
+```text
+klienci --HTTPS :8203 (ca.crt z vault-tls)--> Vault (TLS-only, :8200 nie istnieje)
+NetPol: tylko 8203 dla ESO/cert-manager | deadlock: blad w sync -> reczny apply
+kafka:9092 PLAINTEXT --mTLS Envoy--> konsumenci (kafka-allow decyduje kto)
 ```
-                        ┌──────────────────────────────┐
-                        │  VAULT (ns davtro02, :8203   │
-                        │  TLS własny CA vault-ca)     │
-                        │  silniki: KV, Transit,       │
-                        │  database, PKI, kubernetes auth│
-                        └──────────────┬───────────────┘
-   ┌────────────────┬──────────────────┼───────────────────┬──────────────┐
-   ▼                ▼                  ▼                   ▼              ▼
- External Secrets  cert-manager     aplikacje           Prometheus    vault-snapshot
- Operator (ESO)    (pki-issuer)     (k8s auth)          (scrap        (CronJob 03:00,
- • KV davtro/*     • vault-issuer   • fastapi:          :8203,         snapshot raft)
-   -> davtro-secrets   (Gateway)      Transit PII        alerty)       vault-bootstrap
- • VaultDynamic-   • vault-issuer-  • message-processor: (self-heal co
-   Secret            internal         Transit            60 s: init/
-   database/creds  • vault-issuer-  • spring-app:          unseal/
-   davtro-app-rw     mesh (Wariant B) Transit            konfiguracja)
-   -> credsy DB       istio-csr
+## 23. Schematy zbiorcze (GitOps / TLS / Vault)
+
+```text
+GITOPS: dev --push--> GitHub --Actions--> GHCR (5) --tag--> kustomize
+  --poll--> ArgoCD (davtro-website -> davtro02, istio-gateway -> istio-system)
+  --build--> klaster (rolling update; v3 §10.1/10.3/10.7 w docs/README-v2.md)
 ```
 
-## Co trzeba zainstalować, żeby działało auto-wdrożenie (ArgoCD + obrazy z GitHub)
+```text
+TLS: NA ZEWNATRZ serwer-TLS (Gateway, Vault PKI 90d) || W SRODKU mTLS
+  (Envoy/SPIFFE 24h, STRICT) || VAULT :8203 wlasny TLS (CA 10 lat)
+  (tabela per-usluga + wyjatki: v3 §10.2/10.4)
+```
 
-Kolejność ma znaczenie: najpierw operatorzy i CRD, potem mesh, na końcu ArgoCD z aplikacjami.
-Wszystko poza krokami 1–2 i 9 jest zarządzane przez GitOps (nie wymaga ręcznych zmian w klastrze).
+```text
+VAULT: bootstrap --> vault-0 --> ESO --> Sekrety --> pody || Transit PII
+  || PKI --> cert-manager --> Gateway + Vault-TLS || snapshot 03:00
+  (pelne grafy: v3 §10.5/10.8/10.9)
+```
+## 24. Co trzeba zainstalowac (kolejnosc wazna) + checklista
 
-### Krok 0 – wymagania w repo GitHub / GHCR
-
-| Co | Gdzie | Po co |
-|---|---|---|
-| Repo `website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02` | GitHub | źródło manifestów dla ArgoCD |
-| Secret `GHCR_PAT_02` | GitHub → Settings → Secrets and variables → Actions | login do pushu obrazów do GHCR (`packages: write`) |
-| Sekret `contents: write` w workflow | już w `ci-cd.yaml` (`permissions:`) | bot może zrobić commit z nowymi tagami |
-| Pakiety GHCR ustawione na **PUBLIC** | GitHub → Package settings → Change visibility (tylko UI, REST API nie działa) | klaster pobiera obrazy bez `imagePullSecret` |
-| Dostęp ArgoCD do prywatnego repo | Secret `davtro-github-repo` w ns `argocd` (PAT `Contents: Read`) – patrz sekcja „Dostep ArgoCD" wyżej | ArgoCD pobiera manifesty |
-
-### Krok 1 – klastr i komponenty bazowe (ręczne, jednorazowo)
+Krok 0 (GitHub/GHCR): repo + `GHCR_PAT_02` (packages:write) + `contents:write` w workflow (commit bota) + pakiety PUBLIC (tylko UI!) + `davtro-github-repo` w ns argocd (PAT Contents:Read).
 
 ```bash
-# MicroK8s + Metallb (LoadBalancer dla Istio Ingress Gateway)
-snap install microk8s --classic
-microk8s enable dns storage metallb
-# adresy IP z puli MetalLB -> kubectl edit config -n metallb-system ...
-
-# CLI na stacji roboczej
-microk8s kubectl label node --overwrite node-role.kubernetes.io/control-plane-  # jeśli potrzebne
-curl -L https://istio.io/downloadIstio | sh -   # daje istioctl
-sudo mv istio-*/bin/istioctl /usr/local/bin/
-```
-
-### Krok 2 – operatorzy z CRD (muszą być PRZED synciem ArgoCD)
-
-```bash
-# helm repo add jetstack https://charts.jetstack.io && helm repo update
-helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace \
-  --set crds.enabled=true
-
-# helm repo add external-secrets https://charts.external-secrets.io && helm repo update
+snap install microk8s --classic; microk8s enable dns storage metallb
+# IP z puli MetalLB: kubectl edit config -n metallb-system ...
+curl -L https://istio.io/downloadIstio | sh -; sudo mv istio-*/bin/istioctl /usr/local/bin/
+helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace --set crds.enabled=true
 helm install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace
-
-# helm repo add kyverno https://kyverno.github.io/kyverno/ && helm repo update
 helm install kyverno kyverno/kyverno -n kyverno --create-namespace
-```
-
-Bez tych CRD (`Certificate`, `ClusterIssuer`, `ExternalSecret`, `SecretStore`,
-`VaultDynamicSecret`, `ClusterPolicy`) ArgoCD wpada w `SyncError` i blokuje cały sync
-(tzw. GitOps deadlock – opisany w sekcji o `caProvider`).
-
-### Krok 3 – Istio (mesh + Gateway)
-
-```bash
-# Wariant A (domyślny, własne CA istiod) – certy workloadów rotowane co 24h w RAM sidecara
 istioctl install -f istio/istio-operator.yaml -y
-
-# certyfikat dla Ingress Gateway (ns istio-system)
 kubectl apply -k manifests/istio-system
-
-# namespace docelowy dostaje sidecary przy restarcie podów:
-kubectl -n davtro02 rollout restart deploy,sts   # po pierwszym syncu
-```
-
-Wariant B (Vault PKI jako CA mesh) – dopiero po działającym Vaultie, patrz `docs/ISTIO.md`.
-
-### Krok 4 – ArgoCD
-
-```bash
-helm repo add argo https://argoproj.github.io/argo-helm && helm repo update
 helm install argo-cd argo/argo-cd -n argocd --create-namespace
-
-# dostęp ArgoCD do repo GitHub (sekret davtro-github-repo) - patrz sekcja wyżej
+kubectl apply -f argocd/application.yaml -f argocd/application-istio.yaml
+kubectl -n davtro02 rollout restart deploy,sts   # sidecary po 1. syncu
+./scripts/port-forward.sh; ./scripts/Client-import-certs-deepseek.sh
+# /etc/hosts: <IP> davtro.local + 8x *.davtro.local
 ```
 
-### Krok 5 – aplikacje GitOps (ostatni krok, potem wszystko automatyczne)
+Weryfikacja: `argocd get applications` (Synced/Healthy); `get pods` (Running); `get peerauthentication,policies,destinationrules`; `istioctl proxy-status` + `authn tls-check`; `get externalsecret` (3x SYNCED); `curl -k https://davtro.local/` (80->443).
 
-```bash
-kubectl apply -f argocd/application.yaml        # davtro-website    -> manifests/overlays/production (ns davtro02)
-kubectl apply -f argocd/application-istio.yaml  # davtro-istio-gateway -> manifests/istio-system
+Checklista: [ ] GHCR_PAT_02 + PUBLIC [ ] MetalLB [ ] cert-manager [ ] ESO [ ] Kyverno [ ] istio-operator + istio-system [ ] ArgoCD + repo-secret [ ] 2x application [ ] restart (sidecary) [ ] hosts [ ] (opt) disable ingress [ ] SMTP w Vault (maile) [ ] Prometheus Operator (ServiceMonitory) [ ] prod: Helm Vault HA + auto-unseal.
+
+```text
+CRD --> Istio --> ArgoCD --> aplikacje --> cold-start sam --> LAN --> weryfikacja
 ```
-
-Od tego momentu pętla jest w pełni automatyczna:
-
-```
-push do main -> GH Actions buduje 5 obrazow -> GHCR
-             -> GH Actions aktualizuje tagi w kustomization.yaml (commit bota)
-             -> ArgoCD (poll 3 min / webhook) -> kustomize build -> apply
-             -> rolling update podow z nowymi obrazami z GHCR
-```
-
-### Krok 6 – weryfikacja
-
-```bash
-kubectl -n argocd get applications              # obie: Synced / Healthy
-kubectl -n davtro02 get pods -w                 # wszystkie Running/Completed
-kubectl -n davtro02 get peerauthentication,policy,destinationrule   # mesh polityki
-istioctl proxy-status                           # pody w mesh
-istioctl authn tls-check -n davtro02            # mTLS miedzy serwisami
-kubectl -n davtro02 get externalsecret          # 3x SYNCED=True (Vault/ESO)
-curl -k https://davtro.local/                   # -> przekierowanie 80 -> 443 (Gateway)
-```
-
-### Checklista w jednym miejscu
-
-- [ ] Repo GitHub + secret `GHCR_PAT_02` (Actions) + pakiety GHCR = PUBLIC
-- [ ] MicroK8s + Metallb (LoadBalancer dla gateway)
-- [ ] cert-manager (CRD)
-- [ ] External Secrets Operator (CRD)
-- [ ] Kyverno (CRD)
-- [ ] `istioctl install -f istio/istio-operator.yaml` + `kubectl apply -k manifests/istio-system`
-- [ ] ArgoCD + sekret repo `davtro-github-repo`
-- [ ] `kubectl apply -f argocd/application.yaml` i `argocd/application-istio.yaml`
-- [ ] restart podów w `davtro02` (nadanie sidecara) – nazewnictwo SPIFFE = `davtro02`
-- [ ] DNS / `hosts`: `davtro.local`, `spark.davtro.local` -> IP MetalLB
-- [ ] (opcjonalnie) `microk8s disable ingress` – ingress-nginx zastąpiony przez Istio Gateway
-
