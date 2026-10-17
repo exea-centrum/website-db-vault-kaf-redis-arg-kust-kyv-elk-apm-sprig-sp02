@@ -84,52 +84,7 @@ Sekrety K8s (davtro-secrets, fastapi-db-creds, message-processor-db-creds)
 postgres / fastapi / message-processor / spring-app / pgadmin / exporterzy
 ```
 
-  v
-🛡️  Istio Ingress Gateway (:80 → redirect, :443 TLS z Vault PKI)
-  |-- davtro.local/ ---------> frontend (Nginx: oferta + kalendarz + formularz)
-  |-- davtro.local/api ------> fastapi-web-app (API rezerwacji)
-  |                               |-- zapis/odczyt ---> postgres (baza rezerwacji)
-  |                               |-- cache/sesje ----> redis (szybka pamięć)
-  |                               |-- event -----------> kafka-kraft (kolejka zdarzeń)
-  |-- spring.davtro.local ---> spring-app (panel raportowy Java)
-  |-- pgadmin.davtro.local --> pgadmin (podgląd bazy)
-  |-- kafka-ui.davtro.local -> kafka-ui (podgląd kolejek)
-  |-- grafana.davtro.local --> grafana (metryki + logi + trace)
-  |-- prometheus/loki/tempo -> podgląd metryk / logów / trace'ów
-  |-- spark.davtro.local ----> spark-master :8082 (job'y analityki)
-```
-## 2. 🗺️ Mapa komponentów — co do czego uderza i po co istnieje
-
-```text
-kafka-kraft (bookings-created, email-invoices, marketing-actions)
-  |
-  +--> message-processor (konsument: e-maile + faktura proforma, status w DB)
-  +--> spring-app (panel raportowy Java na tych samych danych)
-  +--> spark-master + spark-workerzy (analityka marketingowa w tle)
-
-postgres-exporter :9187 / kafka-exporter :9308 / node-exporter :9100
-  |
-  v
-prometheus :9090 (metryki) ---> grafana :3000 (wykresy)
-
-promtail (DaemonSet, logi z kazdego noda, tez audit Vaulta)
-  |
-  v
-loki :3100 (magazyn logow) ---> grafana (przeszukiwanie logow)
-
-aplikacje --> tempo :3200 (trace) ---> grafana (sciezka requestu)
-
-vault :8203 + vault-bootstrap (sejf + auto-konfiguracja po starcie)
-  |
-  v
-external-secrets (SecretStore + ExternalSecret + VaultDynamicSecret)
-  |
-  v
-Sekrety K8s (davtro-secrets, fastapi-db-creds, message-processor-db-creds)
-  |
-  v
-postgres / fastapi / message-processor / spring-app / pgadmin / exporterzy
-```
+## 3. 🧱 Warstwa aplikacji — opis każdego elementu
 ## 3. 🧱 Warstwa aplikacji — opis każdego elementu
 
 ### 🌐 frontend (Nginx, 2 repliki)
