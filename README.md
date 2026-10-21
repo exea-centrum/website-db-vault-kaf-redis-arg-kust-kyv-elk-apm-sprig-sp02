@@ -1,6 +1,7 @@
 # Davtro Apartments - platforma wynajmu krotkoterminowego (Full Open Source)
 
-# opcja dla leniwych full automat w raz instalacją microK8s etc na VMs z ubuntu lub debianem
+# opcja dla leniwych full automat, skryp instalacją wszystko od microK8s do podów z app.
+## Tylko potrzeba VMs z ubuntu lub debianem z 8 core i 16 GB ram minimum
 🚀 Trzy sposoby uruchomienia
 1. Bez pytania (podajesz PAT w linii poleceń): wklej skrypt i idź kawę wypić i będzie gotowe !!!
 
