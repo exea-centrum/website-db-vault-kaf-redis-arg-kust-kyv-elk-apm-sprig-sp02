@@ -1,6 +1,37 @@
 # Davtro Apartments - platforma wynajmu krotkoterminowego (Full Open Source)
 
 
+🚀 Trzy sposoby uruchomienia
+1. Bez pytania (podajesz PAT w linii poleceń):
+
+bash
+cd ~/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+chmod +x scripts/setup-from-scratch.sh
+GHCR_USER='exea-centrum' GHCR_PAT='ghp_xxx' GITHUB_PAT='ghp_yyy' \
+  ./scripts/setup-from-scratch.sh 2>&1 | tee /tmp/setup-$(date +%F-%H%M).log
+2. Z pytaniem (skrypt sam zapyta o wszystko):
+
+bash
+cd ~/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+chmod +x scripts/setup-from-scratch.sh
+./scripts/setup-from-scratch.sh 2>&1 | tee /tmp/setup-$(date +%F-%H%M).log
+Skrypt zapyta o GITHUB_PAT (Krok 8.5), GHCR_USER (Krok 12), GHCR_PAT (Krok 12). Możesz pominąć Enterem, jeśli repo/pakiety są publiczne.
+
+3. Częściowo (tylko GHCR, bez GITHUB_PAT):
+
+bash
+GHCR_USER='exea-centrum' GHCR_PAT='ghp_xxx' \
+  ./scripts/setup-from-scratch.sh
+Skrypt zapyta tylko o GITHUB_PAT (Krok 8.5).
+
+⚠️ Ważne
+read -r -s — hasła nie są widoczne na ekranie (nie logują się).
+
+tee — jeśli używasz tee, PAT nie pojawi się w logu (bo read -s nie echo'uje).
+
+Enter = pomiń — jeśli repo jest publiczne, a pakiety GHCR są PUBLIC (README §24 mówi, że muszą być), możesz pominąć oba pytania.
+
+GHCR_REPO — jeśli repo nazywa się inaczej, ustaw GHCR_REPO='inna-nazwa'.
 
 ## Spis tresci
 
