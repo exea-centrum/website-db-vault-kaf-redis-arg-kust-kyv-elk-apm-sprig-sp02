@@ -1,0 +1,196 @@
+# ISTIO: bezpieczenstwo sieci w namespace davtro02.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: davtro02
+spec:
+  mtls:
+    mode: STRICT
+---
+# Prometheus: STRICT, ale port 9090 (HTTP) dopuszcza ruch w czystym tekście (dla Grafany)
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: prometheus-http
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels: { app: prometheus }
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    "9090":
+      mode: DISABLE
+---
+# Loki: STRICT, ale port 3100 dopuszcza czysty tekst
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: loki-http
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels: { app: loki }
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    "3100":
+      mode: DISABLE
+---
+# Tempo: STRICT, ale port 3200 dopuszcza czysty tekst
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: tempo-http
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels: { app: tempo }
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    "3200":
+      mode: DISABLE
+---
+# Vault: oryginalna konfiguracja pozostaje bez zmian (8203 PERMISSIVE)
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: vault
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels: { app: vault }
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    "8203":
+      mode: PERMISSIVE
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: vault-own-tls
+  namespace: davtro02
+spec:
+  host: vault.davtro02.svc.cluster.local
+  trafficPolicy:
+    portLevelSettings:
+      - port: { number: 8203 }
+        tls:
+          mode: DISABLE
+---
+# NOWE: Grafana może uzyskać dostęp do Prometheus/Loki/Tempo przez HTTP
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: grafana-to-datasources
+  namespace: davtro02
+spec:
+  selector:
+    matchExpressions:
+      - { key: app, operator: In, values: [prometheus, loki, tempo] }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/davtro02/sa/default
+              - cluster.local/ns/davtro02/sa/grafana
+      to:
+        - operation: { ports: ["9090", "3100", "3200"] }
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: postgres-allow
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels: { app: postgres-db }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/davtro02/sa/davtro-sa
+              - cluster.local/ns/davtro02/sa/default
+      to:
+        - operation: { ports: ["5432"] }
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: kafka-allow
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels: { app: kafka-kraft }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/davtro02/sa/davtro-sa
+              - cluster.local/ns/davtro02/sa/kafka-job-sa
+              - cluster.local/ns/davtro02/sa/default
+      to:
+        - operation: { ports: ["9092"] }
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: redis-allow
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels: { app: redis }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/davtro02/sa/davtro-sa
+      to:
+        - operation: { ports: ["6379"] }
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: fastapi-allow
+  namespace: davtro02
+spec:
+  selector:
+    matchLabels: { app: fastapi-web-app }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account
+      to:
+        - operation: { paths: ["/api/*"] }
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/davtro02/sa/davtro-sa
+              - cluster.local/ns/davtro02/sa/default
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: ui-from-gateway-only
+  namespace: davtro02
+spec:
+  selector:
+    matchExpressions:
+      - { key: app, operator: In,
+          values: [frontend, grafana, pgadmin, kafka-ui,
+                   tempo, prometheus, loki, spring-app, spark-master] }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account
