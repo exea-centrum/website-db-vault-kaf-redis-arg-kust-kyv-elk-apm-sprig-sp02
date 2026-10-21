@@ -424,3 +424,195 @@ chmod +x scripts/setup-from-scratch.sh
 Po zakończeniu skrypt wypisze IP hosta, wpisy do `/etc/hosts` i polecenia testowe. Jeśli któryś krok padnie, `set -euo pipefail` zatrzyma skrypt — wtedy wklej mi ostatnie 30 linii z loga, to poprawię.
 
 Chcesz, żebym dodał **backup Vaulta/Postgresa przed usunięciem** jako osobny skrypt `scripts/pre-wipe-backup.sh`, żebyś miał pełny „clean slate" workflow?
+
+
+
+Poniżej masz **kompletny skrypt `wipe-all.sh`**, który usuwa **wszystko** — MicroK8s wraz z danymi, Kyverno, Istio, ArgoCD, cert-manager, ESO oraz ślady w systemie (`/etc/hosts`, `~/.kube/config`, ewentualne pozostałości w `/var/snap/`).
+
+**Uwaga:** ten skrypt jest **destrukcyjny**. Usuwa **wszystkie** dane w klastrze (PV, PVC, sekrety, Vault, Postgres) — **bez backupu**. Jeśli chcesz backup przed usunięciem, uruchom najpierw `pre-wipe-backup.sh` (mogę go dopisać).
+
+Zapisz jako `scripts/wipe-all.sh`, `chmod +x` i uruchom **jako użytkownik z sudo** (nie jako root).
+
+```bash
+#!/bin/bash
+# wipe-all.sh — usuwa WSZYSTKO: MicroK8s + dane + dodatki + slady w systemie.
+#
+# UWAGA: DESTRUKCYJNE. Usuwa wszystkie dane w klastrze (PV, PVC, sekrety, Vault, Postgres).
+#        Nie robi backupu. Jesli chcesz backup — uruchom pre-wipe-backup.sh najpierw.
+#
+# Uzycie:
+#   chmod +x scripts/wipe-all.sh
+#   ./scripts/wipe-all.sh
+#
+# Wymaga: sudo. Nie uruchamiaj jako root.
+
+set -uo pipefail   # NIE -e — chcemy kontynuowac mimo bledow
+
+RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
+log()  { echo "${BLUE}[$(date +%H:%M:%S)]${NC} $*"; }
+ok()   { echo "${GREEN}[OK]${NC} $*"; }
+warn() { echo "${YELLOW}[WARN]${NC} $*"; }
+die()  { echo "${RED}[FAIL]${NC} $*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] && die "Nie uruchamiaj jako root. Uzyj zwyklego uzytkownika z sudo."
+command -v sudo >/dev/null || die "Brak sudo."
+
+# ---------- Potwierdzenie ----------
+cat <<EOF
+
+${RED}=== UWAGA: TO USUNIE WSZYSTKO ===${NC}
+
+Zostanie usuniete:
+  - MicroK8s (snap) wraz z danymi w /var/snap/microk8s/
+  - Wszystkie pody, PVC, PV, sekrety, configmapy (w tym Vault, Postgres, Kafka)
+  - Kyverno, Istio, ArgoCD, cert-manager, external-secrets (jako czesc klastra)
+  - Wpisy w /etc/hosts (davtro.local, *.davtro.local)
+  - ~/.kube/config (konfiguracja kubectl)
+
+${RED}NIE ROBIMY BACKUPU.${NC} Jesli chcesz backup — przerwij teraz (Ctrl+C)
+i uruchom najpierw pre-wipe-backup.sh.
+
+EOF
+read -r -p "Wpisz DOKADNIE 'USUN' aby kontynuowac: " CONFIRM
+[ "$CONFIRM" = "USUN" ] || die "Przerwano."
+
+# ---------- Krok 1: Zatrzymaj MicroK8s ----------
+log "=== Krok 1: zatrzymuje MicroK8s ==="
+if command -v microk8s >/dev/null 2>&1; then
+  sudo microk8s stop 2>/dev/null || warn "microk8s stop — juz zatrzymany lub blad."
+  ok "MicroK8s zatrzymany."
+else
+  warn "MicroK8s nie zainstalowany — pomijam."
+fi
+
+# ---------- Krok 2: Usun snap MicroK8s z danymi ----------
+log "=== Krok 2: usuwam snap microk8s --purge ==="
+if snap list microk8s >/dev/null 2>&1; then
+  sudo snap remove microk8s --purge || warn "snap remove microk8s --purge — blad (moze juz usuniety)."
+  ok "MicroK8s usuniety."
+else
+  warn "Snap microk8s nie istnieje — pomijam."
+fi
+
+# ---------- Krok 3: Usun pozostalosci w /var/snap ----------
+log "=== Krok 3: pozostalosci /var/snap/microk8s ==="
+if [ -d /var/snap/microk8s ]; then
+  sudo rm -rf /var/snap/microk8s
+  ok "Usunieto /var/snap/microk8s."
+else
+  ok "Brak /var/snap/microk8s — czysto."
+fi
+
+# Dodatkowe katalogi, ktore moga zostac
+for d in /var/snap/microk8s/common/default-storage /var/snap/microk8s/current; do
+  [ -d "$d" ] && sudo rm -rf "$d" && ok "Usunieto $d."
+done
+
+# ---------- Krok 4: Usun wpisy w /etc/hosts ----------
+log "=== Krok 4: /etc/hosts ==="
+if grep -qE 'davtro\.local' /etc/hosts 2>/dev/null; then
+  sudo cp /etc/hosts "/etc/hosts.bak.$(date +%F-%H%M%S)"
+  sudo sed -i '/davtro\.local/d' /etc/hosts
+  ok "Usunieto wpisy *.davtro.local z /etc/hosts (backup: /etc/hosts.bak.*)."
+else
+  ok "Brak wpisow davtro.local w /etc/hosts."
+fi
+
+# ---------- Krok 5: Usun ~/.kube/config ----------
+log "=== Krok 5: ~/.kube/config ==="
+if [ -f "$HOME/.kube/config" ]; then
+  # Sprawdz, czy to konfig MicroK8s (zawiera 127.0.0.1:16443 lub microk8s)
+  if grep -qE 'microk8s|16443' "$HOME/.kube/config" 2>/dev/null; then
+    mv "$HOME/.kube/config" "$HOME/.kube/config.bak.$(date +%F-%H%M%S)"
+    ok "Przeniesiono ~/.kube/config do backupu (config.bak.*)."
+  else
+    warn "~/.kube/config nie wyglada na MicroK8s — zostawiam."
+  fi
+else
+  ok "Brak ~/.kube/config."
+fi
+
+# ---------- Krok 6: Usun Helm repo cache (opcjonalnie) ----------
+log "=== Krok 6: Helm repo cache ==="
+if [ -d "$HOME/.cache/helm" ]; then
+  rm -rf "$HOME/.cache/helm"
+  ok "Wyczyszczono ~/.cache/helm."
+fi
+if [ -d "$HOME/.config/helm" ]; then
+  rm -rf "$HOME/.config/helm"
+  ok "Wyczyszczono ~/.config/helm."
+fi
+
+# ---------- Krok 7: Usun inne dodatki (jesli zainstalowane poza snapem) ----------
+log "=== Krok 7: dodatki poza snapem ==="
+# Istioctl
+if command -v istioctl >/dev/null 2>&1; then
+  sudo rm -f "$(command -v istioctl)"
+  ok "Usunieto istioctl."
+fi
+# Helm — zostawiamy (przydatny), ale mozna usunac:
+# sudo snap remove helm --purge
+
+# ---------- Krok 8: Weryfikacja ----------
+log "=== Krok 8: weryfikacja ==="
+echo
+echo "--- snap list | grep -E 'microk8s|helm' ---"
+snap list 2>/dev/null | grep -E 'microk8s|helm' || echo "  (brak microk8s)"
+echo
+echo "--- /var/snap/microk8s ---"
+[ -d /var/snap/microk8s ] && echo "  ISTNIEJE (do recznego usuniecia)" || echo "  (brak)"
+echo
+echo "--- /etc/hosts | grep davtro ---"
+grep -E 'davtro\.local' /etc/hosts 2>/dev/null || echo "  (brak)"
+echo
+echo "--- ~/.kube/config ---"
+[ -f "$HOME/.kube/config" ] && echo "  ISTNIEJE" || echo "  (brak)"
+echo
+echo "--- kubectl get nodes (powinno byc 'connection refused') ---"
+kubectl get nodes 2>&1 | head -2 || true
+echo
+
+cat <<EOF
+
+${GREEN}=== GOTOWE ===${NC}
+
+Jesli chcesz teraz postawic srodowisko od zera:
+  ./scripts/setup-from-scratch.sh
+
+Jesli chcesz tylko usunac i nic nie stawiac — jestes w czystym stanie.
+EOF
+```
+
+### 📋 Co ten skrypt usuwa (i czego **nie**)
+
+| Co | Usuwa? | Uwaga |
+|----|--------|-------|
+| Snap `microk8s` + dane w `/var/snap/microk8s/` | ✅ `snap remove --purge` | Wszystkie PV, PVC, sekrety |
+| Kyverno, Istio, ArgoCD, cert-manager, ESO | ✅ (jako część klastra) | Znikają razem z klastrem |
+| Wpisy `*.davtro.local` w `/etc/hosts` | ✅ (z backupem) | Backup: `/etc/hosts.bak.*` |
+| `~/.kube/config` (jeśli to MicroK8s) | ✅ (przenosi do backupu) | Sprawdza, czy to MicroK8s |
+| `istioctl` | ✅ | Usuwa binarkę z `/usr/local/bin/` |
+| **Helm** | ❌ | Zostawiam — przydatny, można usunąć ręcznie |
+| **Dane poza snapem** (np. NFS, zewnętrzne PV) | ❌ | `--purge` nie dotyka zewnętrznego storage |
+| **Backup Vaulta/Postgresa** | ❌ | **Nie robi backupu** — zrób `pre-wipe-backup.sh` najpierw |
+
+### ⚠️ Ważne uwagi
+
+1. **Skrypt jest destrukcyjny** — wymaga wpisania `USUN`, żeby kontynuować. To zabezpieczenie przed przypadkowym uruchomieniem.
+2. **Nie robi backupu** — jeśli masz dane w Vault/Postgres, **najpierw** uruchom `pre-wipe-backup.sh` (mogę go dopisać).
+3. **`set -uo pipefail` bez `-e`** — celowo, żeby kontynuować mimo błędów (np. `snap remove` może się wywalić, jeśli snap już usunięty).
+4. **Backup `/etc/hosts`** — skrypt kopiuje do `/etc/hosts.bak.YYYY-MM-DD-HHMMSS` przed edycją.
+5. **`~/.kube/config`** — przenosi do backupu tylko jeśli wygląda na MicroK8s (zawiera `microk8s` lub `16443`). Jeśli masz inny klaster, zostawi.
+6. **Helm** — zostawiam, bo przyda się do `setup-from-scratch.sh`. Jeśli chcesz usunąć: `sudo snap remove helm --purge`.
+
+### 🚀 Uruchomienie
+
+```bash
+cd ~/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+chmod +x scripts/wipe-all.sh
+./scripts/wipe-all.sh
+```
+
+Po zakończeniu skrypt wypisze weryfikację — jeśli `snap list | grep microk8s` jest puste, `/var/snap/microk8s` nie istnieje, a `/etc/hosts` nie ma `davtro.local`, to znaczy, że masz **czysty system**.
+
+Chcesz, żebym dopisał **`pre-wipe-backup.sh`** (backup Vaulta przez `vault operator raft snapshot`, backup Postgresa przez `pg_dumpall`, backup manifestów z klastra do `/tmp/`), żebyś miał pełny „clean slate" workflow: **backup → wipe → setup**?
