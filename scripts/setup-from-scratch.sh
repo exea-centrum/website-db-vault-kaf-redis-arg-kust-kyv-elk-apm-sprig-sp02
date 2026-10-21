@@ -5,11 +5,14 @@
 #   chmod +x scripts/setup-from-scratch.sh
 #   ./scripts/setup-from-scratch.sh
 #
+# Z RBAC (domyslnie WYLACZONE — ryzykowne):
+#   ENABLE_RBAC=1 ./scripts/setup-from-scratch.sh
+#
 # Z PAT (bez pytan o GHCR):
-#   GHCR_USER='exea-centrum' GHCR_PAT='ghp_xxx' ./scripts/setup-from-scratch.sh
+#   GHCR_USER='exea-centrum' GHCR_REPO='website-db-...' GHCR_PAT='ghp_xxx' ./scripts/setup-from-scratch.sh
 #
 # Z PAT (bez pytan o GHCR i repo):
-#   GHCR_USER='exea-centrum' GHCR_PAT='ghp_xxx' GITHUB_PAT='ghp_yyy' ./scripts/setup-from-scratch.sh
+#   GHCR_USER='exea-centrum' GHCR_REPO='website-db-...' GHCR_PAT='ghp_xxx' GITHUB_PAT='ghp_yyy' ./scripts/setup-from-scratch.sh
 #
 # Wymaga: sudo, dostep do internetu, repozytorium sklonowane lokalnie.
 # NIE uruchamiaj jako root — MicroK8s wymaga zwyklego uzytkownika w grupie microk8s.
@@ -18,9 +21,11 @@
 #   METALLB_RANGE   zakres IP dla MetalLB (domyslnie 192.168.1.200-192.168.1.220)
 #   ISTIO_VERSION   wersja Istio (domyslnie 1.31.1)
 #   REPO_DIR        katalog repo (domyslnie katalog, w ktorym lezy skrypt/..)
-#   GHCR_USER       uzytkownik GitHub Container Registry (domyslnie exea-centrum)
+#   GHCR_USER       uzytkownik/organizacja GitHub (domyslnie exea-centrum)
+#   GHCR_REPO       nazwa repozytorium GitHub (domyslnie website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02)
 #   GHCR_PAT        PAT do GHCR (jesli nie ustawiony, pyta)
 #   GITHUB_PAT      PAT do ArgoCD repo (jesli nie ustawiony, pyta; Enter=pomin)
+#   ENABLE_RBAC     "1" = wlacz RBAC (ryzykowne), "0" = nie (domyslnie)
 
 set -euo pipefail
 
@@ -28,7 +33,10 @@ set -euo pipefail
 METALLB_RANGE="${METALLB_RANGE:-192.168.1.200-192.168.1.220}"
 ISTIO_VERSION="${ISTIO_VERSION:-1.31.1}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+GHCR_USER="${GHCR_USER:-exea-centrum}"
 GHCR_REPO="${GHCR_REPO:-website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02}"
+ENABLE_RBAC="${ENABLE_RBAC:-0}"
 
 # ---------- Kolory ----------
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
@@ -42,9 +50,12 @@ die()  { echo "${RED}[FAIL]${NC} $*" >&2; exit 1; }
 command -v sudo >/dev/null || die "Brak sudo."
 [ -d "$REPO_DIR/manifests/base" ] || die "Nie znaleziono $REPO_DIR/manifests/base — uruchom z katalogu repo."
 
-log "Repo: $REPO_DIR"
-log "MetalLB: $METALLB_RANGE"
-log "Istio:   $ISTIO_VERSION"
+log "Repo (katalog): $REPO_DIR"
+log "GitHub user:    $GHCR_USER"
+log "GitHub repo:    $GHCR_REPO"
+log "MetalLB:        $METALLB_RANGE"
+log "Istio:          $ISTIO_VERSION"
+log "RBAC:           $([ "$ENABLE_RBAC" = "1" ] && echo 'WLACZONE (ryzykowne)' || echo 'wylaczone')"
 
 # ---------- Krok 0: Podstawowe narzedzia ----------
 log "=== Krok 0: podstawowe narzedzia ==="
@@ -82,11 +93,21 @@ ok "~/.kube/config gotowy."
 # ---------- Krok 2: Dodatki MicroK8s ----------
 log "=== Krok 2: dodatki MicroK8s ==="
 MK enable dns
-MK enable hostpath-storage
+MK enable hostpath-storage   # WYMAGANE dla PVC
+
+if [ "$ENABLE_RBAC" = "1" ]; then
+  warn "Wlaczam RBAC — to moze zepsuc Dashboard/ArgoCD/Traefik!"
+  warn "Jesli cos padnie: microk8s disable rbac"
+  MK enable rbac
+  ok "RBAC wlaczone."
+else
+  log "RBAC pominiete (ENABLE_RBAC=0). Wlacz recznie: microk8s enable rbac"
+fi
+
 MK enable metallb:"$METALLB_RANGE"
-MK enable dashboard   # DZIALA na MicroK8s 1.35.x (usuniete w 1.36+)
+MK enable dashboard          # DZIALA na MicroK8s 1.35.x (usuniete w 1.36+)
 MK enable ingress
-ok "dns, hostpath-storage, metallb, dashboard, ingress wlaczone."
+ok "dns, hostpath-storage (PVC), metallb, dashboard, ingress wlaczone."
 
 # ---------- Krok 3: Helm ----------
 log "=== Krok 3: Helm ==="
@@ -152,6 +173,12 @@ ok "ArgoCD gotowy."
 # ---------- Krok 8.5: ArgoCD repo credentials ----------
 log "=== Krok 8.5: ArgoCD repo credentials ==="
 
+GHCR_USER="${GHCR_USER:-exea-centrum}"
+GHCR_REPO="${GHCR_REPO:-website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02}"
+
+REPO_URL="https://github.com/${GHCR_USER}/${GHCR_REPO}.git"
+log "Repo URL: $REPO_URL"
+
 if [ -z "${GITHUB_PAT:-}" ]; then
   echo
   echo "${YELLOW}Potrzebny GitHub PAT z uprawnieniami 'Contents: Read' do prywatnego repo.${NC}"
@@ -165,13 +192,13 @@ fi
 if [ -n "$GITHUB_PAT" ]; then
   KC -n argocd create secret generic davtro-github-repo \
     --from-literal=type=git \
-    --from-literal=url="https://github.com/exea-centrum/${GHCR_REPO}.git" \
-    --from-literal=username=exea-centrum \
+    --from-literal=url="$REPO_URL" \
+    --from-literal=username="$GHCR_USER" \
     --from-literal=password="$GITHUB_PAT" \
     --dry-run=client -o yaml | KC apply -f -
   KC -n argocd label secret davtro-github-repo \
     argocd.argoproj.io/secret-type=repository --overwrite
-  ok "ArgoCD repo secret davtro-github-repo utworzony."
+  ok "ArgoCD repo secret davtro-github-repo utworzony (${GHCR_USER}/${GHCR_REPO})."
 else
   warn "Brak GITHUB_PAT — ArgoCD sklonuje repo tylko jesli jest publiczne."
 fi
@@ -286,22 +313,56 @@ echo "--- Gateway/VirtualService ---"
 KC -n davtro02 get gateway,virtualservice 2>/dev/null || true
 echo
 
-# ---------- Krok 14: Dashboard token + ArgoCD password ----------
-log "=== Krok 14: Dashboard token + ArgoCD password ==="
+# ---------- Krok 14: admin-user + token Dashboard (kube-system) ----------
+log "=== Krok 14: admin-user + token Dashboard ==="
 
-# Token Dashboard (MicroK8s 1.24+: create token default)
-if KC get ns kubernetes-dashboard >/dev/null 2>&1; then
-  DASH_TOKEN=$(KC -n kubernetes-dashboard create token default 2>/dev/null || true)
+# Dashboard w MicroK8s jest w kube-system (nie kubernetes-dashboard!)
+# Tworzymy admin-user w kube-system z ClusterRoleBinding (rbac.authorization.k8s.io/v1)
+if KC -n kube-system get svc kubernetes-dashboard >/dev/null 2>&1 || \
+   KC -n kubernetes-dashboard get svc kubernetes-dashboard >/dev/null 2>&1; then
+
+  KC apply -f - <<'YAML'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-user
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kube-system
+YAML
+
+  # Token z admin-user (kube-system), dlugi TTL
+  DASH_TOKEN=$(KC -n kube-system create token admin-user --duration=999999h 2>/dev/null || true)
+
+  if [ -z "$DASH_TOKEN" ]; then
+    # fallback: microk8s-dashboard-token (to samo co dashboard-proxy)
+    if KC -n kube-system get secret microk8s-dashboard-token >/dev/null 2>&1; then
+      DASH_TOKEN=$(KC -n kube-system get secret microk8s-dashboard-token \
+        -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
+    fi
+  fi
+
   if [ -n "$DASH_TOKEN" ]; then
     echo
-    echo "${GREEN}=== Kubernetes Dashboard token (default) ===${NC}"
+    echo "${GREEN}=== Kubernetes Dashboard token (admin-user, kube-system) ===${NC}"
     echo "$DASH_TOKEN"
     echo
   else
-    warn "Nie udalo sie wygenerowac tokenu Dashboard (default)."
+    warn "Nie udalo sie wygenerowac tokenu Dashboard (admin-user)."
   fi
 else
-  warn "Namespace kubernetes-dashboard nie istnieje — pomijam Dashboard token."
+  warn "Nie znaleziono svc/kubernetes-dashboard — pomijam Dashboard."
 fi
 
 ARGOCD_PASS=$(KC -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)
@@ -314,21 +375,35 @@ else
   warn "Brak argocd-initial-admin-secret (moze zostal usuniety)."
 fi
 
-# ---------- Krok 15: port-forward Dashboard + ArgoCD ----------
+# ---------- Krok 15: port-forward Dashboard + ArgoCD (w tle) ----------
 log "=== Krok 15: port-forward Dashboard + ArgoCD ==="
 
-if KC get ns kubernetes-dashboard >/dev/null 2>&1; then
-  # Zgodnie z dokumentacja Canonial: port-forward na svc/kubernetes-dashboard (nie kong-proxy)
+pkill -f 'port-forward.*kubernetes-dashboard.*10443' 2>/dev/null || true
+pkill -f 'port-forward.*argo-cd-argocd-server.*8080' 2>/dev/null || true
+sleep 1
+
+DASH_PID=""
+ARGOCD_PID=""
+
+# Dashboard: kube-system (MicroK8s) — fallback do kubernetes-dashboard
+if KC -n kube-system get svc kubernetes-dashboard >/dev/null 2>&1; then
+  KC -n kube-system port-forward --address 0.0.0.0 \
+    service/kubernetes-dashboard 10443:443 >/tmp/pf-dashboard.log 2>&1 &
+  DASH_PID=$!
+  ok "Dashboard: https://<IP>:10443 (PID $DASH_PID, ns kube-system)"
+elif KC -n kubernetes-dashboard get svc kubernetes-dashboard >/dev/null 2>&1; then
   KC -n kubernetes-dashboard port-forward --address 0.0.0.0 \
     service/kubernetes-dashboard 10443:443 >/tmp/pf-dashboard.log 2>&1 &
-  ok "Dashboard: https://<IP>:10443"
+  DASH_PID=$!
+  ok "Dashboard: https://<IP>:10443 (PID $DASH_PID, ns kubernetes-dashboard)"
 else
-  warn "Dashboard: namespace kubernetes-dashboard nie istnieje — pomijam port-forward."
+  warn "Dashboard: nie znaleziono svc/kubernetes-dashboard."
 fi
 
 KC -n argocd port-forward --address 0.0.0.0 \
   service/argo-cd-argocd-server 8080:443 >/tmp/pf-argocd.log 2>&1 &
-ok "ArgoCD: https://<IP>:8080"
+ARGOCD_PID=$!
+ok "ArgoCD: https://<IP>:8080 (PID $ARGOCD_PID)"
 
 # ---------- Krok 16: Podsumowanie ----------
 log "=== Krok 16: podsumowanie ==="
@@ -351,6 +426,8 @@ ${GREEN}=== GOTOWE ===${NC}
 
 IP tego hosta w LAN: ${IP:-<nie wykryto>}
 Namespace davtro02: ${NS_STATUS}
+RBAC: ${ENABLE_RBAC} (1=wlaczone, 0=wylaczone)
+GitHub: ${GHCR_USER}/${GHCR_REPO}
 
 ${APP_OUT}
 
@@ -375,8 +452,34 @@ Logi port-forward:
   /tmp/pf-dashboard.log
   /tmp/pf-argocd.log
 
+Jesli RBAC wlaczone i cos padlo:
+  microk8s disable rbac
+  microk8s status
+  microk8s kubectl get pods -A
+
 Jesli namespace davtro02 = BRAK:
   kubectl -n argocd get applications
   kubectl -n argocd describe application davtro-website | tail -20
   kubectl -n argocd logs deploy/argocd-application-controller --tail=50 | grep -i davtro
+
+Nacisnij Ctrl+C, aby zakonczyc port-forwardy i zamknac skrypt.
 EOF
+
+# ---------- Krok 17: wait — utrzymuje skrypt przy zyciu ----------
+cleanup() {
+  echo
+  log "Zatrzymuje port-forwardy..."
+  [ -n "$DASH_PID" ]   && kill "$DASH_PID"   2>/dev/null || true
+  [ -n "$ARGOCD_PID" ] && kill "$ARGOCD_PID" 2>/dev/null || true
+  wait 2>/dev/null || true
+  ok "Zakonczone."
+  exit 0
+}
+trap cleanup INT TERM
+
+log "=== Krok 17: czekam na port-forwardy (Ctrl+C konczy) ==="
+if [ -n "$DASH_PID" ] || [ -n "$ARGOCD_PID" ]; then
+  wait "$DASH_PID" "$ARGOCD_PID" 2>/dev/null || true
+else
+  warn "Brak port-forwardow do pilnowania — skrypt konczy sie."
+fi

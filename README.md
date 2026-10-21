@@ -1,8 +1,8 @@
 # Davtro Apartments - platforma wynajmu krotkoterminowego (Full Open Source)
 
-
+# opcja dla leniwych full automat w raz instalacją microK8s etc na VMs z ubuntu lub debianem
 🚀 Trzy sposoby uruchomienia
-1. Bez pytania (podajesz PAT w linii poleceń):
+1. Bez pytania (podajesz PAT w linii poleceń): wklej skrypt i idź kawę wypić i będzie gotowe !!!
 
 bash
 cd ~/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
