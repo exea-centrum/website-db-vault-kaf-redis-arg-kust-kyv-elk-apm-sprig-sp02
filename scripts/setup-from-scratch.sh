@@ -102,11 +102,9 @@ else
   ok "Brak PV z pustym nodeAffinity."
 fi
 
-# KLUCZOWE 2: patch hostpath-provisioner z toleracjami (--type='merge')
-# UWAGA: op:add / op:replace z --type='json' ZAWODZI na nowym polu /tolerations.
-# --type='merge' SCALA spec.template.spec i DODAJE tolerations, nawet jesli ich nie bylo.
-# ALE: merge moze nie zadzialac, jesli deployment nie ma jeszcze spec.template.spec.containers.
-# Dlatego czekamy, az deployment bedzie w pelni utworzony.
+# KLUCZOWE 2: patch hostpath-provisioner z toleracjami przez kubectl replace + jq
+# UWAGA: patch --type='merge' i --type='json' (op:add/op:replace) ZAWODZA
+# w microk8s kubectl na nowym polu /tolerations. kubectl replace z jq DZIALA ZAWSZE.
 log "Czekam, az deployment hostpath-provisioner bedzie w pelni utworzony..."
 HP_READY=0
 for i in $(seq 1 60); do
@@ -120,31 +118,26 @@ done
 if [ "$HP_READY" = "1" ]; then
   ok "Deployment hostpath-provisioner ma spec.template.spec.containers."
 
-  log "Patchuje hostpath-provisioner z toleracjami (--type='merge')..."
-  sleep 3
-
-  if KC -n kube-system patch deployment hostpath-provisioner --type='merge' -p='{
-    "spec": {
-      "template": {
-        "spec": {
-          "tolerations": [
-            {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
-            {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
-            {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
-            {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
-          ]
-        }
-      }
-    }
-  }' 2>/dev/null; then
-    ok "hostpath-provisioner: tolerations ustawione (merge)."
+  log "Dodaje toleracje do hostpath-provisioner (kubectl replace + jq)..."
+  CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
+  if [ "$CURRENT" != "{}" ]; then
+    NEW=$(echo "$CURRENT" | jq '.spec.template.spec.tolerations = [
+      {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
+      {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
+      {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
+      {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
+    ]')
+    if echo "$NEW" | KC replace -f - 2>/dev/null; then
+      ok "hostpath-provisioner: tolerations ustawione (replace + jq)."
+    else
+      warn "Nie udalo sie zastapic hostpath-provisioner (replace + jq)."
+      warn "Sprobuj recznie: kubectl -n kube-system edit deployment hostpath-provisioner"
+    fi
   else
-    warn "Nie udalo sie patchowac hostpath-provisioner (merge)."
-    warn "Sprobuj recznie: kubectl -n kube-system edit deployment hostpath-provisioner"
+    warn "Nie udalo sie pobrac hostpath-provisioner (get -o json)."
   fi
 else
-  warn "Deployment hostpath-provisioner nie ma jeszcze spec.template.spec.containers — pomijam patch."
-  warn "Sprobuj recznie: kubectl -n kube-system edit deployment hostpath-provisioner"
+  warn "Deployment hostpath-provisioner nie ma spec.template.spec.containers — pomijam patch."
 fi
 
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
@@ -541,8 +534,10 @@ Logi port-forward:
   /tmp/pf-argocd.log
 
 Jesli PVC sa Pending (hostpath bug):
-  kubectl get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' | grep '""'
-  # Jesli widzisz nodeAffinity z pustym "", usun PVC/PV i uruchom skrypt ponownie.
+  kubectl -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations}'
+  # Jesli pusty/null — dodaj recznie:
+  #   kubectl -n kube-system edit deployment hostpath-provisioner
+  #   (dodaj tolerations: control-plane/master)
 
 Jesli namespace davtro02 = BRAK:
   kubectl -n argocd get applications
