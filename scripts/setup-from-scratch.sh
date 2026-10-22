@@ -19,17 +19,6 @@
 #
 # Wymaga: sudo, dostep do internetu, repozytorium sklonowane lokalnie.
 # NIE uruchamiaj jako root — MicroK8s wymaga zwyklego uzytkownika w grupie microk8s.
-#
-# Zmienne (nadpisywalne przez env):
-#   METALLB_RANGE   zakres IP dla MetalLB (domyslnie 192.168.1.200-192.168.1.220)
-#   ISTIO_VERSION   wersja Istio (domyslnie 1.31.1)
-#   REPO_DIR        katalog repo (domyslnie katalog, w ktorym lezy skrypt/..)
-#   GHCR_USER       uzytkownik/organizacja GitHub (domyslnie exea-centrum)
-#   GHCR_REPO       nazwa repozytorium GitHub (domyslnie website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02)
-#   GHCR_PAT        PAT do GHCR (jesli nie ustawiony, pyta)
-#   GITHUB_PAT      PAT do ArgoCD repo (jesli nie ustawiony, pyta; Enter=pomin)
-#   ENABLE_RBAC     "1" = wlacz RBAC (ryzykowne), "0" = nie (domyslnie)
-#   SKIP_WAIT       "1" = nie czekaj na port-forwardy
 
 set -euo pipefail
 
@@ -101,31 +90,56 @@ log "=== Krok 2: dodatki MicroK8s ==="
 MK enable dns
 MK enable hostpath-storage
 
-# KLUCZOWE: patch hostpath-provisioner z toleracjami (merge, nie add)
-# Bez tego PV dostaja nodeAffinity: kubernetes.io/hostname In [""]
-# i pody (Vault, Postgres, Kafka) nie moga sie przypisac do wezla.
-log "Patchuje hostpath-provisioner z toleracjami (merge, bug MicroK8s)..."
+# KLUCZOWE 1: usun stare PV z pustym nodeAffinity (bug MicroK8s: In [""])
+log "Usuwam PV z pustym nodeAffinity (bug MicroK8s)..."
+PVS_TO_DELETE=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' | awk '{print $1}' || true)
+if [ -n "$PVS_TO_DELETE" ]; then
+  for pv in $PVS_TO_DELETE; do
+    warn "Usuwam PV $pv (pusty nodeAffinity)."
+    KC delete pv "$pv" 2>/dev/null || true
+  done
+else
+  ok "Brak PV z pustym nodeAffinity."
+fi
+
+# KLUCZOWE 2: patch hostpath-provisioner z toleracjami (add/replace, nie merge)
+log "Patchuje hostpath-provisioner z toleracjami..."
 sleep 3   # daj provisionerowi chwile na start
 
-CURRENT_TOLERATIONS=$(KC -n kube-system get deployment hostpath-provisioner \
-  -o jsonpath='{.spec.template.spec.tolerations}' 2>/dev/null || echo '[]')
-[ -z "$CURRENT_TOLERATIONS" ] && CURRENT_TOLERATIONS='[]'
-
-NEW_TOLERATIONS=$(echo "$CURRENT_TOLERATIONS" | jq '. + [
+TOLERATIONS_JSON='[
   {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
   {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
   {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
   {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
-] | unique_by(.key)')
+]'
 
-if KC -n kube-system patch deployment hostpath-provisioner --type='merge' \
-     -p="{\"spec\":{\"template\":{\"spec\":{\"tolerations\":$NEW_TOLERATIONS}}}}" 2>/dev/null; then
-  ok "hostpath-provisioner patchowany (merge toleracji)."
+HAS_TOLERATIONS=$(KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations}' 2>/dev/null || echo '')
+
+if [ -z "$HAS_TOLERATIONS" ]; then
+  if KC -n kube-system patch deployment hostpath-provisioner --type='json' \
+      -p="[{\"op\": \"add\", \"path\": \"/spec/template/spec/tolerations\", \"value\": $TOLERATIONS_JSON}]" 2>/dev/null; then
+    ok "hostpath-provisioner: tolerations dodane."
+  else
+    warn "Nie udalo sie dodac tolerations do hostpath-provisioner."
+  fi
 else
-  warn "Nie udalo sie patchowac hostpath-provisioner — sprawdz recznie."
+  if KC -n kube-system patch deployment hostpath-provisioner --type='json' \
+      -p="[{\"op\": \"replace\", \"path\": \"/spec/template/spec/tolerations\", \"value\": $TOLERATIONS_JSON}]" 2>/dev/null; then
+    ok "hostpath-provisioner: tolerations nadpisane."
+  else
+    warn "Nie udalo sie nadpisac tolerations w hostpath-provisioner."
+  fi
 fi
 
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
+
+# Weryfikacja: sprawdz, czy toleracje sa
+VERIFY_TOL=$(KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || true)
+if echo "$VERIFY_TOL" | grep -q 'control-plane'; then
+  ok "hostpath-provisioner ma toleracje na control-plane."
+else
+  warn "hostpath-provisioner NIE ma toleracji na control-plane — sprawdz recznie."
+fi
 
 # Czekaj, az provisioner wstanie
 log "Czekam na hostpath-provisioner..."
@@ -351,6 +365,12 @@ echo
 echo "--- Pody w davtro02 ---"
 KC -n davtro02 get pods 2>/dev/null || true
 echo
+echo "--- PVC w davtro02 ---"
+KC -n davtro02 get pvc 2>/dev/null || true
+echo
+echo "--- PV z pustym nodeAffinity ---"
+KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' || echo "  (brak — OK)"
+echo
 echo "--- Certyfikaty ---"
 KC -n davtro02 get certificate,secret 2>/dev/null | grep -E 'tls|NAME' || true
 echo
@@ -490,27 +510,18 @@ ArgoCD:
 GHCR pull secret:
   Sprawdz: kubectl -n davtro02 get secret ghcr-pull
   Pakiety GHCR musza byc PUBLIC albo ustaw ghcr-pull recznie.
-  UWAGA: GitHub Actions uzywa GHCR_PAT_02 — to INNY secret niz ghcr-pull w K8s.
 
 Logi port-forward:
   /tmp/pf-dashboard.log
   /tmp/pf-argocd.log
 
-Jesli RBAC wlaczone i cos padlo:
-  microk8s disable rbac
-  microk8s status
-  microk8s kubectl get pods -A
+Jesli PVC sa Pending (hostpath bug):
+  kubectl get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' | grep '""'
+  # Jesli widzisz nodeAffinity z pustym "", usun PVC/PV i uruchom skrypt ponownie.
 
 Jesli namespace davtro02 = BRAK:
   kubectl -n argocd get applications
   kubectl -n argocd describe application davtro-website | tail -20
-  kubectl -n argocd logs deploy/argocd-application-controller --tail=50 | grep -i davtro
-
-Jesli PVC sa Pending (hostpath bug):
-  kubectl get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' | grep '""'
-  # Jesli widzisz nodeAffinity z pustym "", usun PVC/PV i uruchom skrypt ponownie:
-  #   kubectl -n davtro02 delete pvc <nazwa>
-  #   kubectl delete pv <nazwa>
 
 Nacisnij Ctrl+C, aby zakonczyc port-forwardy i zamknac skrypt.
 EOF
