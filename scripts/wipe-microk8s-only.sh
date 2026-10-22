@@ -5,6 +5,7 @@
 #   - Helm, k9s, mc, snapd (inne snapy)
 #   - wpisow w /etc/hosts (davtro.local zostaje)
 #   - ~/.kube/config (jesli nie wyglada na MicroK8s, zostawia)
+#   - istioctl (opcjonalnie — Krok 7 pyta)
 #
 # UWAGA: DESTRUKCYJNE dla klastra MicroK8s. Usuwa PV, PVC, sekrety (Vault, Postgres).
 #        Nie robi backupu. Backup zrob recznie, jesli potrzebny.
@@ -38,7 +39,7 @@ ${GREEN}ZOSTANA ZACHOWANE:${NC}
   - Helm, k9s, mc, snapd (inne snapy)
   - wpisy w /etc/hosts (davtro.local)
   - ~/.kube/config (jesli nie wyglada na MicroK8s)
-  - istioctl (mozesz usunac recznie: sudo rm /usr/local/bin/istioctl)
+  - istioctl (Krok 7 pyta, czy usunac)
 
 ${RED}NIE ROBIMY BACKUPU.${NC}
 
@@ -58,8 +59,17 @@ fi
 # ---------- Krok 2: Usun snap MicroK8s z danymi ----------
 log "=== Krok 2: usuwam snap microk8s --purge ==="
 if snap list microk8s >/dev/null 2>&1; then
-  sudo snap remove microk8s --purge || warn "snap remove microk8s --purge — blad (moze juz usuniety)."
-  ok "MicroK8s usuniety."
+  sudo snap remove microk8s --purge || warn "snap remove microk8s --purge — blad."
+  # Weryfikacja: jesli snap nadal istnieje, probuj --force
+  if snap list microk8s >/dev/null 2>&1; then
+    warn "snap remove microk8s nie powiodlo sie — probuje --force."
+    sudo snap remove microk8s --purge --force 2>/dev/null || true
+  fi
+  if snap list microk8s >/dev/null 2>&1; then
+    warn "MicroK8s nadal istnieje — usun recznie: sudo snap remove microk8s --purge"
+  else
+    ok "MicroK8s usuniety."
+  fi
 else
   warn "Snap microk8s nie istnieje — pomijam."
 fi
@@ -120,6 +130,21 @@ echo "--- kubectl get nodes (powinno byc 'connection refused') ---"
 kubectl get nodes 2>&1 | head -2 || true
 echo
 
+# ---------- Krok 7: istioctl (opcjonalnie) ----------
+log "=== Krok 7: istioctl ==="
+if command -v istioctl >/dev/null 2>&1; then
+  ISTIO_VER=$(istioctl version --remote=false 2>/dev/null | head -1 || echo "nieznana")
+  read -r -p "Usunac istioctl ($ISTIO_VER)? (t/N): " RM_ISTIO
+  if [[ "$RM_ISTIO" =~ ^[tT]$ ]]; then
+    sudo rm -f "$(command -v istioctl)"
+    ok "Usunieto istioctl."
+  else
+    ok "istioctl zostawiony ($ISTIO_VER)."
+  fi
+else
+  ok "Brak istioctl."
+fi
+
 cat <<EOF
 
 ${GREEN}=== GOTOWE ===${NC}
@@ -127,10 +152,12 @@ ${GREEN}=== GOTOWE ===${NC}
 Zachowane:
   - Helm, k9s, mc, snapd
   - /etc/hosts (davtro.local)
-  - istioctl (mozesz usunac recznie: sudo rm /usr/local/bin/istioctl)
+  - istioctl (jesli nie usunieto w Kroku 7)
 
 Jesli chcesz teraz postawic srodowisko od zera:
-  ./scripts/setup-from-scratch.sh
+  SKIP_WAIT=1 ENABLE_RBAC=1 \\
+  GHCR_USER='exea-centrum' GHCR_REPO='website-db-...' GHCR_PAT='ghp_xxx' GITHUB_PAT='ghp_yyy' \\
+    ./scripts/setup-from-scratch.sh 2>&1 | tee /tmp/setup-\$(date +%F-%H%M).log
 
 Jesli chcesz usunac takze istioctl:
   sudo rm -f /usr/local/bin/istioctl

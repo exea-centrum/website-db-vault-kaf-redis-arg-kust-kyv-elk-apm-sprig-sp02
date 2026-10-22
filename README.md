@@ -1108,3 +1108,6 @@ CRD --> Istio --> ArgoCD --> aplikacje --> cold-start sam --> LAN --> weryfikacj
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+cd ~/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
+chmod +x scripts/wipe-microk8s-only.sh
+./scripts/wipe-microk8s-only.sh

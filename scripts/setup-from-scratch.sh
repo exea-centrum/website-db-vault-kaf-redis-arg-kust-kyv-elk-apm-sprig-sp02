@@ -8,6 +8,9 @@
 # Z RBAC (domyslnie WYLACZONE — ryzykowne):
 #   ENABLE_RBAC=1 ./scripts/setup-from-scratch.sh
 #
+# Bez czekania na port-forwardy:
+#   SKIP_WAIT=1 ./scripts/setup-from-scratch.sh
+#
 # Z PAT (bez pytan o GHCR):
 #   GHCR_USER='exea-centrum' GHCR_REPO='website-db-...' GHCR_PAT='ghp_xxx' ./scripts/setup-from-scratch.sh
 #
@@ -26,6 +29,7 @@
 #   GHCR_PAT        PAT do GHCR (jesli nie ustawiony, pyta)
 #   GITHUB_PAT      PAT do ArgoCD repo (jesli nie ustawiony, pyta; Enter=pomin)
 #   ENABLE_RBAC     "1" = wlacz RBAC (ryzykowne), "0" = nie (domyslnie)
+#   SKIP_WAIT       "1" = nie czekaj na port-forwardy (skrypt konczy sie po podsumowaniu)
 
 set -euo pipefail
 
@@ -37,6 +41,7 @@ REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 GHCR_USER="${GHCR_USER:-exea-centrum}"
 GHCR_REPO="${GHCR_REPO:-website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02}"
 ENABLE_RBAC="${ENABLE_RBAC:-0}"
+SKIP_WAIT="${SKIP_WAIT:-0}"
 
 # ---------- Kolory ----------
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
@@ -56,6 +61,7 @@ log "GitHub repo:    $GHCR_REPO"
 log "MetalLB:        $METALLB_RANGE"
 log "Istio:          $ISTIO_VERSION"
 log "RBAC:           $([ "$ENABLE_RBAC" = "1" ] && echo 'WLACZONE (ryzykowne)' || echo 'wylaczone')"
+log "SKIP_WAIT:      $SKIP_WAIT"
 
 # ---------- Krok 0: Podstawowe narzedzia ----------
 log "=== Krok 0: podstawowe narzedzia ==="
@@ -93,7 +99,38 @@ ok "~/.kube/config gotowy."
 # ---------- Krok 2: Dodatki MicroK8s ----------
 log "=== Krok 2: dodatki MicroK8s ==="
 MK enable dns
-MK enable hostpath-storage   # WYMAGANE dla PVC
+MK enable hostpath-storage
+
+# KLUCZOWE: patch hostpath-provisioner z toleracjami
+# Bez tego PV dostaja nodeAffinity: kubernetes.io/hostname In [""]
+# i pody (Vault, Postgres, Kafka) nie moga sie przypisac do wezla.
+log "Patchuje hostpath-provisioner z toleracjami (bug MicroK8s)..."
+KC -n kube-system patch deployment hostpath-provisioner --type='json' -p='[
+  {"op": "add", "path": "/spec/template/spec/tolerations", "value": [
+    {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
+    {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
+    {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
+    {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
+  ]}
+]' 2>/dev/null || warn "Nie udalo sie patchowac hostpath-provisioner (moze juz ma toleracje)."
+
+KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
+
+# Czekaj, az provisioner wstanie
+log "Czekam na hostpath-provisioner..."
+HP_OK=0
+for i in $(seq 1 30); do
+  if KC -n kube-system get pods -l k8s-app=hostpath-provisioner 2>/dev/null | grep -q Running; then
+    HP_OK=1
+    break
+  fi
+  sleep 2
+done
+if [ "$HP_OK" = "1" ]; then
+  ok "hostpath-provisioner dziala (z toleracjami)."
+else
+  warn "hostpath-provisioner nie wstal w 60s — sprawdz: kubectl -n kube-system get pods -l k8s-app=hostpath-provisioner"
+fi
 
 if [ "$ENABLE_RBAC" = "1" ]; then
   warn "Wlaczam RBAC — to moze zepsuc Dashboard/ArgoCD/Traefik!"
@@ -264,6 +301,7 @@ else
     echo "Wymagane uprawnienia: read:packages (i read:org, jesli obraz w organizacji)."
     echo "Utworz go: https://github.com/settings/tokens"
     echo "Jesli pakiety GHCR sa PUBLIC — nacisnij Enter, aby pominac."
+    echo "UWAGA: w GitHub Actions ten sam PAT jest jako GHCR_PAT_02."
     echo
     read -r -s -p "Wklej GHCR_PAT (Enter=pomin): " GHCR_PAT
     echo
@@ -279,17 +317,16 @@ else
       --dry-run=client -o yaml | KC apply -f -
     ok "Secret ghcr-pull utworzony/zaktualizowany."
 
-    for sa in davtro-sa default; do
-      if KC -n davtro02 get sa "$sa" >/dev/null 2>&1; then
-        KC -n davtro02 patch serviceaccount "$sa" \
-          -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}' 2>/dev/null || true
-        ok "ServiceAccount $sa -> ghcr-pull."
-      else
-        warn "ServiceAccount $sa nie istnieje — pomijam patch."
-      fi
+    log "Patchuje wszystkie ServiceAccounty w davtro02 -> ghcr-pull..."
+    SAS=$(KC -n davtro02 get sa -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+    for sa in $SAS; do
+      KC -n davtro02 patch serviceaccount "$sa" \
+        -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}' 2>/dev/null || true
+      ok "ServiceAccount $sa -> ghcr-pull."
     done
 
-    KC -n davtro02 delete pod -l 'app in (frontend,fastapi-web-app,spring-app,message-processor)' 2>/dev/null || true
+    log "Restart deploy,sts w davtro02 (zeby pociagnely ghcr-pull)..."
+    KC -n davtro02 rollout restart deploy,sts 2>/dev/null || warn "Brak deploy/sts w davtro02 — restart pominiety."
     ok "Pody zrestartowane (jesli istnialy)."
   fi
 fi
@@ -316,8 +353,6 @@ echo
 # ---------- Krok 14: admin-user + token Dashboard (kube-system) ----------
 log "=== Krok 14: admin-user + token Dashboard ==="
 
-# Dashboard w MicroK8s jest w kube-system (nie kubernetes-dashboard!)
-# Tworzymy admin-user w kube-system z ClusterRoleBinding (rbac.authorization.k8s.io/v1)
 if KC -n kube-system get svc kubernetes-dashboard >/dev/null 2>&1 || \
    KC -n kubernetes-dashboard get svc kubernetes-dashboard >/dev/null 2>&1; then
 
@@ -342,11 +377,9 @@ subjects:
   namespace: kube-system
 YAML
 
-  # Token z admin-user (kube-system), dlugi TTL
   DASH_TOKEN=$(KC -n kube-system create token admin-user --duration=999999h 2>/dev/null || true)
 
   if [ -z "$DASH_TOKEN" ]; then
-    # fallback: microk8s-dashboard-token (to samo co dashboard-proxy)
     if KC -n kube-system get secret microk8s-dashboard-token >/dev/null 2>&1; then
       DASH_TOKEN=$(KC -n kube-system get secret microk8s-dashboard-token \
         -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
@@ -385,7 +418,6 @@ sleep 1
 DASH_PID=""
 ARGOCD_PID=""
 
-# Dashboard: kube-system (MicroK8s) — fallback do kubernetes-dashboard
 if KC -n kube-system get svc kubernetes-dashboard >/dev/null 2>&1; then
   KC -n kube-system port-forward --address 0.0.0.0 \
     service/kubernetes-dashboard 10443:443 >/tmp/pf-dashboard.log 2>&1 &
@@ -447,6 +479,7 @@ ArgoCD:
 GHCR pull secret:
   Sprawdz: kubectl -n davtro02 get secret ghcr-pull
   Pakiety GHCR musza byc PUBLIC albo ustaw ghcr-pull recznie.
+  UWAGA: GitHub Actions uzywa GHCR_PAT_02 — to INNY secret niz ghcr-pull w K8s.
 
 Logi port-forward:
   /tmp/pf-dashboard.log
@@ -462,10 +495,23 @@ Jesli namespace davtro02 = BRAK:
   kubectl -n argocd describe application davtro-website | tail -20
   kubectl -n argocd logs deploy/argocd-application-controller --tail=50 | grep -i davtro
 
+Jesli PVC sa Pending (hostpath bug):
+  kubectl get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' | grep '""'
+  # Jesli widzisz nodeAffinity z pustym "", usun PVC/PV i uruchom skrypt ponownie:
+  #   kubectl -n davtro02 delete pvc <nazwa>
+  #   kubectl delete pv <nazwa>
+
 Nacisnij Ctrl+C, aby zakonczyc port-forwardy i zamknac skrypt.
 EOF
 
 # ---------- Krok 17: wait — utrzymuje skrypt przy zyciu ----------
+if [ "$SKIP_WAIT" = "1" ]; then
+  log "=== Krok 17: SKIP_WAIT=1 — skrypt konczy sie bez czekania ==="
+  warn "Port-forwardy dzialaja w tle (PID: DASH=$DASH_PID ARGOCD=$ARGOCD_PID)."
+  warn "Zatrzymanie: pkill -f 'port-forward'"
+  exit 0
+fi
+
 cleanup() {
   echo
   log "Zatrzymuje port-forwardy..."
@@ -477,7 +523,7 @@ cleanup() {
 }
 trap cleanup INT TERM
 
-log "=== Krok 17: czekam na port-forwardy (Ctrl+C konczy) ==="
+log "=== Krok 17: czekam na port-forwardy (Ctrl+C konczy, SKIP_WAIT=1 pomija) ==="
 if [ -n "$DASH_PID" ] || [ -n "$ARGOCD_PID" ]; then
   wait "$DASH_PID" "$ARGOCD_PID" 2>/dev/null || true
 else
