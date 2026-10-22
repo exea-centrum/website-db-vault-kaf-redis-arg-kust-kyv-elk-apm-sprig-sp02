@@ -90,10 +90,75 @@ log "=== Krok 2: dodatki MicroK8s ==="
 MK enable dns
 MK enable hostpath-storage
 
-# KLUCZOWE 0: usun taint control-plane/master (dev, zeby helper pody hostpath-provisioner
-# mogly sie schedulowac). To obejscie bug MicroK8s: provisioner nie przenosi toleracji
-# na helper pody, wiec PVC z hostpath nigdy sie nie binduja na taintowanym wezle.
-# UWAGA: 'taint nodes --all' w microk8s kubectl ZAWODZI — petla po jawnych nazwach.
+# KLUCZOWE 1: volumeBindingMode=Immediate na StorageClass microk8s-hostpath
+# (domyslnie WaitForFirstConsumer powoduje deadlock: pod Pending czeka na PVC,
+# a PVC czeka na pod. Immediate = PV tworzony od razu, bez czekania na pod.)
+log "Ustawiam volumeBindingMode: Immediate na StorageClass microk8s-hostpath..."
+KC patch storageclass microk8s-hostpath -p '{"volumeBindingMode":"Immediate"}' 2>/dev/null || warn "Nie udalo sie ustawic volumeBindingMode."
+ok "StorageClass microk8s-hostpath: volumeBindingMode=Immediate."
+
+# KLUCZOWE 2: czekaj na ClusterRole/ClusterRoleBinding microk8s-hostpath
+log "Czekam na ClusterRole/ClusterRoleBinding microk8s-hostpath..."
+for i in $(seq 1 30); do
+  if KC get clusterrole microk8s-hostpath >/dev/null 2>&1 && \
+     KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1; then
+    ok "ClusterRole/ClusterRoleBinding microk8s-hostpath gotowe."
+    break
+  fi
+  sleep 2
+done
+
+# KLUCZOWE 3: odtworz ClusterRole/ClusterRoleBinding, jesli nie istnieja
+if ! KC get clusterrole microk8s-hostpath >/dev/null 2>&1; then
+  warn "ClusterRole microk8s-hostpath nie istnieje — odtwarzam."
+  KC apply -f - <<'YAML'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: microk8s-hostpath
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+YAML
+fi
+
+if ! KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1; then
+  warn "ClusterRoleBinding microk8s-hostpath nie istnieje — odtwarzam."
+  KC apply -f - <<'YAML'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: microk8s-hostpath
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: microk8s-hostpath
+subjects:
+  - kind: ServiceAccount
+    name: microk8s-hostpath
+    namespace: kube-system
+YAML
+fi
+
+# KLUCZOWE 4: usun taint control-plane/master (dev, zeby helper pody provisionera
+# mogly sie schedulowac). To obejscie bug MicroK8s: provisioner nie przenosi
+# toleracji na helper pody, wiec PVC z hostpath nigdy sie nie binduja na taintowanym wezle.
 log "Usuwam taint control-plane/master (dev, hostpath bug)..."
 NODES=$(KC get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
 for node in $NODES; do
@@ -101,16 +166,14 @@ for node in $NODES; do
   KC taint nodes "$node" node-role.kubernetes.io/master- 2>/dev/null || true
 done
 
-# Weryfikacja: sprawdz, czy tainty faktycznie zniknely
 REMAINING_TAINTS=$(KC get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}' 2>/dev/null | grep -E 'control-plane|master' || true)
 if [ -z "$REMAINING_TAINTS" ]; then
   ok "Tainty control-plane/master usuniete (dev)."
 else
   warn "Tainty nadal sa: $REMAINING_TAINTS"
-  warn "Sprobuj recznie: kubectl taint nodes <wezel> node-role.kubernetes.io/control-plane-"
 fi
 
-# KLUCZOWE 1: usun stare PV z pustym nodeAffinity (bug MicroK8s: In [""])
+# KLUCZOWE 5: usun stare PV z pustym nodeAffinity (bug MicroK8s: In [""])
 log "Usuwam PV z pustym nodeAffinity (bug MicroK8s)..."
 PVS_TO_DELETE=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' | awk '{print $1}' || true)
 if [ -n "$PVS_TO_DELETE" ]; then
@@ -122,34 +185,22 @@ else
   ok "Brak PV z pustym nodeAffinity."
 fi
 
-# KLUCZOWE 2: patch hostpath-provisioner z toleracjami przez kubectl replace + jq
-log "Czekam, az deployment hostpath-provisioner bedzie w pelni utworzony..."
-HP_READY=0
-for i in $(seq 1 60); do
-  if KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.containers}' 2>/dev/null | grep -q 'name'; then
-    HP_READY=1
-    break
-  fi
-  sleep 2
-done
-
-if [ "$HP_READY" = "1" ]; then
-  ok "Deployment hostpath-provisioner ma spec.template.spec.containers."
-
-  log "Dodaje toleracje do hostpath-provisioner (kubectl replace + jq)..."
-  CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
-  if [ "$CURRENT" != "{}" ]; then
-    NEW=$(echo "$CURRENT" | jq '.spec.template.spec.tolerations = [
-      {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
-      {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
-      {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
-      {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
-    ]')
-    if echo "$NEW" | KC replace -f - 2>/dev/null; then
-      ok "hostpath-provisioner: tolerations ustawione (replace + jq)."
-    else
-      warn "Nie udalo sie zastapic hostpath-provisioner (replace + jq)."
-    fi
+# KLUCZOWE 6: patch hostpath-provisioner z toleracjami (kubectl apply — NIE replace,
+# bo replace uszkadzal ClusterRole microk8s-hostpath)
+log "Dodaje toleracje do hostpath-provisioner (kubectl apply)..."
+sleep 3
+CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
+if [ "$CURRENT" != "{}" ]; then
+  NEW=$(echo "$CURRENT" | jq '.spec.template.spec.tolerations = [
+    {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
+    {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
+    {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
+    {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
+  ]' | jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .status)')
+  if echo "$NEW" | KC apply -f - 2>/dev/null; then
+    ok "hostpath-provisioner: tolerations ustawione (apply)."
+  else
+    warn "Nie udalo sie patchowac hostpath-provisioner (apply)."
   fi
 fi
 
@@ -399,6 +450,13 @@ echo
 echo "--- Toleracje hostpath-provisioner ---"
 KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || echo "  (brak)"
 echo
+echo "--- volumeBindingMode StorageClass microk8s-hostpath ---"
+KC get storageclass microk8s-hostpath -o jsonpath='{.volumeBindingMode}' 2>/dev/null || echo "  (brak)"
+echo
+echo "--- ClusterRole/ClusterRoleBinding microk8s-hostpath ---"
+KC get clusterrole microk8s-hostpath >/dev/null 2>&1 && echo "  ClusterRole: OK" || echo "  ClusterRole: BRAK"
+KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1 && echo "  ClusterRoleBinding: OK" || echo "  ClusterRoleBinding: BRAK"
+echo
 echo "--- Dashboard (svc) ---"
 KC get svc -A 2>/dev/null | grep -i dashboard || echo "  (brak svc/kubernetes-dashboard)"
 echo
@@ -565,15 +623,14 @@ Logi port-forward:
   /tmp/pf-argocd.log
 
 Jesli PVC sa Pending (hostpath bug):
-  kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}'
-  # Tainty control-plane/master powinny byc USUNIETE (Krok 2).
-  # Jesli sa — usun recznie:
-  #   kubectl taint nodes <wezel> node-role.kubernetes.io/control-plane-
-  #   kubectl taint nodes <wezel> node-role.kubernetes.io/master-
+  kubectl get storageclass microk8s-hostpath -o jsonpath='{.volumeBindingMode}'
+  # Powinno byc "Immediate" (Krok 2). Jesli jest "WaitForFirstConsumer" — ustaw:
+  #   kubectl patch storageclass microk8s-hostpath -p '{"volumeBindingMode":"Immediate"}'
+  kubectl get clusterrole microk8s-hostpath
+  # Powinno istniec (Krok 2). Jesli nie — odtworz z YAML w skrypcie.
 
 Jesli Dashboard nie dziala:
   microk8s kubectl get svc -A | grep -i dashboard
-  # Jesli pusto — microk8s enable dashboard nie utworzyl uslugi.
 
 Jesli namespace davtro02 = BRAK:
   kubectl -n argocd get applications
