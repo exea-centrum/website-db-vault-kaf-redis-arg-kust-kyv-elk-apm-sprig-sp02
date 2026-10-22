@@ -90,6 +90,14 @@ log "=== Krok 2: dodatki MicroK8s ==="
 MK enable dns
 MK enable hostpath-storage
 
+# KLUCZOWE 0: usun taint control-plane/master (dev, zeby helper pody hostpath-provisioner
+# mogly sie schedulowac). To obejsce bug MicroK8s: provisioner nie przenosi toleracji
+# na helper pody, wiec PVC z hostpath nigdy sie nie binduja na taintowanym wezle.
+log "Usuwam taint control-plane/master (dev, hostpath bug)..."
+KC taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || warn "Nie udalo sie usunac taintu control-plane."
+KC taint nodes --all node-role.kubernetes.io/master- 2>/dev/null || true
+ok "Tainty control-plane/master usuniete (dev)."
+
 # KLUCZOWE 1: usun stare PV z pustym nodeAffinity (bug MicroK8s: In [""])
 log "Usuwam PV z pustym nodeAffinity (bug MicroK8s)..."
 PVS_TO_DELETE=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' | awk '{print $1}' || true)
@@ -102,9 +110,7 @@ else
   ok "Brak PV z pustym nodeAffinity."
 fi
 
-# KLUCZOWE 2: patch hostpath-provisioner z toleracjami przez kubectl replace + jq
-# UWAGA: patch --type='merge' i --type='json' (op:add/op:replace) ZAWODZA
-# w microk8s kubectl na nowym polu /tolerations. kubectl replace z jq DZIALA ZAWSZE.
+# KLUCZOWE 2: patch hostpath-provisioner z toleracjami (kubectl replace + jq)
 log "Czekam, az deployment hostpath-provisioner bedzie w pelni utworzony..."
 HP_READY=0
 for i in $(seq 1 60); do
@@ -131,30 +137,11 @@ if [ "$HP_READY" = "1" ]; then
       ok "hostpath-provisioner: tolerations ustawione (replace + jq)."
     else
       warn "Nie udalo sie zastapic hostpath-provisioner (replace + jq)."
-      warn "Sprobuj recznie: kubectl -n kube-system edit deployment hostpath-provisioner"
     fi
-  else
-    warn "Nie udalo sie pobrac hostpath-provisioner (get -o json)."
   fi
-else
-  warn "Deployment hostpath-provisioner nie ma spec.template.spec.containers — pomijam patch."
 fi
 
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
-
-# Weryfikacja: sprawdz, czy toleracje sa
-VERIFY_TOL=$(KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || true)
-if echo "$VERIFY_TOL" | grep -q 'control-plane'; then
-  ok "hostpath-provisioner ma toleracje na control-plane."
-else
-  warn "hostpath-provisioner NIE ma toleracji na control-plane — sprawdz recznie."
-  warn "Reczne: kubectl -n kube-system edit deployment hostpath-provisioner"
-  warn "Dodaj w spec.template.spec:"
-  warn "  tolerations:"
-  warn "  - key: node-role.kubernetes.io/control-plane"
-  warn "    operator: Exists"
-  warn "    effect: NoSchedule"
-fi
 
 # Czekaj, az provisioner wstanie
 log "Czekam na hostpath-provisioner..."
@@ -167,9 +154,9 @@ for i in $(seq 1 30); do
   sleep 2
 done
 if [ "$HP_OK" = "1" ]; then
-  ok "hostpath-provisioner dziala (z toleracjami)."
+  ok "hostpath-provisioner dziala."
 else
-  warn "hostpath-provisioner nie wstal w 60s — sprawdz: kubectl -n kube-system get pods -l k8s-app=hostpath-provisioner"
+  warn "hostpath-provisioner nie wstal w 60s."
 fi
 
 if [ "$ENABLE_RBAC" = "1" ]; then
@@ -182,7 +169,7 @@ else
 fi
 
 MK enable metallb:"$METALLB_RANGE"
-MK enable dashboard          # DZIALA na MicroK8s 1.35.x (usuniete w 1.36+)
+MK enable dashboard
 MK enable ingress
 ok "dns, hostpath-storage (PVC), metallb, dashboard, ingress wlaczone."
 
@@ -304,8 +291,6 @@ while ! KC get ns davtro02 >/dev/null 2>&1; do
   NS_WAIT=$((NS_WAIT+1))
   if [ "$NS_WAIT" -ge "$NS_MAX" ]; then
     warn "Namespace davtro02 nie powstal w 10 min — ArgoCD sync mogl sie nie udac."
-    warn "Sprawdz: kubectl -n argocd get applications"
-    warn "         kubectl -n argocd describe application davtro-website | tail -20"
     break
   fi
   if [ $((NS_WAIT % 12)) -eq 0 ]; then
@@ -385,6 +370,9 @@ KC -n davtro02 get pvc 2>/dev/null || true
 echo
 echo "--- PV z pustym nodeAffinity ---"
 KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' || echo "  (brak — OK)"
+echo
+echo "--- Tainty na wezle ---"
+KC get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}' 2>/dev/null || echo "  (brak)"
 echo
 echo "--- Toleracje hostpath-provisioner ---"
 KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || echo "  (brak)"
@@ -534,10 +522,11 @@ Logi port-forward:
   /tmp/pf-argocd.log
 
 Jesli PVC sa Pending (hostpath bug):
-  kubectl -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations}'
-  # Jesli pusty/null — dodaj recznie:
-  #   kubectl -n kube-system edit deployment hostpath-provisioner
-  #   (dodaj tolerations: control-plane/master)
+  kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}'
+  # Tainty control-plane/master powinny byc USUNIETE (Krok 2).
+  # Jesli sa — usun recznie:
+  #   kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+  #   kubectl taint nodes --all node-role.kubernetes.io/master-
 
 Jesli namespace davtro02 = BRAK:
   kubectl -n argocd get applications
