@@ -96,39 +96,55 @@ PVS_TO_DELETE=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.s
 if [ -n "$PVS_TO_DELETE" ]; then
   for pv in $PVS_TO_DELETE; do
     warn "Usuwam PV $pv (pusty nodeAffinity)."
-    KC delete pv "$pv" 2>/dev/null || true
+    KC delete pv "$pv" --wait=false 2>/dev/null || true
   done
 else
   ok "Brak PV z pustym nodeAffinity."
 fi
 
-# KLUCZOWE 2: patch hostpath-provisioner z toleracjami (add/replace, nie merge)
-log "Patchuje hostpath-provisioner z toleracjami..."
-sleep 3   # daj provisionerowi chwile na start
+# KLUCZOWE 2: patch hostpath-provisioner z toleracjami (--type='merge')
+# UWAGA: op:add / op:replace z --type='json' ZAWODZI na nowym polu /tolerations.
+# --type='merge' SCALA spec.template.spec i DODAJE tolerations, nawet jesli ich nie bylo.
+# ALE: merge moze nie zadzialac, jesli deployment nie ma jeszcze spec.template.spec.containers.
+# Dlatego czekamy, az deployment bedzie w pelni utworzony.
+log "Czekam, az deployment hostpath-provisioner bedzie w pelni utworzony..."
+HP_READY=0
+for i in $(seq 1 60); do
+  if KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.containers}' 2>/dev/null | grep -q 'name'; then
+    HP_READY=1
+    break
+  fi
+  sleep 2
+done
 
-TOLERATIONS_JSON='[
-  {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
-  {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
-  {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
-  {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
-]'
+if [ "$HP_READY" = "1" ]; then
+  ok "Deployment hostpath-provisioner ma spec.template.spec.containers."
 
-HAS_TOLERATIONS=$(KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations}' 2>/dev/null || echo '')
+  log "Patchuje hostpath-provisioner z toleracjami (--type='merge')..."
+  sleep 3
 
-if [ -z "$HAS_TOLERATIONS" ]; then
-  if KC -n kube-system patch deployment hostpath-provisioner --type='json' \
-      -p="[{\"op\": \"add\", \"path\": \"/spec/template/spec/tolerations\", \"value\": $TOLERATIONS_JSON}]" 2>/dev/null; then
-    ok "hostpath-provisioner: tolerations dodane."
+  if KC -n kube-system patch deployment hostpath-provisioner --type='merge' -p='{
+    "spec": {
+      "template": {
+        "spec": {
+          "tolerations": [
+            {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
+            {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
+            {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
+            {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
+          ]
+        }
+      }
+    }
+  }' 2>/dev/null; then
+    ok "hostpath-provisioner: tolerations ustawione (merge)."
   else
-    warn "Nie udalo sie dodac tolerations do hostpath-provisioner."
+    warn "Nie udalo sie patchowac hostpath-provisioner (merge)."
+    warn "Sprobuj recznie: kubectl -n kube-system edit deployment hostpath-provisioner"
   fi
 else
-  if KC -n kube-system patch deployment hostpath-provisioner --type='json' \
-      -p="[{\"op\": \"replace\", \"path\": \"/spec/template/spec/tolerations\", \"value\": $TOLERATIONS_JSON}]" 2>/dev/null; then
-    ok "hostpath-provisioner: tolerations nadpisane."
-  else
-    warn "Nie udalo sie nadpisac tolerations w hostpath-provisioner."
-  fi
+  warn "Deployment hostpath-provisioner nie ma jeszcze spec.template.spec.containers — pomijam patch."
+  warn "Sprobuj recznie: kubectl -n kube-system edit deployment hostpath-provisioner"
 fi
 
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
@@ -139,6 +155,12 @@ if echo "$VERIFY_TOL" | grep -q 'control-plane'; then
   ok "hostpath-provisioner ma toleracje na control-plane."
 else
   warn "hostpath-provisioner NIE ma toleracji na control-plane — sprawdz recznie."
+  warn "Reczne: kubectl -n kube-system edit deployment hostpath-provisioner"
+  warn "Dodaj w spec.template.spec:"
+  warn "  tolerations:"
+  warn "  - key: node-role.kubernetes.io/control-plane"
+  warn "    operator: Exists"
+  warn "    effect: NoSchedule"
 fi
 
 # Czekaj, az provisioner wstanie
@@ -370,6 +392,9 @@ KC -n davtro02 get pvc 2>/dev/null || true
 echo
 echo "--- PV z pustym nodeAffinity ---"
 KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' || echo "  (brak — OK)"
+echo
+echo "--- Toleracje hostpath-provisioner ---"
+KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || echo "  (brak)"
 echo
 echo "--- Certyfikaty ---"
 KC -n davtro02 get certificate,secret 2>/dev/null | grep -E 'tls|NAME' || true
