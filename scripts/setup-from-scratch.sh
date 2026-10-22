@@ -90,10 +90,10 @@ log "=== Krok 2: dodatki MicroK8s ==="
 MK enable dns
 MK enable hostpath-storage
 
-# KLUCZOWE 1: odtworz StorageClass microk8s-hostpath z volumeBindingMode: Immediate
-# (volumeBindingMode jest IMMUTABLE — nie da sie go zmienic przez patch.
-#  Trzeba usunac i odtworzyc StorageClass. PV/PVC nie sa usuwane.)
-log "Odtwarzam StorageClass microk8s-hostpath z volumeBindingMode: Immediate..."
+# KLUCZOWE 1: odtworz StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer
+# (dla hostpath lepszy jest WaitForFirstConsumer — PV tworzony na tym samym node,
+#  na ktorym bedzie pod. Immediate powoduje warning i potencjalne problemy z nodeAffinity.)
+log "Odtwarzam StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer..."
 KC delete storageclass microk8s-hostpath 2>/dev/null || true
 KC apply -f - <<'YAML'
 apiVersion: storage.k8s.io/v1
@@ -104,9 +104,9 @@ metadata:
     storageclass.kubernetes.io/is-default-class: "true"
 provisioner: microk8s.io/hostpath
 reclaimPolicy: Delete
-volumeBindingMode: Immediate
+volumeBindingMode: WaitForFirstConsumer
 YAML
-ok "StorageClass microk8s-hostpath: volumeBindingMode=Immediate."
+ok "StorageClass microk8s-hostpath: volumeBindingMode=WaitForFirstConsumer."
 
 # KLUCZOWE 2: czekaj na ClusterRole/ClusterRoleBinding microk8s-hostpath
 log "Czekam na ClusterRole/ClusterRoleBinding microk8s-hostpath..."
@@ -146,6 +146,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 YAML
 fi
 
@@ -635,16 +638,7 @@ Logi port-forward:
 
 Jesli PVC sa Pending (hostpath bug):
   kubectl get storageclass microk8s-hostpath -o jsonpath='{.volumeBindingMode}'
-  # Powinno byc "Immediate" (Krok 2). Jesli jest "WaitForFirstConsumer":
-  #   kubectl delete storageclass microk8s-hostpath
-  #   kubectl apply -f - <<'YAML'
-  #   apiVersion: storage.k8s.io/v1
-  #   kind: StorageClass
-  #   metadata: {name: microk8s-hostpath, annotations: {storageclass.kubernetes.io/is-default-class: "true"}}
-  #   provisioner: microk8s.io/hostpath
-  #   reclaimPolicy: Delete
-  #   volumeBindingMode: Immediate
-  #   YAML
+  # Powinno byc "WaitForFirstConsumer" (Krok 2).
 
 Jesli Dashboard nie dziala:
   microk8s kubectl get svc -A | grep -i dashboard
