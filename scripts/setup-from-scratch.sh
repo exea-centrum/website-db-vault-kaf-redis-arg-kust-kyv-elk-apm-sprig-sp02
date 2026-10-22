@@ -93,10 +93,22 @@ MK enable hostpath-storage
 # KLUCZOWE 0: usun taint control-plane/master (dev, zeby helper pody hostpath-provisioner
 # mogly sie schedulowac). To obejscie bug MicroK8s: provisioner nie przenosi toleracji
 # na helper pody, wiec PVC z hostpath nigdy sie nie binduja na taintowanym wezle.
+# UWAGA: 'taint nodes --all' w microk8s kubectl ZAWODZI — petla po jawnych nazwach.
 log "Usuwam taint control-plane/master (dev, hostpath bug)..."
-KC taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || warn "Nie udalo sie usunac taintu control-plane."
-KC taint nodes --all node-role.kubernetes.io/master- 2>/dev/null || true
-ok "Tainty control-plane/master usuniete (dev)."
+NODES=$(KC get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+for node in $NODES; do
+  KC taint nodes "$node" node-role.kubernetes.io/control-plane- 2>/dev/null || true
+  KC taint nodes "$node" node-role.kubernetes.io/master- 2>/dev/null || true
+done
+
+# Weryfikacja: sprawdz, czy tainty faktycznie zniknely
+REMAINING_TAINTS=$(KC get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}' 2>/dev/null | grep -E 'control-plane|master' || true)
+if [ -z "$REMAINING_TAINTS" ]; then
+  ok "Tainty control-plane/master usuniete (dev)."
+else
+  warn "Tainty nadal sa: $REMAINING_TAINTS"
+  warn "Sprobuj recznie: kubectl taint nodes <wezel> node-role.kubernetes.io/control-plane-"
+fi
 
 # KLUCZOWE 1: usun stare PV z pustym nodeAffinity (bug MicroK8s: In [""])
 log "Usuwam PV z pustym nodeAffinity (bug MicroK8s)..."
@@ -556,8 +568,8 @@ Jesli PVC sa Pending (hostpath bug):
   kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}'
   # Tainty control-plane/master powinny byc USUNIETE (Krok 2).
   # Jesli sa — usun recznie:
-  #   kubectl taint nodes --all node-role.kubernetes.io/control-plane-
-  #   kubectl taint nodes --all node-role.kubernetes.io/master-
+  #   kubectl taint nodes <wezel> node-role.kubernetes.io/control-plane-
+  #   kubectl taint nodes <wezel> node-role.kubernetes.io/master-
 
 Jesli Dashboard nie dziala:
   microk8s kubectl get svc -A | grep -i dashboard
