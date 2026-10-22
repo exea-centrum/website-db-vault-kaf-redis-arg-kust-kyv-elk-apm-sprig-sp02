@@ -29,7 +29,7 @@
 #   GHCR_PAT        PAT do GHCR (jesli nie ustawiony, pyta)
 #   GITHUB_PAT      PAT do ArgoCD repo (jesli nie ustawiony, pyta; Enter=pomin)
 #   ENABLE_RBAC     "1" = wlacz RBAC (ryzykowne), "0" = nie (domyslnie)
-#   SKIP_WAIT       "1" = nie czekaj na port-forwardy (skrypt konczy sie po podsumowaniu)
+#   SKIP_WAIT       "1" = nie czekaj na port-forwardy
 
 set -euo pipefail
 
@@ -101,18 +101,29 @@ log "=== Krok 2: dodatki MicroK8s ==="
 MK enable dns
 MK enable hostpath-storage
 
-# KLUCZOWE: patch hostpath-provisioner z toleracjami
+# KLUCZOWE: patch hostpath-provisioner z toleracjami (merge, nie add)
 # Bez tego PV dostaja nodeAffinity: kubernetes.io/hostname In [""]
 # i pody (Vault, Postgres, Kafka) nie moga sie przypisac do wezla.
-log "Patchuje hostpath-provisioner z toleracjami (bug MicroK8s)..."
-KC -n kube-system patch deployment hostpath-provisioner --type='json' -p='[
-  {"op": "add", "path": "/spec/template/spec/tolerations", "value": [
-    {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
-    {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
-    {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
-    {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
-  ]}
-]' 2>/dev/null || warn "Nie udalo sie patchowac hostpath-provisioner (moze juz ma toleracje)."
+log "Patchuje hostpath-provisioner z toleracjami (merge, bug MicroK8s)..."
+sleep 3   # daj provisionerowi chwile na start
+
+CURRENT_TOLERATIONS=$(KC -n kube-system get deployment hostpath-provisioner \
+  -o jsonpath='{.spec.template.spec.tolerations}' 2>/dev/null || echo '[]')
+[ -z "$CURRENT_TOLERATIONS" ] && CURRENT_TOLERATIONS='[]'
+
+NEW_TOLERATIONS=$(echo "$CURRENT_TOLERATIONS" | jq '. + [
+  {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
+  {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
+  {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
+  {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
+] | unique_by(.key)')
+
+if KC -n kube-system patch deployment hostpath-provisioner --type='merge' \
+     -p="{\"spec\":{\"template\":{\"spec\":{\"tolerations\":$NEW_TOLERATIONS}}}}" 2>/dev/null; then
+  ok "hostpath-provisioner patchowany (merge toleracji)."
+else
+  warn "Nie udalo sie patchowac hostpath-provisioner — sprawdz recznie."
+fi
 
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
 
@@ -504,7 +515,7 @@ Jesli PVC sa Pending (hostpath bug):
 Nacisnij Ctrl+C, aby zakonczyc port-forwardy i zamknac skrypt.
 EOF
 
-# ---------- Krok 17: wait — utrzymuje skrypt przy zyciu ----------
+# ---------- Krok 17: wait ----------
 if [ "$SKIP_WAIT" = "1" ]; then
   log "=== Krok 17: SKIP_WAIT=1 — skrypt konczy sie bez czekania ==="
   warn "Port-forwardy dzialaja w tle (PID: DASH=$DASH_PID ARGOCD=$ARGOCD_PID)."
