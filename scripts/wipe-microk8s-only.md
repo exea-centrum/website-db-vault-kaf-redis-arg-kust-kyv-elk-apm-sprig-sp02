@@ -270,3 +270,5 @@ kubectl -n argocd get applications
 | Workflow | ✅ **Kompletny** — `wipe` → `setup` → weryfikacja |
 
 **Wniosek:** Teraz `wipe-microk8s-only.sh` **nie tylko usuwa MicroK8s**, ale też **czyści PVC i PV z pustym `nodeAffinity`** — dzięki temu po reinstalacji `setup-from-scratch.sh` **nie natrafi na stare PV z `""`** i `vault-0` wstanie. Uruchamiaj `wipe` przed każdym testem `setup`.
+
+
