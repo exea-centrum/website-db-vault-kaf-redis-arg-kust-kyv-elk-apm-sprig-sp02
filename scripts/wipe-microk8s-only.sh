@@ -34,6 +34,8 @@ Zostanie usuniete:
   - MicroK8s (snap) wraz z danymi w /var/snap/microk8s/
   - Wszystkie pody, PVC, PV, sekrety, configmapy (w tym Vault, Postgres, Kafka)
   - Kyverno, Istio, ArgoCD, cert-manager, ESO (jako czesc klastra)
+  - PVC (vault-backup, vault-data-vault-0, kafka-data, pgdata) — Krok 0
+  - PV z pustym nodeAffinity (bug MicroK8s) — Krok 0
 
 ${GREEN}ZOSTANA ZACHOWANE:${NC}
   - Helm, k9s, mc, snapd (inne snapy)
@@ -46,6 +48,66 @@ ${RED}NIE ROBIMY BACKUPU.${NC}
 EOF
 read -r -p "Wpisz DOKADNIE 'USUN' aby kontynuowac: " CONFIRM
 [ "$CONFIRM" = "USUN" ] || die "Przerwano."
+
+# ---------- Krok 0: Usun PVC i PV z pustym nodeAffinity ----------
+# KLUCZOWE: bez tego po reinstalacji MicroK8s zostana stare PV z nodeAffinity In [""]
+# i nowe PVC beda czekac w nieskonczonosc (vault-0 Pending).
+log "=== Krok 0: czyszczenie PVC/PV (bug MicroK8s) ==="
+
+if command -v microk8s >/dev/null 2>&1; then
+  KC() { sg microk8s -c "microk8s kubectl $*"; }
+
+  if sg microk8s -c "microk8s status --wait-ready" >/dev/null 2>&1; then
+    # 0a. Usun PVC (ArgoCD odtworzy je przy nastepnym syncu)
+    log "Usuwam PVC w davtro02 (vault-backup, vault-data-vault-0, kafka-data, pgdata)..."
+    KC -n davtro02 delete pvc vault-backup vault-data-vault-0 kafka-data-kafka-kraft-0 pgdata-postgres-db-0 2>/dev/null || true
+    ok "PVC usuniete (jesli istnialy)."
+
+    # 0b. Usun PV z pustym nodeAffinity
+    log "Szukam PV z pustym nodeAffinity..."
+    PVS_TO_DELETE=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' | awk '{print $1}' || true)
+
+    if [ -n "$PVS_TO_DELETE" ]; then
+      for pv in $PVS_TO_DELETE; do
+        warn "Usuwam PV $pv (pusty nodeAffinity)."
+        KC delete pv "$pv" --wait=false 2>/dev/null || true
+      done
+      ok "Usunieto PV z pustym nodeAffinity."
+    else
+      ok "Brak PV z pustym nodeAffinity."
+    fi
+
+    # 0c. Patch hostpath-provisioner z toleracjami (na wypadek, gdyby ktos chcial
+    #     zachowac klaster — choc i tak go za chwile usuniemy)
+    log "Patchuje hostpath-provisioner z toleracjami (--type='merge')..."
+    if KC -n kube-system get deployment hostpath-provisioner >/dev/null 2>&1; then
+      if KC -n kube-system patch deployment hostpath-provisioner --type='merge' -p='{
+        "spec": {
+          "template": {
+            "spec": {
+              "tolerations": [
+                {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
+                {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
+                {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
+                {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
+              ]
+            }
+          }
+        }
+      }' 2>/dev/null; then
+        ok "hostpath-provisioner: tolerations ustawione (merge)."
+      else
+        warn "Nie udalo sie patchowac hostpath-provisioner (merge)."
+      fi
+    else
+      warn "Deployment hostpath-provisioner nie istnieje — pomijam patch."
+    fi
+  else
+    warn "MicroK8s nie dziala — pomijam czyszczenie PVC/PV/provisionera."
+  fi
+else
+  warn "MicroK8s nie zainstalowany — pomijam Krok 0."
+fi
 
 # ---------- Krok 1: Zatrzymaj MicroK8s ----------
 log "=== Krok 1: zatrzymuje MicroK8s ==="
