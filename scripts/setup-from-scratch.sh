@@ -91,7 +91,7 @@ MK enable dns
 MK enable hostpath-storage
 
 # KLUCZOWE 0: usun taint control-plane/master (dev, zeby helper pody hostpath-provisioner
-# mogly sie schedulowac). To obejsce bug MicroK8s: provisioner nie przenosi toleracji
+# mogly sie schedulowac). To obejscie bug MicroK8s: provisioner nie przenosi toleracji
 # na helper pody, wiec PVC z hostpath nigdy sie nie binduja na taintowanym wezle.
 log "Usuwam taint control-plane/master (dev, hostpath bug)..."
 KC taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || warn "Nie udalo sie usunac taintu control-plane."
@@ -123,7 +123,6 @@ done
 
 if [ "$HP_READY" = "1" ]; then
   ok "Deployment hostpath-provisioner ma spec.template.spec.containers."
-
   log "Dodaje toleracje do hostpath-provisioner (kubectl replace + jq)..."
   CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
   if [ "$CURRENT" != "{}" ]; then
@@ -143,7 +142,6 @@ fi
 
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
 
-# Czekaj, az provisioner wstanie
 log "Czekam na hostpath-provisioner..."
 HP_OK=0
 for i in $(seq 1 30); do
@@ -377,6 +375,9 @@ echo
 echo "--- Toleracje hostpath-provisioner ---"
 KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || echo "  (brak)"
 echo
+echo "--- Dashboard (svc) ---"
+KC get svc -A 2>/dev/null | grep -i dashboard || echo "  (brak svc/kubernetes-dashboard)"
+echo
 echo "--- Certyfikaty ---"
 KC -n davtro02 get certificate,secret 2>/dev/null | grep -E 'tls|NAME' || true
 echo
@@ -387,86 +388,57 @@ echo "--- Gateway/VirtualService ---"
 KC -n davtro02 get gateway,virtualservice 2>/dev/null || true
 echo
 
-# ---------- Krok 14: admin-user + token Dashboard (kube-system) ----------
-log "=== Krok 14: admin-user + token Dashboard ==="
+# ---------- Krok 14: Znajdz Dashboard (nazwa + namespace) ----------
+log "=== Krok 14: szukam Dashboardu ==="
 
-if KC -n kube-system get svc kubernetes-dashboard >/dev/null 2>&1 || \
-   KC -n kubernetes-dashboard get svc kubernetes-dashboard >/dev/null 2>&1; then
+DASH_NS=""
+DASH_SVC=""
 
-  KC apply -f - <<'YAML'
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: admin-user
-  namespace: kube-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: admin-user
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-admin
-subjects:
-- kind: ServiceAccount
-  name: admin-user
-  namespace: kube-system
-YAML
-
-  DASH_TOKEN=$(KC -n kube-system create token admin-user --duration=999999h 2>/dev/null || true)
-
-  if [ -z "$DASH_TOKEN" ]; then
-    if KC -n kube-system get secret microk8s-dashboard-token >/dev/null 2>&1; then
-      DASH_TOKEN=$(KC -n kube-system get secret microk8s-dashboard-token \
-        -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
-    fi
-  fi
-
-  if [ -n "$DASH_TOKEN" ]; then
-    echo
-    echo "${GREEN}=== Kubernetes Dashboard token (admin-user, kube-system) ===${NC}"
-    echo "$DASH_TOKEN"
-    echo
-  else
-    warn "Nie udalo sie wygenerowac tokenu Dashboard (admin-user)."
-  fi
+# 1) MicroK8s 1.35: kube-system/kubernetes-dashboard
+if KC -n kube-system get svc kubernetes-dashboard >/dev/null 2>&1; then
+  DASH_NS="kube-system"
+  DASH_SVC="kubernetes-dashboard"
+# 2) Helm chart: kubernetes-dashboard/kubernetes-dashboard-kong-proxy
+elif KC -n kubernetes-dashboard get svc kubernetes-dashboard-kong-proxy >/dev/null 2>&1; then
+  DASH_NS="kubernetes-dashboard"
+  DASH_SVC="kubernetes-dashboard-kong-proxy"
+# 3) Helm chart: kubernetes-dashboard/kubernetes-dashboard
+elif KC -n kubernetes-dashboard get svc kubernetes-dashboard >/dev/null 2>&1; then
+  DASH_NS="kubernetes-dashboard"
+  DASH_SVC="kubernetes-dashboard"
+# 4) Ostatecznosc: szukaj po labelkach w calej klastrze
 else
-  warn "Nie znaleziono svc/kubernetes-dashboard — pomijam Dashboard."
+  DASH_LINE=$(KC get svc -A -l 'app.kubernetes.io/name=kubernetes-dashboard' -o jsonpath='{.items[0].metadata.namespace} {.items[0].metadata.name}' 2>/dev/null || true)
+  if [ -n "$DASH_LINE" ]; then
+    DASH_NS="${DASH_LINE%% *}"
+    DASH_SVC="${DASH_LINE##* }"
+  fi
 fi
 
-ARGOCD_PASS=$(KC -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)
-if [ -n "$ARGOCD_PASS" ]; then
-  echo "${GREEN}=== ArgoCD admin ===${NC}"
-  echo "Login: admin"
-  echo "Haslo: $ARGOCD_PASS"
-  echo
+if [ -z "$DASH_NS" ] || [ -z "$DASH_SVC" ]; then
+  warn "Nie znaleziono zadnej uslugi Dashboardu (kubernetes-dashboard / kong-proxy)."
+  warn "Sprawdz recznie: microk8s kubectl get svc -A | grep -i dashboard"
 else
-  warn "Brak argocd-initial-admin-secret (moze zostal usuniety)."
+  ok "Znaleziono Dashboard: $DASH_NS/$DASH_SVC"
 fi
 
 # ---------- Krok 15: port-forward Dashboard + ArgoCD (w tle) ----------
 log "=== Krok 15: port-forward Dashboard + ArgoCD ==="
 
-pkill -f 'port-forward.*kubernetes-dashboard.*10443' 2>/dev/null || true
+pkill -f 'port-forward.*10443' 2>/dev/null || true
 pkill -f 'port-forward.*argo-cd-argocd-server.*8080' 2>/dev/null || true
 sleep 1
 
 DASH_PID=""
 ARGOCD_PID=""
 
-if KC -n kube-system get svc kubernetes-dashboard >/dev/null 2>&1; then
-  KC -n kube-system port-forward --address 0.0.0.0 \
-    service/kubernetes-dashboard 10443:443 >/tmp/pf-dashboard.log 2>&1 &
+if [ -n "$DASH_NS" ] && [ -n "$DASH_SVC" ]; then
+  KC -n "$DASH_NS" port-forward --address 0.0.0.0 \
+    "service/$DASH_SVC" 10443:443 >/tmp/pf-dashboard.log 2>&1 &
   DASH_PID=$!
-  ok "Dashboard: https://<IP>:10443 (PID $DASH_PID, ns kube-system)"
-elif KC -n kubernetes-dashboard get svc kubernetes-dashboard >/dev/null 2>&1; then
-  KC -n kubernetes-dashboard port-forward --address 0.0.0.0 \
-    service/kubernetes-dashboard 10443:443 >/tmp/pf-dashboard.log 2>&1 &
-  DASH_PID=$!
-  ok "Dashboard: https://<IP>:10443 (PID $DASH_PID, ns kubernetes-dashboard)"
+  ok "Dashboard: https://<IP>:10443 (PID $DASH_PID, ns $DASH_NS, svc $DASH_SVC)"
 else
-  warn "Dashboard: nie znaleziono svc/kubernetes-dashboard."
+  warn "Dashboard: pomijam port-forward (nie znaleziono uslugi)."
 fi
 
 KC -n argocd port-forward --address 0.0.0.0 \
@@ -527,6 +499,10 @@ Jesli PVC sa Pending (hostpath bug):
   # Jesli sa — usun recznie:
   #   kubectl taint nodes --all node-role.kubernetes.io/control-plane-
   #   kubectl taint nodes --all node-role.kubernetes.io/master-
+
+Jesli Dashboard nie dziala:
+  microk8s kubectl get svc -A | grep -i dashboard
+  # Jesli pusto — microk8s enable dashboard nie utworzyl uslugi.
 
 Jesli namespace davtro02 = BRAK:
   kubectl -n argocd get applications
