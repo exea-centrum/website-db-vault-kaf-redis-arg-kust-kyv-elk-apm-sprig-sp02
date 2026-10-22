@@ -126,8 +126,12 @@ echo
 echo "--- ~/.kube/config ---"
 [ -f "$HOME/.kube/config" ] && echo "  ISTNIEJE" || echo "  (brak)"
 echo
-echo "--- kubectl get nodes (powinno byc 'connection refused') ---"
-kubectl get nodes 2>&1 | head -2 || true
+echo "--- kubectl (moze nie istniec po usunieciu MicroK8s) ---"
+if command -v kubectl >/dev/null 2>&1; then
+  kubectl get nodes 2>&1 | head -2 || true
+else
+  echo "  (kubectl nie zainstalowany — OK, MicroK8s usuniety)"
+fi
 echo
 
 # ---------- Krok 7: istioctl (opcjonalnie) ----------
