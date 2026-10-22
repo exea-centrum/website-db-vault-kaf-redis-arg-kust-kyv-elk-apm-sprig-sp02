@@ -110,7 +110,7 @@ else
   ok "Brak PV z pustym nodeAffinity."
 fi
 
-# KLUCZOWE 2: patch hostpath-provisioner z toleracjami (kubectl replace + jq)
+# KLUCZOWE 2: patch hostpath-provisioner z toleracjami przez kubectl replace + jq
 log "Czekam, az deployment hostpath-provisioner bedzie w pelni utworzony..."
 HP_READY=0
 for i in $(seq 1 60); do
@@ -123,6 +123,7 @@ done
 
 if [ "$HP_READY" = "1" ]; then
   ok "Deployment hostpath-provisioner ma spec.template.spec.containers."
+
   log "Dodaje toleracje do hostpath-provisioner (kubectl replace + jq)..."
   CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
   if [ "$CURRENT" != "{}" ]; then
@@ -142,6 +143,15 @@ fi
 
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
 
+# Weryfikacja toleracji
+VERIFY_TOL=$(KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || true)
+if echo "$VERIFY_TOL" | grep -q 'control-plane'; then
+  ok "hostpath-provisioner ma toleracje na control-plane."
+else
+  warn "hostpath-provisioner NIE ma toleracji na control-plane — sprawdz recznie."
+fi
+
+# Czekaj, az provisioner wstanie
 log "Czekam na hostpath-provisioner..."
 HP_OK=0
 for i in $(seq 1 30); do
@@ -289,6 +299,8 @@ while ! KC get ns davtro02 >/dev/null 2>&1; do
   NS_WAIT=$((NS_WAIT+1))
   if [ "$NS_WAIT" -ge "$NS_MAX" ]; then
     warn "Namespace davtro02 nie powstal w 10 min — ArgoCD sync mogl sie nie udac."
+    warn "Sprawdz: kubectl -n argocd get applications"
+    warn "         kubectl -n argocd describe application davtro-website | tail -20"
     break
   fi
   if [ $((NS_WAIT % 12)) -eq 0 ]; then
@@ -396,30 +408,77 @@ DASH_SVC=""
 
 # 1) MicroK8s 1.35: kube-system/kubernetes-dashboard
 if KC -n kube-system get svc kubernetes-dashboard >/dev/null 2>&1; then
-  DASH_NS="kube-system"
-  DASH_SVC="kubernetes-dashboard"
+  DASH_NS="kube-system"; DASH_SVC="kubernetes-dashboard"
 # 2) Helm chart: kubernetes-dashboard/kubernetes-dashboard-kong-proxy
 elif KC -n kubernetes-dashboard get svc kubernetes-dashboard-kong-proxy >/dev/null 2>&1; then
-  DASH_NS="kubernetes-dashboard"
-  DASH_SVC="kubernetes-dashboard-kong-proxy"
+  DASH_NS="kubernetes-dashboard"; DASH_SVC="kubernetes-dashboard-kong-proxy"
 # 3) Helm chart: kubernetes-dashboard/kubernetes-dashboard
 elif KC -n kubernetes-dashboard get svc kubernetes-dashboard >/dev/null 2>&1; then
-  DASH_NS="kubernetes-dashboard"
-  DASH_SVC="kubernetes-dashboard"
-# 4) Ostatecznosc: szukaj po labelkach w calej klastrze
+  DASH_NS="kubernetes-dashboard"; DASH_SVC="kubernetes-dashboard"
+# 4) Ostatecznosc: szukaj po labelkach
 else
   DASH_LINE=$(KC get svc -A -l 'app.kubernetes.io/name=kubernetes-dashboard' -o jsonpath='{.items[0].metadata.namespace} {.items[0].metadata.name}' 2>/dev/null || true)
   if [ -n "$DASH_LINE" ]; then
-    DASH_NS="${DASH_LINE%% *}"
-    DASH_SVC="${DASH_LINE##* }"
+    DASH_NS="${DASH_LINE%% *}"; DASH_SVC="${DASH_LINE##* }"
   fi
 fi
 
 if [ -z "$DASH_NS" ] || [ -z "$DASH_SVC" ]; then
-  warn "Nie znaleziono zadnej uslugi Dashboardu (kubernetes-dashboard / kong-proxy)."
-  warn "Sprawdz recznie: microk8s kubectl get svc -A | grep -i dashboard"
+  warn "Nie znaleziono zadnej uslugi Dashboardu."
 else
   ok "Znaleziono Dashboard: $DASH_NS/$DASH_SVC"
+fi
+
+# admin-user + token (kube-system)
+if [ -n "$DASH_NS" ] && [ -n "$DASH_SVC" ]; then
+  KC apply -f - <<'YAML'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-user
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kube-system
+YAML
+
+  DASH_TOKEN=$(KC -n kube-system create token admin-user --duration=999999h 2>/dev/null || true)
+
+  if [ -z "$DASH_TOKEN" ]; then
+    if KC -n kube-system get secret microk8s-dashboard-token >/dev/null 2>&1; then
+      DASH_TOKEN=$(KC -n kube-system get secret microk8s-dashboard-token \
+        -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
+    fi
+  fi
+
+  if [ -n "$DASH_TOKEN" ]; then
+    echo
+    echo "${GREEN}=== Kubernetes Dashboard token (admin-user, kube-system) ===${NC}"
+    echo "$DASH_TOKEN"
+    echo
+  else
+    warn "Nie udalo sie wygenerowac tokenu Dashboard (admin-user)."
+  fi
+fi
+
+ARGOCD_PASS=$(KC -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)
+if [ -n "$ARGOCD_PASS" ]; then
+  echo "${GREEN}=== ArgoCD admin ===${NC}"
+  echo "Login: admin"
+  echo "Haslo: $ARGOCD_PASS"
+  echo
+else
+  warn "Brak argocd-initial-admin-secret (moze zostal usuniety)."
 fi
 
 # ---------- Krok 15: port-forward Dashboard + ArgoCD (w tle) ----------
