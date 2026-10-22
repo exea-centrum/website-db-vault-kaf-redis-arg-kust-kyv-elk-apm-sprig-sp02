@@ -1,11 +1,12 @@
 # Davtro Apartments - platforma wynajmu krotkoterminowego (Full Open Source)
 
-# opcja dla leniwych full automat, skryp instalacją wszystko od microK8s do podów z app.
+# opcja dla leniwych full automat, skryp instalacją wszystko od microK8s do podów z app ~150 obiektów .
 ## Tylko potrzeba VMs z ubuntu lub debianem z 8 core i 16 GB ram minimum
 ### 🚀 Trzy sposoby uruchomienia
-1. Bez pytania (podajesz PAT w linii poleceń): wklej skrypt i idź kawę wypić i będzie gotowe !!!
+1. Bez pytania (podajesz PAT – GHCR_PAT, GHCR_PAT_02, GITHUB_PAT to tylko nazwa – w linii poleceń): wklej skrypt i idź kawę wypić i będzie gotowe!!! No chyba że masz serię Kioxia GP1 osiągającą od 10 milionów do ponad 20 milionów losowych IOPS przy odczycie bloków 512-bajtowych albo Corsair MP700 Pro XT 2,4M IOPS – to kawy nie zdążysz wypić!!!
 
 ```bash
+
 cd ~/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
 chmod +x scripts/setup-from-scratch.sh
 
@@ -16,6 +17,7 @@ GHCR_REPO='website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02' \
 GHCR_PAT='ghp_..............................' \
 GITHUB_PAT='ghp_...........................' \
   ./scripts/setup-from-scratch.sh 2>&1 | tee /tmp/setup-$(date +%F-%H%M).log
+  
 ```
 2. Z pytaniem (skrypt sam zapyta o wszystko):
 
