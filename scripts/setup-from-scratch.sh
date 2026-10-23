@@ -91,8 +91,6 @@ MK enable dns
 MK enable hostpath-storage
 
 # KLUCZOWE 1: odtworz StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer
-# (dla hostpath lepszy jest WaitForFirstConsumer — PV tworzony na tym samym node,
-#  na ktorym bedzie pod. Immediate powoduje warning i potencjalne problemy z nodeAffinity.)
 log "Odtwarzam StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer..."
 KC delete storageclass microk8s-hostpath 2>/dev/null || true
 KC apply -f - <<'YAML'
@@ -170,9 +168,7 @@ subjects:
 YAML
 fi
 
-# KLUCZOWE 4: usun taint control-plane/master (dev, zeby helper pody provisionera
-# mogly sie schedulowac). To obejscie bug MicroK8s: provisioner nie przenosi
-# toleracji na helper pody, wiec PVC z hostpath nigdy sie nie binduja na taintowanym wezle.
+# KLUCZOWE 4: usun taint control-plane/master (dev, hostpath bug)
 log "Usuwam taint control-plane/master (dev, hostpath bug)..."
 NODES=$(KC get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
 for node in $NODES; do
@@ -199,8 +195,7 @@ else
   ok "Brak PV z pustym nodeAffinity."
 fi
 
-# KLUCZOWE 6: patch hostpath-provisioner z toleracjami (kubectl apply — NIE replace,
-# bo replace uszkadzal ClusterRole microk8s-hostpath)
+# KLUCZOWE 6: patch hostpath-provisioner z toleracjami
 log "Dodaje toleracje do hostpath-provisioner (kubectl apply)..."
 sleep 3
 CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
