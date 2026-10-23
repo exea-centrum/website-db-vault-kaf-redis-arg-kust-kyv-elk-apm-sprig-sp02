@@ -376,66 +376,20 @@ if [ -f "$REPO_DIR/argocd/application-istio.yaml" ]; then
 fi
 ok "Applications zastosowane."
 
-# ---------- Krok 10.5: ArgoCD PVC health check (WAZNE!) ----------
-log "=== Krok 10.5: ArgoCD PVC health check ==="
-ARGOCD_CM_TMP=$(mktemp)
-KC -n argocd get configmap argocd-cm -o json 2>/dev/null > "$ARGOCD_CM_TMP" || true
-if [ -s "$ARGOCD_CM_TMP" ]; then
-  PVC_HEALTH='hs = {}
-if obj.status ~= nil and obj.status.phase == "Bound" then
-  hs.status = "Healthy"
-  hs.message = "PVC is bound"
-elseif obj.status ~= nil and obj.status.phase == "Pending" then
-  hs.status = "Healthy"
-  hs.message = "PVC pending (WaitForFirstConsumer) - treated as healthy"
-else
-  hs.status = "Progressing"
-  hs.message = "PVC status: " .. (obj.status and obj.status.phase or "unknown")
-end
-return hs'
-  jq --arg h "$PVC_HEALTH" '.data["resource.customizations.health.kubernetes.io__persistentvolumeclaim"] = $h' \
-    "$ARGOCD_CM_TMP" | KC apply -f - 2>/dev/null && ok "PVC health check ustawiony." \
-    || warn "Nie udalo sie ustawic PVC health check."
-  rm -f "$ARGOCD_CM_TMP"
-else
-  warn "argocd-cm nie istnieje — pomijam PVC health check."
-fi
-
-# ---------- Krok 10.6: ArgoCD Certificate health check (WAZNE!) ----------
-log "=== Krok 10.6: ArgoCD Certificate health check ==="
-ARGOCD_CM_TMP=$(mktemp)
-KC -n argocd get configmap argocd-cm -o json 2>/dev/null > "$ARGOCD_CM_TMP" || true
-if [ -s "$ARGOCD_CM_TMP" ]; then
-  CERT_HEALTH='hs = {}
-if obj.status ~= nil and obj.status.conditions ~= nil then
-  for i, condition in ipairs(obj.status.conditions) do
-    if condition.type == "Ready" and condition.status == "True" then
-      hs.status = "Healthy"
-      hs.message = condition.message
-      return hs
-    end
-    if condition.type == "Ready" and condition.status == "False" and condition.reason ~= "DoesNotExist" then
-      hs.status = "Degraded"
-      hs.message = condition.message
-      return hs
-    end
-  end
-end
-hs.status = "Progressing"
-hs.message = "Waiting for certificate"
-return hs'
-  jq --arg h "$CERT_HEALTH" '.data["resource.customizations.health.cert-manager.io_Certificate"] = $h' \
-    "$ARGOCD_CM_TMP" | KC apply -f - 2>/dev/null && ok "Certificate health check ustawiony." \
-    || warn "Nie udalo sie ustawic Certificate health check."
-  rm -f "$ARGOCD_CM_TMP"
-else
-  warn "argocd-cm nie istnieje — pomijam Certificate health check."
-fi
-
-# Restart ArgoCD (nazwy z prefiksem argo-cd- z Helm chartu!)
-KC -n argocd rollout restart deployment argo-cd-argocd-server 2>/dev/null || true
-KC -n argocd rollout restart statefulset argo-cd-argocd-application-controller 2>/dev/null || true
-ok "ArgoCD health checki ustawione (PVC + Certificate)."
+# ============================================================================
+# UWAGA: NIE dodajemy health checkow do argocd-cm.
+# Poprzednia wersja dodawala:
+#   resource.customizations.health.kubernetes.io__persistentvolumeclaim
+#   resource.customizations.health.cert-manager.io_Certificate
+# przez "kubectl patch" lub "get+jq+apply". To powodowalo:
+#   - argocd-application-controller w CrashLoopBackOff
+#   - aplikacje mialy puste Sync Status i Health Status
+#   - zadne zasoby nie byly synchronizowane
+# ArgoCD v3.5.6 domyslnie traktuje Pending PVC jako Progressing (nie Degraded),
+# a Certificate z Ready=False/DoesNotExist jako Progressing (nie Degraded),
+# wiec te health checki NIE SA potrzebne.
+# Zamiast tego: ignoreDifferences w argocd/application.yaml (dla Certificate).
+# ============================================================================
 
 # ---------- Krok 10.7: sprawdz pamiec w wezle ----------
 log "=== Krok 10.7: sprawdzam pamiec w wezle ==="
@@ -470,6 +424,7 @@ if [ -n "$NODE_NAME" ]; then
       sleep 10
     else
       warn "Ustaw AUTO_SCALE_DOWN=1, aby skrypt zrobil to automatycznie."
+      warn "Albo wykonaj powyzsze komendy recznie i uruchom skrypt ponownie."
     fi
   else
     ok "Node $NODE_NAME: requests memory = ${MEM_PCT:-?}% (OK)."
@@ -486,7 +441,7 @@ NS_MAX=60
 while ! KC get ns davtro02 >/dev/null 2>&1; do
   NS_WAIT=$((NS_WAIT+1))
   if [ "$NS_WAIT" -ge "$NS_MAX" ]; then
-    warn "Namespace davtro02 nie powstal w 5 min — ArgoCD sync mogl sie nie udac."
+    warn "Namespace davtro02 nie powstal w 5 min."
     break
   fi
   if [ $((NS_WAIT % 12)) -eq 0 ]; then
@@ -642,6 +597,9 @@ echo
 echo "--- ArgoCD Applications ---"
 KC -n argocd get applications 2>/dev/null || true
 echo
+echo "--- ArgoCD application-controller (CrashLoopBackOff?) ---"
+KC -n argocd get pods -l app.kubernetes.io/component=application-controller 2>/dev/null || true
+echo
 echo "--- Issuer/ClusterIssuer ---"
 KC -n davtro02 get issuer,clusterissuer 2>/dev/null || true
 echo
@@ -713,22 +671,20 @@ cat <<EOF
 ${GREEN}=== GOTOWE ===${NC}
 IP: ${IP:-<nie wykryto>}
 
+Jesli ArgoCD application-controller jest w CrashLoopBackOff:
+  # To NIE jest wina skryptu (nie dodajemy health checkow).
+  # Sprawdz logi:
+  kubectl -n argocd logs statefulset/argo-cd-argocd-application-controller --tail=50
+  # Zrestartuj controller:
+  kubectl -n argocd rollout restart statefulset argo-cd-argocd-application-controller
+
 Jesli namespace davtro02 nie istnieje:
-  # Krok 9.5 powinien go utworzyc. Sprawdz recznie:
-  kubectl get ns davtro02
-  # Jesli nie ma — utworz recznie:
   kubectl create namespace davtro02
   kubectl label namespace davtro02 istio-injection=enabled --overwrite
-  # Potem wymus sync:
   kubectl -n argocd patch application davtro-website --type merge -p '{"operation":{"sync":{"revision":"HEAD"}}}'
-
-Jesli ArgoCD czeka na "healthy state of cert-manager.io/Certificate/vault-tls":
-  # Krok 10.6 powinien to naprawic. Sprawdz recznie:
-  kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}'
 
 Jesli vault-issuer jest False:
   # To normalne — vault-bootstrap tworzy cert-manager-vault-token.
-  # Poczekaj, az vault-bootstrap wystartuje i wykona DONE:
   kubectl -n davtro02 get deploy vault-bootstrap
   kubectl -n davtro02 logs deploy/vault-bootstrap --tail=50 | grep -i "DONE\|token"
 
