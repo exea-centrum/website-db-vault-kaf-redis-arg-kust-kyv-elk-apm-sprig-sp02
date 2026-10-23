@@ -376,6 +376,24 @@ KC -n argocd rollout restart deployment argocd-server 2>/dev/null || true
 KC -n argocd rollout restart statefulset argocd-application-controller 2>/dev/null || true
 ok "ArgoCD PVC health check ustawiony (Pending PVC = Healthy)."
 
+# ---------- Krok 10.6: ArgoCD Certificate health check (WAZNE!) ----------
+# cert-manager podczas wystawiania certu ustawia Ready=False z reason=DoesNotExist
+# ("Issuing certificate as Secret does not exist"). ArgoCD domyslnie uznaje to
+# za Degraded i BLOKUJE cala fale sync-wave (widac: "waiting for healthy state
+# of cert-manager.io/Certificate/vault-tls"). Ten health check:
+#   Ready=True                     -> Healthy
+#   Ready=False + reason!=DoesNotExist -> Degraded (np. blad wystawiania)
+#   Ready=False + reason==DoesNotExist -> Progressing (czekaj dalej, nie blokuj)
+log "=== Krok 10.6: ArgoCD Certificate health check ==="
+KC -n argocd patch configmap argocd-cm --type merge -p '{
+  "data": {
+    "resource.customizations.health.cert-manager.io_Certificate": "hs = {}\nif obj.status ~= nil and obj.status.conditions ~= nil then\n  for i, condition in ipairs(obj.status.conditions) do\n    if condition.type == \"Ready\" and condition.status == \"True\" then\n      hs.status = \"Healthy\"\n      hs.message = condition.message\n      return hs\n    end\n    if condition.type == \"Ready\" and condition.status == \"False\" and condition.reason ~= \"DoesNotExist\" then\n      hs.status = \"Degraded\"\n      hs.message = condition.message\n      return hs\n    end\n  end\nend\nhs.status = \"Progressing\"\nhs.message = \"Waiting for certificate\"\nreturn hs"
+  }
+}' 2>/dev/null || warn "Nie udalo sie patchowac argocd-cm (Certificate health check)."
+KC -n argocd rollout restart deployment argocd-server 2>/dev/null || true
+KC -n argocd rollout restart statefulset argocd-application-controller 2>/dev/null || true
+ok "ArgoCD Certificate health check ustawiony (DoesNotExist = Progressing)."
+
 # ---------- Krok 10.7: sprawdz pamiec w wezle ----------
 # Node z requests memory >= 90% nie zmiesci vault-0/postgres-db-0 (Pending: Insufficient memory).
 # AUTO_SCALE_DOWN=1 -> skrypt sam wstrzyma niekrytyczne Deploymenty.
@@ -801,6 +819,13 @@ Jesli ArgoCD utknal w OutOfSync/Degraded:
   kubectl -n argocd describe application davtro-website | tail -30
   # Sprawdz, czy Krok 10.5 (PVC health check) sie wykonal:
   kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.kubernetes\.io__persistentvolumeclaim}'
+  # Sprawdz, czy Krok 10.6 (Certificate health check) sie wykonal:
+  kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}'
+
+Jesli ArgoCD czeka na "healthy state of cert-manager.io/Certificate/vault-tls":
+  # Krok 10.6 powinien to naprawic. Sprawdz recznie:
+  kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}'
+  # Jesli pusty — uruchom Krok 10.6 recznie (patch argocd-cm + rollout restart argocd-server).
 
 Jesli Vault lub Postgres nie wstaly:
   kubectl -n davtro02 describe pod vault-0 | tail -20

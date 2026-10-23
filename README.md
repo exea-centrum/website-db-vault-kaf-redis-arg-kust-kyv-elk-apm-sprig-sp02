@@ -9,7 +9,8 @@
 
 cd ~/github/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02
 chmod +x scripts/setup-from-scratch.sh
-
+# Z automatycznym zwolnieniem pamięci (gdy node >90% requests memory pod VMs 8GB RAMu i 4 CPU):
+AUTO_SCALE_DOWN=1 
 SKIP_WAIT=1 \
 ENABLE_RBAC=1 \
 GHCR_USER='exea-centrum' \
