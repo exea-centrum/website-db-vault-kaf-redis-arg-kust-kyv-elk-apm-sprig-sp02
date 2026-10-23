@@ -352,6 +352,20 @@ log "=== Krok 9: manifests/istio-system ==="
 KC apply -k "$REPO_DIR/manifests/istio-system"
 ok "Gateway/Certificate zastosowane."
 
+# ---------- Krok 9.5: reczne utworzenie namespace davtro02 (WAZNE!) ----------
+# Bez tego ArgoCD z CreateNamespace=true moze nie zdazyc utworzyc namespace
+# przed uplywem 10 min (widac: "Namespace davtro02 nie powstal w 10 min").
+# Reczne utworzenie namespace PRZED Applications eliminuje ten problem.
+log "=== Krok 9.5: reczne utworzenie namespace davtro02 ==="
+if ! KC get ns davtro02 >/dev/null 2>&1; then
+  KC create namespace davtro02
+  ok "Namespace davtro02 utworzony."
+else
+  ok "Namespace davtro02 juz istnieje."
+fi
+KC label namespace davtro02 istio-injection=enabled --overwrite || true
+ok "Namespace davtro02: istio-injection=enabled."
+
 # ---------- Krok 10: ArgoCD Applications ----------
 log "=== Krok 10: ArgoCD Applications ==="
 if [ -f "$REPO_DIR/argocd/application.yaml" ]; then
@@ -363,11 +377,6 @@ fi
 ok "Applications zastosowane."
 
 # ---------- Krok 10.5: ArgoCD PVC health check (WAZNE!) ----------
-# Bez tego ArgoCD uznaje Pending PVC (WaitForFirstConsumer) za "niezdrowy"
-# i NIGDY nie przechodzi do kolejnej fali Sync Waves.
-# Efekt: Pody nie powstaja, PVC na zawsze Pending, Vault/Postgres nie wstaja.
-# Uzywamy get -o json | jq | apply (patch --type merge w tej wersji ArgoCD
-# nie dzialal niezawodnie - w logach bylo "[WARN] Nie udalo sie patchowac").
 log "=== Krok 10.5: ArgoCD PVC health check ==="
 ARGOCD_CM_TMP=$(mktemp)
 KC -n argocd get configmap argocd-cm -o json 2>/dev/null > "$ARGOCD_CM_TMP" || true
@@ -393,13 +402,6 @@ else
 fi
 
 # ---------- Krok 10.6: ArgoCD Certificate health check (WAZNE!) ----------
-# cert-manager podczas wystawiania certu ustawia Ready=False z reason=DoesNotExist
-# ("Issuing certificate as Secret does not exist"). ArgoCD domyslnie uznaje to
-# za Degraded i BLOKUJE cala fale sync-wave (widac: "waiting for healthy state
-# of cert-manager.io/Certificate/vault-tls"). Ten health check:
-#   Ready=True                     -> Healthy
-#   Ready=False + reason!=DoesNotExist -> Degraded (np. blad wystawiania)
-#   Ready=False + reason==DoesNotExist -> Progressing (czekaj dalej, nie blokuj)
 log "=== Krok 10.6: ArgoCD Certificate health check ==="
 ARGOCD_CM_TMP=$(mktemp)
 KC -n argocd get configmap argocd-cm -o json 2>/dev/null > "$ARGOCD_CM_TMP" || true
@@ -436,9 +438,6 @@ KC -n argocd rollout restart statefulset argo-cd-argocd-application-controller 2
 ok "ArgoCD health checki ustawione (PVC + Certificate)."
 
 # ---------- Krok 10.7: sprawdz pamiec w wezle ----------
-# Node z requests memory >= 90% nie zmiesci vault-0/postgres-db-0 (Pending: Insufficient memory).
-# AUTO_SCALE_DOWN=1 -> skrypt sam wstrzyma niekrytyczne Deploymenty.
-# AUTO_SCALE_DOWN=0 -> tylko ostrzeze i pokaze komendy.
 log "=== Krok 10.7: sprawdzam pamiec w wezle ==="
 
 NODE_NAME=$(KC get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
@@ -471,7 +470,6 @@ if [ -n "$NODE_NAME" ]; then
       sleep 10
     else
       warn "Ustaw AUTO_SCALE_DOWN=1, aby skrypt zrobil to automatycznie."
-      warn "Albo wykonaj powyzsze komendy recznie i uruchom skrypt ponownie."
     fi
   else
     ok "Node $NODE_NAME: requests memory = ${MEM_PCT:-?}% (OK)."
@@ -484,13 +482,11 @@ fi
 log "=== Krok 11: czekam na namespace davtro02 ==="
 
 NS_WAIT=0
-NS_MAX=120
+NS_MAX=60
 while ! KC get ns davtro02 >/dev/null 2>&1; do
   NS_WAIT=$((NS_WAIT+1))
   if [ "$NS_WAIT" -ge "$NS_MAX" ]; then
-    warn "Namespace davtro02 nie powstal w 10 min — ArgoCD sync mogl sie nie udac."
-    warn "Sprawdz: kubectl -n argocd get applications"
-    warn "         kubectl -n argocd describe application davtro-website | tail -20"
+    warn "Namespace davtro02 nie powstal w 5 min — ArgoCD sync mogl sie nie udac."
     break
   fi
   if [ $((NS_WAIT % 12)) -eq 0 ]; then
@@ -506,10 +502,7 @@ else
   warn "Pomijam Krok 11 — namespace davtro02 nie istnieje."
 fi
 
-# ---------- Krok 11.5: reczne utworzenie tymczasowego davtro-secrets ----------
-# Przerwanie blednego kola: Vault czeka na Postgresa, Postgres na davtro-secrets,
-# ESO czeka na Vaulta. Tymczasowy Secret pozwala Postgresowi wstac, a gdy Vault
-# wystartuje i vault-bootstrap wygeneruje prawdziwe sekrety, ESO nadpisze ten Secret.
+# ---------- Krok 11.5: tymczasowy davtro-secrets ----------
 log "=== Krok 11.5: tymczasowy davtro-secrets (przerwanie blednego kola) ==="
 
 if KC get ns davtro02 >/dev/null 2>&1; then
@@ -530,8 +523,7 @@ else
   warn "Brak namespace davtro02 — pomijam tymczasowy davtro-secrets."
 fi
 
-# ---------- Krok 11.6: GHCR pull secret (PRZED czekaniem na Pody!) ----------
-# Pody musza miec ghcr-pull ZANIM zaczna sie tworzyc, inaczej ImagePullBackOff.
+# ---------- Krok 11.6: GHCR pull secret ----------
 log "=== Krok 11.6: GHCR pull secret ==="
 
 if [ -z "${GHCR_USER:-}" ]; then
@@ -576,12 +568,9 @@ else
 fi
 
 # ---------- Krok 12: czekaj na vault-0 i postgres-db-0 (fala 0) ----------
-# UWAGA: NIE czekamy na "Running" w nieskonczonosc. Pending moze byc spowodowany
-# brakiem pamieci lub Pending PVC — pokazujemy diagnostyke i idziemy dalej.
 log "=== Krok 12: czekam na vault-0 i postgres-db-0 (fala 0) ==="
 
 if KC get ns davtro02 >/dev/null 2>&1; then
-  # Vault
   log "  czekam na vault-0..."
   VAULT_OK=0
   for i in $(seq 1 60); do
@@ -598,12 +587,10 @@ if KC get ns davtro02 >/dev/null 2>&1; then
     ok "vault-0 wystartowal (Running/PodInitializing)."
   else
     warn "vault-0 nie wstal w 5 min."
-    echo "--- Diagnostyka vault-0 ---"
     KC -n davtro02 describe pod vault-0 2>/dev/null | grep -A10 "Events:" | tail -12 || true
     KC -n davtro02 logs vault-0 -c istio-init --tail=15 2>/dev/null || true
   fi
 
-  # Postgres
   log "  czekam na postgres-db-0..."
   PG_OK=0
   for i in $(seq 1 60); do
@@ -620,7 +607,6 @@ if KC get ns davtro02 >/dev/null 2>&1; then
     ok "postgres-db-0 wystartowal (Running/PodInitializing)."
   else
     warn "postgres-db-0 nie wstal w 5 min."
-    echo "--- Diagnostyka postgres-db-0 ---"
     KC -n davtro02 describe pod postgres-db-0 2>/dev/null | grep -A10 "Events:" | tail -12 || true
   fi
 
@@ -630,17 +616,13 @@ else
 fi
 
 # ---------- Krok 12.5: diagnostyka Pending ----------
-# Dla kazdego Pending Poda pokaz Events + stan initContainerow.
-# To od razu mowi, czy problem to pamiec, istio-init, czy brak Secretu/ConfigMap.
 log "=== Krok 12.5: diagnostyka Pending ==="
 
 PENDING_PODS=$(KC -n davtro02 get pods --field-selector=status.phase=Pending -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
 if [ -n "$PENDING_PODS" ]; then
   for p in $PENDING_PODS; do
     warn "PENDING: $p"
-    echo "--- Events ---"
     KC -n davtro02 describe pod "$p" 2>/dev/null | grep -A10 "Events:" | tail -12 || true
-    echo "--- Init containers ---"
     KC -n davtro02 get pod "$p" -o jsonpath='{range .status.initContainerStatuses[*]}{.name}: {.state}{"\n"}{end}' 2>/dev/null || true
     echo
   done
@@ -651,36 +633,14 @@ fi
 # ---------- Krok 13: Weryfikacja ----------
 log "=== Krok 13: weryfikacja ==="
 echo
-echo "--- Wersje ---"
-istioctl version 2>/dev/null | head -3 || true
-echo
 echo "--- Pody w davtro02 ---"
 KC -n davtro02 get pods 2>/dev/null || true
 echo
 echo "--- PVC w davtro02 ---"
 KC -n davtro02 get pvc 2>/dev/null || true
 echo
-echo "--- PV z pustym nodeAffinity ---"
-KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' || echo "  (brak — OK)"
-echo
-echo "--- Tainty na wezle ---"
-KC get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}' 2>/dev/null || echo "  (brak)"
-echo
-echo "--- Toleracje hostpath-provisioner ---"
-KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || echo "  (brak)"
-echo
-echo "--- volumeBindingMode StorageClass microk8s-hostpath ---"
-KC get storageclass microk8s-hostpath -o jsonpath='{.volumeBindingMode}' 2>/dev/null || echo "  (brak)"
-echo
-echo "--- ClusterRole/ClusterRoleBinding microk8s-hostpath ---"
-KC get clusterrole microk8s-hostpath >/dev/null 2>&1 && echo "  ClusterRole: OK" || echo "  ClusterRole: BRAK"
-KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1 && echo "  ClusterRoleBinding: OK" || echo "  ClusterRoleBinding: BRAK"
-echo
-echo "--- Dashboard (svc) ---"
-KC get svc -A 2>/dev/null | grep -i dashboard || echo "  (brak svc/kubernetes-dashboard)"
-echo
-echo "--- Certyfikaty ---"
-KC -n davtro02 get certificate,secret 2>/dev/null | grep -E 'tls|NAME' || true
+echo "--- ArgoCD Applications ---"
+KC -n argocd get applications 2>/dev/null || true
 echo
 echo "--- Issuer/ClusterIssuer ---"
 KC -n davtro02 get issuer,clusterissuer 2>/dev/null || true
@@ -688,57 +648,14 @@ echo
 echo "--- cert-manager-vault-token ---"
 KC -n cert-manager get secret cert-manager-vault-token 2>/dev/null || echo "  (brak — vault-bootstrap jeszcze go nie utworzyl)"
 echo
-echo "--- Istio analyze ---"
-istioctl analyze -n davtro02 2>/dev/null || warn "istioctl analyze zglosil uwagi — sprawdz recznie."
-echo
-echo "--- Gateway/VirtualService ---"
-KC -n davtro02 get gateway,virtualservice 2>/dev/null || true
-echo
-echo "--- ArgoCD Applications ---"
-KC -n argocd get applications 2>/dev/null || true
-echo
-echo "--- ArgoCD CM health checks ---"
-echo "  PVC:"
-KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.kubernetes\.io__persistentvolumeclaim}' 2>/dev/null | head -c 100 || echo "    (brak)"
-echo
-echo "  Certificate:"
-KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}' 2>/dev/null | head -c 100 || echo "    (brak)"
-echo
-echo "--- Pending Pody (przyczyny) ---"
-for p in $(KC -n davtro02 get pods --field-selector=status.phase=Pending -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-  echo "  $p:"
-  KC -n davtro02 describe pod "$p" 2>/dev/null | grep -A3 "Events:" | tail -4 || true
-done
-echo
-echo "--- ImagePullBackOff ---"
-for p in $(KC -n davtro02 get pods -o jsonpath='{range .items[?(@.status.containerStatuses[*].state.waiting.reason=="ImagePullBackOff")]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
-  warn "  $p: ImagePullBackOff — sprawdz ghcr-pull i ServiceAccount"
-done
-echo
 
-# ---------- Krok 14: Znajdz Dashboard (nazwa + namespace) ----------
+# ---------- Krok 14: Dashboard ----------
 log "=== Krok 14: szukam Dashboardu ==="
-
-DASH_NS=""
-DASH_SVC=""
-
+DASH_NS=""; DASH_SVC=""
 if KC -n kube-system get svc kubernetes-dashboard >/dev/null 2>&1; then
   DASH_NS="kube-system"; DASH_SVC="kubernetes-dashboard"
 elif KC -n kubernetes-dashboard get svc kubernetes-dashboard-kong-proxy >/dev/null 2>&1; then
   DASH_NS="kubernetes-dashboard"; DASH_SVC="kubernetes-dashboard-kong-proxy"
-elif KC -n kubernetes-dashboard get svc kubernetes-dashboard >/dev/null 2>&1; then
-  DASH_NS="kubernetes-dashboard"; DASH_SVC="kubernetes-dashboard"
-else
-  DASH_LINE=$(KC get svc -A -l 'app.kubernetes.io/name=kubernetes-dashboard' -o jsonpath='{.items[0].metadata.namespace} {.items[0].metadata.name}' 2>/dev/null || true)
-  if [ -n "$DASH_LINE" ]; then
-    DASH_NS="${DASH_LINE%% *}"; DASH_SVC="${DASH_LINE##* }"
-  fi
-fi
-
-if [ -z "$DASH_NS" ] || [ -z "$DASH_SVC" ]; then
-  warn "Nie znaleziono zadnej uslugi Dashboardu."
-else
-  ok "Znaleziono Dashboard: $DASH_NS/$DASH_SVC"
 fi
 
 if [ -n "$DASH_NS" ] && [ -n "$DASH_SVC" ]; then
@@ -762,182 +679,67 @@ subjects:
   name: admin-user
   namespace: kube-system
 YAML
-
   DASH_TOKEN=$(KC -n kube-system create token admin-user --duration=999999h 2>/dev/null || true)
-
-  if [ -z "$DASH_TOKEN" ]; then
-    if KC -n kube-system get secret microk8s-dashboard-token >/dev/null 2>&1; then
-      DASH_TOKEN=$(KC -n kube-system get secret microk8s-dashboard-token \
-        -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
-    fi
-  fi
-
   if [ -n "$DASH_TOKEN" ]; then
-    echo
-    echo "${GREEN}=== Kubernetes Dashboard token (admin-user, kube-system) ===${NC}"
-    echo "$DASH_TOKEN"
-    echo
-  else
-    warn "Nie udalo sie wygenerowac tokenu Dashboard (admin-user)."
+    echo "${GREEN}=== Dashboard token ===${NC}"; echo "$DASH_TOKEN"; echo
   fi
 fi
 
 ARGOCD_PASS=$(KC -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)
 if [ -n "$ARGOCD_PASS" ]; then
-  echo "${GREEN}=== ArgoCD admin ===${NC}"
-  echo "Login: admin"
-  echo "Haslo: $ARGOCD_PASS"
-  echo
-else
-  warn "Brak argocd-initial-admin-secret (moze zostal usuniety)."
+  echo "${GREEN}=== ArgoCD admin ===${NC}"; echo "Login: admin"; echo "Haslo: $ARGOCD_PASS"; echo
 fi
 
-# ---------- Krok 15: port-forward Dashboard + ArgoCD (w tle) ----------
+# ---------- Krok 15: port-forward ----------
 log "=== Krok 15: port-forward Dashboard + ArgoCD ==="
-
 pkill -f 'port-forward.*10443' 2>/dev/null || true
 pkill -f 'port-forward.*argo-cd-argocd-server.*8080' 2>/dev/null || true
 sleep 1
 
-DASH_PID=""
-ARGOCD_PID=""
-
+DASH_PID=""; ARGOCD_PID=""
 if [ -n "$DASH_NS" ] && [ -n "$DASH_SVC" ]; then
-  KC -n "$DASH_NS" port-forward --address 0.0.0.0 \
-    "service/$DASH_SVC" 10443:443 >/tmp/pf-dashboard.log 2>&1 &
+  KC -n "$DASH_NS" port-forward --address 0.0.0.0 "service/$DASH_SVC" 10443:443 >/tmp/pf-dashboard.log 2>&1 &
   DASH_PID=$!
-  ok "Dashboard: https://<IP>:10443 (PID $DASH_PID, ns $DASH_NS, svc $DASH_SVC)"
-else
-  warn "Dashboard: pomijam port-forward (nie znaleziono uslugi)."
+  ok "Dashboard: https://<IP>:10443 (PID $DASH_PID)"
 fi
-
-KC -n argocd port-forward --address 0.0.0.0 \
-  service/argo-cd-argocd-server 8080:443 >/tmp/pf-argocd.log 2>&1 &
+KC -n argocd port-forward --address 0.0.0.0 service/argo-cd-argocd-server 8080:443 >/tmp/pf-argocd.log 2>&1 &
 ARGOCD_PID=$!
 ok "ArgoCD: https://<IP>:8080 (PID $ARGOCD_PID)"
 
 # ---------- Krok 16: Podsumowanie ----------
 log "=== Krok 16: podsumowanie ==="
-
 IP=$(ip -4 addr show 2>/dev/null | awk '/inet / && $2 !~ /^127\./ {print $2}' | cut -d/ -f1 | head -1)
-
-NS_STATUS="OK"
-KC get ns davtro02 >/dev/null 2>&1 || NS_STATUS="BRAK"
-
-APP_STATUS="OK"
-if KC -n argocd get applications >/dev/null 2>&1; then
-  APP_OUT=$(KC -n argocd get applications -o wide 2>/dev/null || true)
-else
-  APP_OUT="(brak argocd)"
-fi
-
 cat <<EOF
-
 ${GREEN}=== GOTOWE ===${NC}
+IP: ${IP:-<nie wykryto>}
 
-IP tego hosta w LAN: ${IP:-<nie wykryto>}
-Namespace davtro02: ${NS_STATUS}
-RBAC: ${ENABLE_RBAC} (1=wlaczone, 0=wylaczone)
-AUTO_SCALE_DOWN: ${AUTO_SCALE_DOWN}
-GitHub: ${GHCR_USER}/${GHCR_REPO}
-
-${APP_OUT}
-
-Dodaj do /etc/hosts na kliencie:
-  ${IP:-<IP>}  davtro.local grafana.davtro.local loki.davtro.local tempo.davtro.local prometheus.davtro.local pgadmin.davtro.local kafka-ui.davtro.local spring.davtro.local spark.davtro.local
-
-Testy:
-  curl -k --resolve grafana.davtro.local:8443:${IP:-127.0.0.1} https://grafana.davtro.local:8443/
-  curl -k --resolve loki.davtro.local:8443:${IP:-127.0.0.1}    https://loki.davtro.local:8443/ready
-
-Dashboard:
-  https://${IP:-127.0.0.1}:10443/  (token z Kroku 14)
-
-ArgoCD:
-  https://${IP:-127.0.0.1}:8080/   (admin / haslo z Kroku 14)
-
-GHCR pull secret:
-  Sprawdz: kubectl -n davtro02 get secret ghcr-pull
-  Pakiety GHCR musza byc PUBLIC albo ustaw ghcr-pull recznie.
-
-Logi port-forward:
-  /tmp/pf-dashboard.log
-  /tmp/pf-argocd.log
-
-Jesli PVC sa Pending (WaitForFirstConsumer — to NORMALNE):
-  kubectl get storageclass microk8s-hostpath -o jsonpath='{.volumeBindingMode}'
-  # Powinno byc "WaitForFirstConsumer". PVC bedzie Pending, dopoki Pod nie powstanie.
-
-Jesli ArgoCD utknal w OutOfSync/Degraded:
-  kubectl -n argocd get applications
-  kubectl -n argocd describe application davtro-website | tail -30
-  # Sprawdz, czy Krok 10.5 (PVC health check) sie wykonal:
-  kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.kubernetes\.io__persistentvolumeclaim}'
-  # Sprawdz, czy Krok 10.6 (Certificate health check) sie wykonal:
-  kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}'
+Jesli namespace davtro02 nie istnieje:
+  # Krok 9.5 powinien go utworzyc. Sprawdz recznie:
+  kubectl get ns davtro02
+  # Jesli nie ma — utworz recznie:
+  kubectl create namespace davtro02
+  kubectl label namespace davtro02 istio-injection=enabled --overwrite
+  # Potem wymus sync:
+  kubectl -n argocd patch application davtro-website --type merge -p '{"operation":{"sync":{"revision":"HEAD"}}}'
 
 Jesli ArgoCD czeka na "healthy state of cert-manager.io/Certificate/vault-tls":
   # Krok 10.6 powinien to naprawic. Sprawdz recznie:
   kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}'
-  # Jesli pusty — uruchom Krok 10.6 recznie:
-  #   (uzyj get -o json | jq | apply, nie kubectl patch)
-  # Nastepnie zrestartuj ArgoCD:
-  #   kubectl -n argocd rollout restart deploy argo-cd-argocd-server
-  #   kubectl -n argocd rollout restart statefulset argo-cd-argocd-application-controller
 
 Jesli vault-issuer jest False:
-  # To NORMALNE — vault-bootstrap tworzy cert-manager-vault-token.
+  # To normalne — vault-bootstrap tworzy cert-manager-vault-token.
   # Poczekaj, az vault-bootstrap wystartuje i wykona DONE:
   kubectl -n davtro02 get deploy vault-bootstrap
-  kubectl -n davtro02 logs deploy/vault-bootstrap --tail=50 | grep -i "DONE\\|token"
-  # Po DONE sprawdz:
-  kubectl -n cert-manager get secret cert-manager-vault-token
-  kubectl -n davtro02 get clusterissuer vault-issuer
+  kubectl -n davtro02 logs deploy/vault-bootstrap --tail=50 | grep -i "DONE\|token"
 
-Jesli Vault lub Postgres nie wstaly:
-  kubectl -n davtro02 describe pod vault-0 | tail -20
-  kubectl -n davtro02 describe pod postgres-db-0 | tail -20
-  # Sprawdz pamiec: kubectl describe node parrot | grep -A5 "Allocated resources"
-  # Jesli memory >90% - zwolnij: kubectl -n davtro02 scale deploy spark-master grafana loki --replicas=0
-  # Albo uruchom skrypt z AUTO_SCALE_DOWN=1
-
-Jesli vault-0 utknal na istio-init:
-  # Sprawdz, czy vault.yaml ma sidecar.istio.io/inject: "false"
-  grep -n 'sidecar.istio.io/inject' manifests/base/vault.yaml
-  # Jesli nie ma — dodaj i zsynchronizuj ArgoCD.
-
-Jesli Dashboard nie dziala:
-  microk8s kubectl get svc -A | grep -i dashboard
-
-Jesli namespace davtro02 = BRAK:
-  kubectl -n argocd get applications
-  kubectl -n argocd describe application davtro-website | tail -20
-
-Nacisnij Ctrl+C, aby zakonczyc port-forwardy i zamknac skrypt.
+Nacisnij Ctrl+C, aby zakonczyc port-forwardy.
 EOF
 
 # ---------- Krok 17: wait ----------
 if [ "$SKIP_WAIT" = "1" ]; then
-  log "=== Krok 17: SKIP_WAIT=1 — skrypt konczy sie bez czekania ==="
-  warn "Port-forwardy dzialaja w tle (PID: DASH=$DASH_PID ARGOCD=$ARGOCD_PID)."
-  warn "Zatrzymanie: pkill -f 'port-forward'"
+  log "SKIP_WAIT=1 — koncze."
   exit 0
 fi
-
-cleanup() {
-  echo
-  log "Zatrzymuje port-forwardy..."
-  [ -n "$DASH_PID" ]   && kill "$DASH_PID"   2>/dev/null || true
-  [ -n "$ARGOCD_PID" ] && kill "$ARGOCD_PID" 2>/dev/null || true
-  wait 2>/dev/null || true
-  ok "Zakonczone."
-  exit 0
-}
+cleanup() { echo; log "Zatrzymuje port-forwardy..."; [ -n "$DASH_PID" ] && kill "$DASH_PID" 2>/dev/null; [ -n "$ARGOCD_PID" ] && kill "$ARGOCD_PID" 2>/dev/null; ok "Zakonczone."; exit 0; }
 trap cleanup INT TERM
-
-log "=== Krok 17: czekam na port-forwardy (Ctrl+C konczy, SKIP_WAIT=1 pomija) ==="
-if [ -n "$DASH_PID" ] || [ -n "$ARGOCD_PID" ]; then
-  wait "$DASH_PID" "$ARGOCD_PID" 2>/dev/null || true
-else
-  warn "Brak port-forwardow do pilnowania — skrypt konczy sie."
-fi
+wait "$DASH_PID" "$ARGOCD_PID" 2>/dev/null || true
