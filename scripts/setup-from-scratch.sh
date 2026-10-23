@@ -315,9 +315,6 @@ ok "ArgoCD gotowy."
 # ---------- Krok 8.5: ArgoCD repo credentials ----------
 log "=== Krok 8.5: ArgoCD repo credentials ==="
 
-GHCR_USER="${GHCR_USER:-exea-centrum}"
-GHCR_REPO="${GHCR_REPO:-website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02}"
-
 REPO_URL="https://github.com/${GHCR_USER}/${GHCR_REPO}.git"
 log "Repo URL: $REPO_URL"
 
@@ -360,10 +357,23 @@ if [ -f "$REPO_DIR/argocd/application-istio.yaml" ]; then
 fi
 ok "Applications zastosowane."
 
-# ---------- Krok 11: czekaj na Vault + Postgres (fala 0) ----------
-log "=== Krok 11: czekam na Vault + Postgres (fala 0) ==="
+# ---------- Krok 10.5: ArgoCD PVC health check (WAZNE!) ----------
+# Bez tego ArgoCD uznaje Pending PVC (WaitForFirstConsumer) za "niezdrowy"
+# i NIGDY nie przechodzi do kolejnej fali Sync Waves.
+# Efekt: Pody nie powstaja, PVC na zawsze Pending, Vault/Postgres nie wstaja.
+log "=== Krok 10.5: ArgoCD PVC health check ==="
+KC -n argocd patch configmap argocd-cm --type merge -p '{
+  "data": {
+    "resource.customizations.health.kubernetes.io__persistentvolumeclaim": "hs = {}\nif obj.status ~= nil and obj.status.phase == \"Bound\" then\n  hs.status = \"Healthy\"\n  hs.message = \"PVC is bound\"\nelseif obj.status ~= nil and obj.status.phase == \"Pending\" then\n  hs.status = \"Healthy\"\n  hs.message = \"PVC pending (WaitForFirstConsumer) - treated as healthy\"\nelse\n  hs.status = \"Progressing\"\n  hs.message = \"PVC status: \" .. (obj.status and obj.status.phase or \"unknown\")\nend\nreturn hs"
+  }
+}' 2>/dev/null || warn "Nie udalo sie patchowac argocd-cm (PVC health check)."
+KC -n argocd rollout restart deployment argocd-server 2>/dev/null || true
+KC -n argocd rollout restart statefulset argocd-application-controller 2>/dev/null || true
+ok "ArgoCD PVC health check ustawiony (Pending PVC = Healthy)."
 
-# Czekaj na namespace davtro02
+# ---------- Krok 11: czekaj na namespace davtro02 ----------
+log "=== Krok 11: czekam na namespace davtro02 ==="
+
 NS_WAIT=0
 NS_MAX=120
 while ! KC get ns davtro02 >/dev/null 2>&1; do
@@ -382,59 +392,38 @@ done
 
 if KC get ns davtro02 >/dev/null 2>&1; then
   KC label namespace davtro02 istio-injection=enabled --overwrite || warn "Nie udalo sie oznaczyc namespace."
-
-  # Czekaj na vault-0 (fala 0)
-  log "  czekam na vault-0 (fala 0)..."
-  VAULT_WAIT=0
-  VAULT_MAX=120
-  while ! KC -n davtro02 get pod vault-0 2>/dev/null | grep -q Running; do
-    VAULT_WAIT=$((VAULT_WAIT+1))
-    if [ "$VAULT_WAIT" -ge "$VAULT_MAX" ]; then
-      warn "vault-0 nie wstal w 10 min — sprawdz: kubectl -n davtro02 describe pod vault-0 | tail -20"
-      break
-    fi
-    if [ $((VAULT_WAIT % 12)) -eq 0 ]; then
-      log "    vault-0... ($((VAULT_WAIT*5))s)"
-    fi
-    sleep 5
-  done
-
-  # Czekaj na postgres-db-0 (fala 0)
-  log "  czekam na postgres-db-0 (fala 0)..."
-  PG_WAIT=0
-  PG_MAX=120
-  while ! KC -n davtro02 get pod postgres-db-0 2>/dev/null | grep -q Running; do
-    PG_WAIT=$((PG_WAIT+1))
-    if [ "$PG_WAIT" -ge "$PG_MAX" ]; then
-      warn "postgres-db-0 nie wstal w 10 min — sprawdz: kubectl -n davtro02 describe pod postgres-db-0 | tail -20"
-      break
-    fi
-    if [ $((PG_WAIT % 12)) -eq 0 ]; then
-      log "    postgres-db-0... ($((PG_WAIT*5))s)"
-    fi
-    sleep 5
-  done
-
-  # Czekaj na vault-bootstrap (fala 1) — ale nie blokuj, jesli nie wstanie
-  log "  czekam na vault-bootstrap (fala 1)..."
-  VB_WAIT=0
-  VB_MAX=60
-  while ! KC -n davtro02 get deploy vault-bootstrap 2>/dev/null | grep -q '1/1'; do
-    VB_WAIT=$((VB_WAIT+1))
-    if [ "$VB_WAIT" -ge "$VB_MAX" ]; then
-      warn "vault-bootstrap nie wstal w 5 min — sprawdz: kubectl -n davtro02 logs deploy/vault-bootstrap --tail=20"
-      break
-    fi
-    sleep 5
-  done
-
-  ok "Vault + Postgres gotowe (fala 0), vault-bootstrap (fala 1) sprawdzony."
+  ok "Namespace davtro02 istnieje, istio-injection=enabled."
 else
   warn "Pomijam Krok 11 — namespace davtro02 nie istnieje."
 fi
 
-# ---------- Krok 12: GHCR pull secret ----------
-log "=== Krok 12: GHCR pull secret ==="
+# ---------- Krok 11.5: reczne utworzenie tymczasowego davtro-secrets ----------
+# Przerwanie blednego kola: Vault czeka na Postgresa, Postgres na davtro-secrets,
+# ESO czeka na Vaulta. Tymczasowy Secret pozwala Postgresowi wstac, a gdy Vault
+# wystartuje i vault-bootstrap wygeneruje prawdziwe sekrety, ESO nadpisze ten Secret.
+log "=== Krok 11.5: tymczasowy davtro-secrets (przerwanie blednego kola) ==="
+
+if KC get ns davtro02 >/dev/null 2>&1; then
+  if ! KC -n davtro02 get secret davtro-secrets >/dev/null 2>&1; then
+    KC -n davtro02 create secret generic davtro-secrets \
+      --from-literal=DB_USER=davtro \
+      --from-literal=DB_PASSWORD=tymczasowe \
+      --from-literal=SMTP_USER='' \
+      --from-literal=SMTP_PASSWORD='' \
+      --from-literal=ADMIN_PASSWORD=tymczasowe \
+      --from-literal=JWT_SECRET=tymczasowe \
+      2>/dev/null && ok "Tymczasowy davtro-secrets utworzony (ESO nadpisze go pozniej)." \
+      || warn "Nie udalo sie utworzyc tymczasowego davtro-secrets."
+  else
+    ok "davtro-secrets juz istnieje — pomijam."
+  fi
+else
+  warn "Brak namespace davtro02 — pomijam tymczasowy davtro-secrets."
+fi
+
+# ---------- Krok 11.6: GHCR pull secret (PRZED czekaniem na Pody!) ----------
+# Pody musza miec ghcr-pull ZANIM zaczna sie tworzyc, inaczej ImagePullBackOff.
+log "=== Krok 11.6: GHCR pull secret ==="
 
 if [ -z "${GHCR_USER:-}" ]; then
   echo
@@ -452,7 +441,6 @@ else
     echo "Wymagane uprawnienia: read:packages (i read:org, jesli obraz w organizacji)."
     echo "Utworz go: https://github.com/settings/tokens"
     echo "Jesli pakiety GHCR sa PUBLIC — nacisnij Enter, aby pominac."
-    echo "UWAGA: w GitHub Actions ten sam PAT jest jako GHCR_PAT_02."
     echo
     read -r -s -p "Wklej GHCR_PAT (Enter=pomin): " GHCR_PAT
     echo
@@ -475,11 +463,61 @@ else
         -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}' 2>/dev/null || true
       ok "ServiceAccount $sa -> ghcr-pull."
     done
-
-    log "Restart deploy,sts w davtro02 (zeby pociagnely ghcr-pull)..."
-    KC -n davtro02 rollout restart deploy,sts 2>/dev/null || warn "Brak deploy/sts w davtro02 — restart pominiety."
-    ok "Pody zrestartowane (jesli istnialy)."
   fi
+fi
+
+# ---------- Krok 12: czekaj na vault-0 i postgres-db-0 (fala 0) ----------
+# UWAGA: NIE czekamy na "Running" w nieskonczonosc. Pending moze byc spowodowany
+# brakiem pamieci lub Pending PVC — pokazujemy diagnostic i idziemy dalej.
+log "=== Krok 12: czekam na vault-0 i postgres-db-0 (fala 0) ==="
+
+if KC get ns davtro02 >/dev/null 2>&1; then
+  # Vault
+  log "  czekam na vault-0..."
+  VAULT_OK=0
+  for i in $(seq 1 60); do
+    if KC -n davtro02 get pod vault-0 2>/dev/null | grep -q Running; then
+      VAULT_OK=1
+      break
+    fi
+    if [ $((i % 12)) -eq 0 ]; then
+      log "    vault-0... ($((i*5))s)"
+    fi
+    sleep 5
+  done
+  if [ "$VAULT_OK" = "1" ]; then
+    ok "vault-0 Running."
+  else
+    warn "vault-0 nie wstal w 5 min."
+    echo "--- Diagnostyka vault-0 ---"
+    KC -n davtro02 describe pod vault-0 2>/dev/null | tail -20 || true
+    KC -n davtro02 logs vault-0 -c istio-init --tail=15 2>/dev/null || true
+  fi
+
+  # Postgres
+  log "  czekam na postgres-db-0..."
+  PG_OK=0
+  for i in $(seq 1 60); do
+    if KC -n davtro02 get pod postgres-db-0 2>/dev/null | grep -q Running; then
+      PG_OK=1
+      break
+    fi
+    if [ $((i % 12)) -eq 0 ]; then
+      log "    postgres-db-0... ($((i*5))s)"
+    fi
+    sleep 5
+  done
+  if [ "$PG_OK" = "1" ]; then
+    ok "postgres-db-0 Running."
+  else
+    warn "postgres-db-0 nie wstal w 5 min."
+    echo "--- Diagnostyka postgres-db-0 ---"
+    KC -n davtro02 describe pod postgres-db-0 2>/dev/null | tail -20 || true
+  fi
+
+  ok "Krok 12 zakonczony (Vault=$VAULT_OK Postgres=$PG_OK)."
+else
+  warn "Pomijam Krok 12 — namespace davtro02 nie istnieje."
 fi
 
 # ---------- Krok 13: Weryfikacja ----------
@@ -524,6 +562,12 @@ KC -n davtro02 get gateway,virtualservice 2>/dev/null || true
 echo
 echo "--- ArgoCD Applications ---"
 KC -n argocd get applications 2>/dev/null || true
+echo
+echo "--- Pending Pody (przyczyny) ---"
+for p in $(KC -n davtro02 get pods --field-selector=status.phase=Pending -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+  echo "  $p:"
+  KC -n davtro02 describe pod "$p" 2>/dev/null | grep -A3 "Events:" | tail -4 || true
+done
 echo
 
 # ---------- Krok 14: Znajdz Dashboard (nazwa + namespace) ----------
@@ -673,15 +717,26 @@ Logi port-forward:
   /tmp/pf-dashboard.log
   /tmp/pf-argocd.log
 
-Jesli PVC sa Pending (hostpath bug):
+Jesli PVC sa Pending (WaitForFirstConsumer — to NORMALNE):
   kubectl get storageclass microk8s-hostpath -o jsonpath='{.volumeBindingMode}'
-  # Powinno byc "WaitForFirstConsumer" (Krok 2).
+  # Powinno byc "WaitForFirstConsumer". PVC bedzie Pending, dopoki Pod nie powstanie.
+
+Jesli ArgoCD utknal w OutOfSync/Degraded:
+  kubectl -n argocd get applications
+  kubectl -n argocd describe application davtro-website | tail -30
+  # Sprawdz, czy Krok 10.5 (PVC health check) sie wykonal:
+  kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.kubernetes\.io__persistentvolumeclaim}'
 
 Jesli Vault lub Postgres nie wstaly:
   kubectl -n davtro02 describe pod vault-0 | tail -20
   kubectl -n davtro02 describe pod postgres-db-0 | tail -20
   # Sprawdz pamiec: kubectl describe node parrot | grep -A5 "Allocated resources"
   # Jesli memory >90% - zwolnij: kubectl -n davtro02 scale deploy spark-master grafana loki --replicas=0
+
+Jesli vault-0 utknal na istio-init:
+  # Sprawdz, czy vault.yaml ma sidecar.istio.io/inject: "false"
+  grep -n 'sidecar.istio.io/inject' manifests/base/vault.yaml
+  # Jesli nie ma — dodaj i zsynchronizuj ArgoCD.
 
 Jesli Dashboard nie dziala:
   microk8s kubectl get svc -A | grep -i dashboard
