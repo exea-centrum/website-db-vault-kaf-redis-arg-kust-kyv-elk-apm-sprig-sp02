@@ -366,15 +366,31 @@ ok "Applications zastosowane."
 # Bez tego ArgoCD uznaje Pending PVC (WaitForFirstConsumer) za "niezdrowy"
 # i NIGDY nie przechodzi do kolejnej fali Sync Waves.
 # Efekt: Pody nie powstaja, PVC na zawsze Pending, Vault/Postgres nie wstaja.
+# Uzywamy get -o json | jq | apply (patch --type merge w tej wersji ArgoCD
+# nie dzialal niezawodnie - w logach bylo "[WARN] Nie udalo sie patchowac").
 log "=== Krok 10.5: ArgoCD PVC health check ==="
-KC -n argocd patch configmap argocd-cm --type merge -p '{
-  "data": {
-    "resource.customizations.health.kubernetes.io__persistentvolumeclaim": "hs = {}\nif obj.status ~= nil and obj.status.phase == \"Bound\" then\n  hs.status = \"Healthy\"\n  hs.message = \"PVC is bound\"\nelseif obj.status ~= nil and obj.status.phase == \"Pending\" then\n  hs.status = \"Healthy\"\n  hs.message = \"PVC pending (WaitForFirstConsumer) - treated as healthy\"\nelse\n  hs.status = \"Progressing\"\n  hs.message = \"PVC status: \" .. (obj.status and obj.status.phase or \"unknown\")\nend\nreturn hs"
-  }
-}' 2>/dev/null || warn "Nie udalo sie patchowac argocd-cm (PVC health check)."
-KC -n argocd rollout restart deployment argocd-server 2>/dev/null || true
-KC -n argocd rollout restart statefulset argocd-application-controller 2>/dev/null || true
-ok "ArgoCD PVC health check ustawiony (Pending PVC = Healthy)."
+ARGOCD_CM_TMP=$(mktemp)
+KC -n argocd get configmap argocd-cm -o json 2>/dev/null > "$ARGOCD_CM_TMP" || true
+if [ -s "$ARGOCD_CM_TMP" ]; then
+  PVC_HEALTH='hs = {}
+if obj.status ~= nil and obj.status.phase == "Bound" then
+  hs.status = "Healthy"
+  hs.message = "PVC is bound"
+elseif obj.status ~= nil and obj.status.phase == "Pending" then
+  hs.status = "Healthy"
+  hs.message = "PVC pending (WaitForFirstConsumer) - treated as healthy"
+else
+  hs.status = "Progressing"
+  hs.message = "PVC status: " .. (obj.status and obj.status.phase or "unknown")
+end
+return hs'
+  jq --arg h "$PVC_HEALTH" '.data["resource.customizations.health.kubernetes.io__persistentvolumeclaim"] = $h' \
+    "$ARGOCD_CM_TMP" | KC apply -f - 2>/dev/null && ok "PVC health check ustawiony." \
+    || warn "Nie udalo sie ustawic PVC health check."
+  rm -f "$ARGOCD_CM_TMP"
+else
+  warn "argocd-cm nie istnieje — pomijam PVC health check."
+fi
 
 # ---------- Krok 10.6: ArgoCD Certificate health check (WAZNE!) ----------
 # cert-manager podczas wystawiania certu ustawia Ready=False z reason=DoesNotExist
@@ -385,14 +401,39 @@ ok "ArgoCD PVC health check ustawiony (Pending PVC = Healthy)."
 #   Ready=False + reason!=DoesNotExist -> Degraded (np. blad wystawiania)
 #   Ready=False + reason==DoesNotExist -> Progressing (czekaj dalej, nie blokuj)
 log "=== Krok 10.6: ArgoCD Certificate health check ==="
-KC -n argocd patch configmap argocd-cm --type merge -p '{
-  "data": {
-    "resource.customizations.health.cert-manager.io_Certificate": "hs = {}\nif obj.status ~= nil and obj.status.conditions ~= nil then\n  for i, condition in ipairs(obj.status.conditions) do\n    if condition.type == \"Ready\" and condition.status == \"True\" then\n      hs.status = \"Healthy\"\n      hs.message = condition.message\n      return hs\n    end\n    if condition.type == \"Ready\" and condition.status == \"False\" and condition.reason ~= \"DoesNotExist\" then\n      hs.status = \"Degraded\"\n      hs.message = condition.message\n      return hs\n    end\n  end\nend\nhs.status = \"Progressing\"\nhs.message = \"Waiting for certificate\"\nreturn hs"
-  }
-}' 2>/dev/null || warn "Nie udalo sie patchowac argocd-cm (Certificate health check)."
-KC -n argocd rollout restart deployment argocd-server 2>/dev/null || true
-KC -n argocd rollout restart statefulset argocd-application-controller 2>/dev/null || true
-ok "ArgoCD Certificate health check ustawiony (DoesNotExist = Progressing)."
+ARGOCD_CM_TMP=$(mktemp)
+KC -n argocd get configmap argocd-cm -o json 2>/dev/null > "$ARGOCD_CM_TMP" || true
+if [ -s "$ARGOCD_CM_TMP" ]; then
+  CERT_HEALTH='hs = {}
+if obj.status ~= nil and obj.status.conditions ~= nil then
+  for i, condition in ipairs(obj.status.conditions) do
+    if condition.type == "Ready" and condition.status == "True" then
+      hs.status = "Healthy"
+      hs.message = condition.message
+      return hs
+    end
+    if condition.type == "Ready" and condition.status == "False" and condition.reason ~= "DoesNotExist" then
+      hs.status = "Degraded"
+      hs.message = condition.message
+      return hs
+    end
+  end
+end
+hs.status = "Progressing"
+hs.message = "Waiting for certificate"
+return hs'
+  jq --arg h "$CERT_HEALTH" '.data["resource.customizations.health.cert-manager.io_Certificate"] = $h' \
+    "$ARGOCD_CM_TMP" | KC apply -f - 2>/dev/null && ok "Certificate health check ustawiony." \
+    || warn "Nie udalo sie ustawic Certificate health check."
+  rm -f "$ARGOCD_CM_TMP"
+else
+  warn "argocd-cm nie istnieje — pomijam Certificate health check."
+fi
+
+# Restart ArgoCD (nazwy z prefiksem argo-cd- z Helm chartu!)
+KC -n argocd rollout restart deployment argo-cd-argocd-server 2>/dev/null || true
+KC -n argocd rollout restart statefulset argo-cd-argocd-application-controller 2>/dev/null || true
+ok "ArgoCD health checki ustawione (PVC + Certificate)."
 
 # ---------- Krok 10.7: sprawdz pamiec w wezle ----------
 # Node z requests memory >= 90% nie zmiesci vault-0/postgres-db-0 (Pending: Insufficient memory).
@@ -641,6 +682,12 @@ echo
 echo "--- Certyfikaty ---"
 KC -n davtro02 get certificate,secret 2>/dev/null | grep -E 'tls|NAME' || true
 echo
+echo "--- Issuer/ClusterIssuer ---"
+KC -n davtro02 get issuer,clusterissuer 2>/dev/null || true
+echo
+echo "--- cert-manager-vault-token ---"
+KC -n cert-manager get secret cert-manager-vault-token 2>/dev/null || echo "  (brak — vault-bootstrap jeszcze go nie utworzyl)"
+echo
 echo "--- Istio analyze ---"
 istioctl analyze -n davtro02 2>/dev/null || warn "istioctl analyze zglosil uwagi — sprawdz recznie."
 echo
@@ -649,6 +696,13 @@ KC -n davtro02 get gateway,virtualservice 2>/dev/null || true
 echo
 echo "--- ArgoCD Applications ---"
 KC -n argocd get applications 2>/dev/null || true
+echo
+echo "--- ArgoCD CM health checks ---"
+echo "  PVC:"
+KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.kubernetes\.io__persistentvolumeclaim}' 2>/dev/null | head -c 100 || echo "    (brak)"
+echo
+echo "  Certificate:"
+KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}' 2>/dev/null | head -c 100 || echo "    (brak)"
 echo
 echo "--- Pending Pody (przyczyny) ---"
 for p in $(KC -n davtro02 get pods --field-selector=status.phase=Pending -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
@@ -825,7 +879,20 @@ Jesli ArgoCD utknal w OutOfSync/Degraded:
 Jesli ArgoCD czeka na "healthy state of cert-manager.io/Certificate/vault-tls":
   # Krok 10.6 powinien to naprawic. Sprawdz recznie:
   kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}'
-  # Jesli pusty — uruchom Krok 10.6 recznie (patch argocd-cm + rollout restart argocd-server).
+  # Jesli pusty — uruchom Krok 10.6 recznie:
+  #   (uzyj get -o json | jq | apply, nie kubectl patch)
+  # Nastepnie zrestartuj ArgoCD:
+  #   kubectl -n argocd rollout restart deploy argo-cd-argocd-server
+  #   kubectl -n argocd rollout restart statefulset argo-cd-argocd-application-controller
+
+Jesli vault-issuer jest False:
+  # To NORMALNE — vault-bootstrap tworzy cert-manager-vault-token.
+  # Poczekaj, az vault-bootstrap wystartuje i wykona DONE:
+  kubectl -n davtro02 get deploy vault-bootstrap
+  kubectl -n davtro02 logs deploy/vault-bootstrap --tail=50 | grep -i "DONE\\|token"
+  # Po DONE sprawdz:
+  kubectl -n cert-manager get secret cert-manager-vault-token
+  kubectl -n davtro02 get clusterissuer vault-issuer
 
 Jesli Vault lub Postgres nie wstaly:
   kubectl -n davtro02 describe pod vault-0 | tail -20
