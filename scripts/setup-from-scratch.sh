@@ -215,7 +215,6 @@ fi
 
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
 
-# Weryfikacja toleracji
 VERIFY_TOL=$(KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || true)
 if echo "$VERIFY_TOL" | grep -q 'control-plane'; then
   ok "hostpath-provisioner ma toleracje na control-plane."
@@ -223,7 +222,6 @@ else
   warn "hostpath-provisioner NIE ma toleracji na control-plane — sprawdz recznie."
 fi
 
-# Czekaj, az provisioner wstanie
 log "Czekam na hostpath-provisioner..."
 HP_OK=0
 for i in $(seq 1 30); do
@@ -362,9 +360,10 @@ if [ -f "$REPO_DIR/argocd/application-istio.yaml" ]; then
 fi
 ok "Applications zastosowane."
 
-# ---------- Krok 11: istio-injection + restart ----------
-log "=== Krok 11: istio-injection + restart ==="
+# ---------- Krok 11: czekaj na Vault + Postgres (fala 0) ----------
+log "=== Krok 11: czekam na Vault + Postgres (fala 0) ==="
 
+# Czekaj na namespace davtro02
 NS_WAIT=0
 NS_MAX=120
 while ! KC get ns davtro02 >/dev/null 2>&1; do
@@ -383,8 +382,53 @@ done
 
 if KC get ns davtro02 >/dev/null 2>&1; then
   KC label namespace davtro02 istio-injection=enabled --overwrite || warn "Nie udalo sie oznaczyc namespace."
-  KC -n davtro02 rollout restart deploy,sts 2>/dev/null || warn "Brak deploy/sts w davtro02 (jeszcze) — restart pominiety."
-  ok "Namespace oznaczony, restart wykonany."
+
+  # Czekaj na vault-0 (fala 0)
+  log "  czekam na vault-0 (fala 0)..."
+  VAULT_WAIT=0
+  VAULT_MAX=120
+  while ! KC -n davtro02 get pod vault-0 2>/dev/null | grep -q Running; do
+    VAULT_WAIT=$((VAULT_WAIT+1))
+    if [ "$VAULT_WAIT" -ge "$VAULT_MAX" ]; then
+      warn "vault-0 nie wstal w 10 min — sprawdz: kubectl -n davtro02 describe pod vault-0 | tail -20"
+      break
+    fi
+    if [ $((VAULT_WAIT % 12)) -eq 0 ]; then
+      log "    vault-0... ($((VAULT_WAIT*5))s)"
+    fi
+    sleep 5
+  done
+
+  # Czekaj na postgres-db-0 (fala 0)
+  log "  czekam na postgres-db-0 (fala 0)..."
+  PG_WAIT=0
+  PG_MAX=120
+  while ! KC -n davtro02 get pod postgres-db-0 2>/dev/null | grep -q Running; do
+    PG_WAIT=$((PG_WAIT+1))
+    if [ "$PG_WAIT" -ge "$PG_MAX" ]; then
+      warn "postgres-db-0 nie wstal w 10 min — sprawdz: kubectl -n davtro02 describe pod postgres-db-0 | tail -20"
+      break
+    fi
+    if [ $((PG_WAIT % 12)) -eq 0 ]; then
+      log "    postgres-db-0... ($((PG_WAIT*5))s)"
+    fi
+    sleep 5
+  done
+
+  # Czekaj na vault-bootstrap (fala 1) — ale nie blokuj, jesli nie wstanie
+  log "  czekam na vault-bootstrap (fala 1)..."
+  VB_WAIT=0
+  VB_MAX=60
+  while ! KC -n davtro02 get deploy vault-bootstrap 2>/dev/null | grep -q '1/1'; do
+    VB_WAIT=$((VB_WAIT+1))
+    if [ "$VB_WAIT" -ge "$VB_MAX" ]; then
+      warn "vault-bootstrap nie wstal w 5 min — sprawdz: kubectl -n davtro02 logs deploy/vault-bootstrap --tail=20"
+      break
+    fi
+    sleep 5
+  done
+
+  ok "Vault + Postgres gotowe (fala 0), vault-bootstrap (fala 1) sprawdzony."
 else
   warn "Pomijam Krok 11 — namespace davtro02 nie istnieje."
 fi
@@ -478,6 +522,9 @@ echo
 echo "--- Gateway/VirtualService ---"
 KC -n davtro02 get gateway,virtualservice 2>/dev/null || true
 echo
+echo "--- ArgoCD Applications ---"
+KC -n argocd get applications 2>/dev/null || true
+echo
 
 # ---------- Krok 14: Znajdz Dashboard (nazwa + namespace) ----------
 log "=== Krok 14: szukam Dashboardu ==="
@@ -485,16 +532,12 @@ log "=== Krok 14: szukam Dashboardu ==="
 DASH_NS=""
 DASH_SVC=""
 
-# 1) MicroK8s 1.35: kube-system/kubernetes-dashboard
 if KC -n kube-system get svc kubernetes-dashboard >/dev/null 2>&1; then
   DASH_NS="kube-system"; DASH_SVC="kubernetes-dashboard"
-# 2) Helm chart: kubernetes-dashboard/kubernetes-dashboard-kong-proxy
 elif KC -n kubernetes-dashboard get svc kubernetes-dashboard-kong-proxy >/dev/null 2>&1; then
   DASH_NS="kubernetes-dashboard"; DASH_SVC="kubernetes-dashboard-kong-proxy"
-# 3) Helm chart: kubernetes-dashboard/kubernetes-dashboard
 elif KC -n kubernetes-dashboard get svc kubernetes-dashboard >/dev/null 2>&1; then
   DASH_NS="kubernetes-dashboard"; DASH_SVC="kubernetes-dashboard"
-# 4) Ostatecznosc: szukaj po labelkach
 else
   DASH_LINE=$(KC get svc -A -l 'app.kubernetes.io/name=kubernetes-dashboard' -o jsonpath='{.items[0].metadata.namespace} {.items[0].metadata.name}' 2>/dev/null || true)
   if [ -n "$DASH_LINE" ]; then
@@ -508,7 +551,6 @@ else
   ok "Znaleziono Dashboard: $DASH_NS/$DASH_SVC"
 fi
 
-# admin-user + token (kube-system)
 if [ -n "$DASH_NS" ] && [ -n "$DASH_SVC" ]; then
   KC apply -f - <<'YAML'
 apiVersion: v1
@@ -634,6 +676,12 @@ Logi port-forward:
 Jesli PVC sa Pending (hostpath bug):
   kubectl get storageclass microk8s-hostpath -o jsonpath='{.volumeBindingMode}'
   # Powinno byc "WaitForFirstConsumer" (Krok 2).
+
+Jesli Vault lub Postgres nie wstaly:
+  kubectl -n davtro02 describe pod vault-0 | tail -20
+  kubectl -n davtro02 describe pod postgres-db-0 | tail -20
+  # Sprawdz pamiec: kubectl describe node parrot | grep -A5 "Allocated resources"
+  # Jesli memory >90% - zwolnij: kubectl -n davtro02 scale deploy spark-master grafana loki --replicas=0
 
 Jesli Dashboard nie dziala:
   microk8s kubectl get svc -A | grep -i dashboard
