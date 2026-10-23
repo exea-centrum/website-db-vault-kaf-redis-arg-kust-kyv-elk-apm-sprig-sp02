@@ -8,6 +8,8 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: kafka-kraft
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
   namespace: davtro02
 spec:
   serviceName: kafka-kraft

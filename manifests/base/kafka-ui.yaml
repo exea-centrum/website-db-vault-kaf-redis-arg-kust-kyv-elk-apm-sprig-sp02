@@ -2,6 +2,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kafka-ui
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
   namespace: davtro02
 spec:
   replicas: 1

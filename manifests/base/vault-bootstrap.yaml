@@ -16,6 +16,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: vault-bootstrap-sql
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
   namespace: davtro02
 data:
   creation.sql: |

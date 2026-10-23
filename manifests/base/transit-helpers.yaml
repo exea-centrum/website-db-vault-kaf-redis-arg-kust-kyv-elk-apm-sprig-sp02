@@ -6,6 +6,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: transit-helpers
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 data:
   transit_encrypt: |

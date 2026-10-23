@@ -2,6 +2,8 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: postgres-db
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
   namespace: davtro02
 spec:
   serviceName: postgres-clusterip

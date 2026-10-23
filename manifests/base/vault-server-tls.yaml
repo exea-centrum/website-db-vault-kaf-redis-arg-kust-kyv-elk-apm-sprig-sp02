@@ -20,6 +20,8 @@ apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
   name: vault-selfsigned
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   namespace: davtro02
 spec:
   selfSigned: {}

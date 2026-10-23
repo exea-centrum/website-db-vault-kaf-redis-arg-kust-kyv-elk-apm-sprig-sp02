@@ -3,6 +3,8 @@ apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
   name: default
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   mtls:

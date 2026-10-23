@@ -2,6 +2,8 @@ apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
   name: davtro-baseline-policy
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
 spec:
   validationFailureAction: Enforce
   background: true

@@ -25,6 +25,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: vault-config
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 data:
   config-tls.hcl: |
@@ -69,10 +71,13 @@ data:
     echo "Vault: start TLS :8203 (cert z bootstrapowego CA cert-managera)"
     exec vault server -config=/vault/config/config-tls.hcl
 ---
+
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: vault
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
   namespace: davtro02
 spec:
   serviceName: vault
@@ -81,6 +86,8 @@ spec:
   template:
     metadata:
       labels: { app: vault }
+      annotations:
+        sidecar.istio.io/inject: "false"
     spec:
       serviceAccountName: davtro-sa
       securityContext:
@@ -160,10 +167,13 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources: { requests: { storage: 2Gi } }
 ---
+
 apiVersion: v1
 kind: Service
 metadata:
   name: vault
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 spec:
   selector: { app: vault }

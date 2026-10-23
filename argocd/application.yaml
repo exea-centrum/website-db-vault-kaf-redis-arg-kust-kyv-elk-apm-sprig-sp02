@@ -12,6 +12,17 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: davtro02
+
+  # vault-bootstrap ma `while true` — nigdy nie osiagnie Healthy.
+  # Bez tego ArgoCD czeka w nieskonczonosc na fale 1 (sync-wave: "1")
+  # i NIGDY nie przechodzi do fali 2 (ExternalSecrets) ani 3 (aplikacje).
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      name: vault-bootstrap
+      jsonPointers:
+        - /status
+
   syncPolicy:
     automated:
       prune: true
@@ -25,3 +36,5 @@ spec:
       # co sie da, a reszta (vid. storageClassName w vault-snapshot.yaml)
       # jest utrzymywana zgodnie w manifestach.
       - CreateNamespace=true
+      # Wymagane, zeby ignoreDifferences dla vault-bootstrap dzialalo:
+      - RespectIgnoreDifferences=true

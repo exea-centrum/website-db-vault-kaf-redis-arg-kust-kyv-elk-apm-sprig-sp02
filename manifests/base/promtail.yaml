@@ -2,6 +2,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: promtail-config
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
   namespace: davtro02
 data:
   promtail.yaml: |
