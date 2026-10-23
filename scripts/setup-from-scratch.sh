@@ -11,6 +11,9 @@
 # Bez czekania na port-forwardy:
 #   SKIP_WAIT=1 ./scripts/setup-from-scratch.sh
 #
+# Automatyczne zwolnienie pamieci (gdy node >90% requests memory):
+#   AUTO_SCALE_DOWN=1 ./scripts/setup-from-scratch.sh
+#
 # Z PAT (bez pytan o GHCR):
 #   GHCR_USER='exea-centrum' GHCR_REPO='website-db-...' GHCR_PAT='ghp_xxx' ./scripts/setup-from-scratch.sh
 #
@@ -31,6 +34,7 @@ GHCR_USER="${GHCR_USER:-exea-centrum}"
 GHCR_REPO="${GHCR_REPO:-website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02}"
 ENABLE_RBAC="${ENABLE_RBAC:-0}"
 SKIP_WAIT="${SKIP_WAIT:-0}"
+AUTO_SCALE_DOWN="${AUTO_SCALE_DOWN:-0}"
 
 # ---------- Kolory ----------
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
@@ -50,6 +54,7 @@ log "GitHub repo:    $GHCR_REPO"
 log "MetalLB:        $METALLB_RANGE"
 log "Istio:          $ISTIO_VERSION"
 log "RBAC:           $([ "$ENABLE_RBAC" = "1" ] && echo 'WLACZONE (ryzykowne)' || echo 'wylaczone')"
+log "AUTO_SCALE_DOWN:$AUTO_SCALE_DOWN"
 log "SKIP_WAIT:      $SKIP_WAIT"
 
 # ---------- Krok 0: Podstawowe narzedzia ----------
@@ -371,6 +376,51 @@ KC -n argocd rollout restart deployment argocd-server 2>/dev/null || true
 KC -n argocd rollout restart statefulset argocd-application-controller 2>/dev/null || true
 ok "ArgoCD PVC health check ustawiony (Pending PVC = Healthy)."
 
+# ---------- Krok 10.7: sprawdz pamiec w wezle ----------
+# Node z requests memory >= 90% nie zmiesci vault-0/postgres-db-0 (Pending: Insufficient memory).
+# AUTO_SCALE_DOWN=1 -> skrypt sam wstrzyma niekrytyczne Deploymenty.
+# AUTO_SCALE_DOWN=0 -> tylko ostrzeze i pokaze komendy.
+log "=== Krok 10.7: sprawdzam pamiec w wezle ==="
+
+NODE_NAME=$(KC get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$NODE_NAME" ]; then
+  MEM_PCT=$(KC describe node "$NODE_NAME" 2>/dev/null \
+    | grep -A6 "Allocated resources" \
+    | grep 'memory' \
+    | grep -oE '[0-9]+%' \
+    | head -1 \
+    | tr -d '%' || echo "0")
+
+  if [ -n "$MEM_PCT" ] && [ "$MEM_PCT" -ge 90 ] 2>/dev/null; then
+    warn "Node $NODE_NAME ma requests memory = ${MEM_PCT}% (>=90%)."
+    warn "vault-0 / postgres-db-0 moga nie wystartowac (Pending: Insufficient memory)."
+    echo
+    echo "Niekrytyczne Deploymenty w davtro02 (mozesz je tymczasowo wstrzymac):"
+    for d in spark-master spark-worker grafana loki tempo kafka-ui frontend pgadmin alertmanager prometheus; do
+      if KC -n davtro02 get deploy "$d" >/dev/null 2>&1; then
+        echo "  kubectl -n davtro02 scale deploy $d --replicas=0"
+      fi
+    done
+    echo
+    if [ "$AUTO_SCALE_DOWN" = "1" ]; then
+      log "AUTO_SCALE_DOWN=1 — wstrzymuje niekrytyczne Deploymenty..."
+      for d in spark-master spark-worker grafana loki tempo kafka-ui frontend pgadmin alertmanager prometheus; do
+        if KC -n davtro02 get deploy "$d" >/dev/null 2>&1; then
+          KC -n davtro02 scale deploy "$d" --replicas=0 2>/dev/null && ok "  $d -> 0" || true
+        fi
+      done
+      sleep 10
+    else
+      warn "Ustaw AUTO_SCALE_DOWN=1, aby skrypt zrobil to automatycznie."
+      warn "Albo wykonaj powyzsze komendy recznie i uruchom skrypt ponownie."
+    fi
+  else
+    ok "Node $NODE_NAME: requests memory = ${MEM_PCT:-?}% (OK)."
+  fi
+else
+  warn "Nie udalo sie ustalic nazwy node — pomijam sprawdzenie pamieci."
+fi
+
 # ---------- Krok 11: czekaj na namespace davtro02 ----------
 log "=== Krok 11: czekam na namespace davtro02 ==="
 
@@ -468,7 +518,7 @@ fi
 
 # ---------- Krok 12: czekaj na vault-0 i postgres-db-0 (fala 0) ----------
 # UWAGA: NIE czekamy na "Running" w nieskonczonosc. Pending moze byc spowodowany
-# brakiem pamieci lub Pending PVC — pokazujemy diagnostic i idziemy dalej.
+# brakiem pamieci lub Pending PVC — pokazujemy diagnostyke i idziemy dalej.
 log "=== Krok 12: czekam na vault-0 i postgres-db-0 (fala 0) ==="
 
 if KC get ns davtro02 >/dev/null 2>&1; then
@@ -476,7 +526,7 @@ if KC get ns davtro02 >/dev/null 2>&1; then
   log "  czekam na vault-0..."
   VAULT_OK=0
   for i in $(seq 1 60); do
-    if KC -n davtro02 get pod vault-0 2>/dev/null | grep -q Running; then
+    if KC -n davtro02 get pod vault-0 2>/dev/null | grep -qE 'Running|PodInitializing'; then
       VAULT_OK=1
       break
     fi
@@ -486,11 +536,11 @@ if KC get ns davtro02 >/dev/null 2>&1; then
     sleep 5
   done
   if [ "$VAULT_OK" = "1" ]; then
-    ok "vault-0 Running."
+    ok "vault-0 wystartowal (Running/PodInitializing)."
   else
     warn "vault-0 nie wstal w 5 min."
     echo "--- Diagnostyka vault-0 ---"
-    KC -n davtro02 describe pod vault-0 2>/dev/null | tail -20 || true
+    KC -n davtro02 describe pod vault-0 2>/dev/null | grep -A10 "Events:" | tail -12 || true
     KC -n davtro02 logs vault-0 -c istio-init --tail=15 2>/dev/null || true
   fi
 
@@ -498,7 +548,7 @@ if KC get ns davtro02 >/dev/null 2>&1; then
   log "  czekam na postgres-db-0..."
   PG_OK=0
   for i in $(seq 1 60); do
-    if KC -n davtro02 get pod postgres-db-0 2>/dev/null | grep -q Running; then
+    if KC -n davtro02 get pod postgres-db-0 2>/dev/null | grep -qE 'Running|PodInitializing'; then
       PG_OK=1
       break
     fi
@@ -508,16 +558,35 @@ if KC get ns davtro02 >/dev/null 2>&1; then
     sleep 5
   done
   if [ "$PG_OK" = "1" ]; then
-    ok "postgres-db-0 Running."
+    ok "postgres-db-0 wystartowal (Running/PodInitializing)."
   else
     warn "postgres-db-0 nie wstal w 5 min."
     echo "--- Diagnostyka postgres-db-0 ---"
-    KC -n davtro02 describe pod postgres-db-0 2>/dev/null | tail -20 || true
+    KC -n davtro02 describe pod postgres-db-0 2>/dev/null | grep -A10 "Events:" | tail -12 || true
   fi
 
   ok "Krok 12 zakonczony (Vault=$VAULT_OK Postgres=$PG_OK)."
 else
   warn "Pomijam Krok 12 — namespace davtro02 nie istnieje."
+fi
+
+# ---------- Krok 12.5: diagnostyka Pending ----------
+# Dla kazdego Pending Poda pokaz Events + stan initContainerow.
+# To od razu mowi, czy problem to pamiec, istio-init, czy brak Secretu/ConfigMap.
+log "=== Krok 12.5: diagnostyka Pending ==="
+
+PENDING_PODS=$(KC -n davtro02 get pods --field-selector=status.phase=Pending -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+if [ -n "$PENDING_PODS" ]; then
+  for p in $PENDING_PODS; do
+    warn "PENDING: $p"
+    echo "--- Events ---"
+    KC -n davtro02 describe pod "$p" 2>/dev/null | grep -A10 "Events:" | tail -12 || true
+    echo "--- Init containers ---"
+    KC -n davtro02 get pod "$p" -o jsonpath='{range .status.initContainerStatuses[*]}{.name}: {.state}{"\n"}{end}' 2>/dev/null || true
+    echo
+  done
+else
+  ok "Brak Pending Podow w davtro02."
 fi
 
 # ---------- Krok 13: Weryfikacja ----------
@@ -567,6 +636,11 @@ echo "--- Pending Pody (przyczyny) ---"
 for p in $(KC -n davtro02 get pods --field-selector=status.phase=Pending -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
   echo "  $p:"
   KC -n davtro02 describe pod "$p" 2>/dev/null | grep -A3 "Events:" | tail -4 || true
+done
+echo
+echo "--- ImagePullBackOff ---"
+for p in $(KC -n davtro02 get pods -o jsonpath='{range .items[?(@.status.containerStatuses[*].state.waiting.reason=="ImagePullBackOff")]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+  warn "  $p: ImagePullBackOff — sprawdz ghcr-pull i ServiceAccount"
 done
 echo
 
@@ -692,6 +766,7 @@ ${GREEN}=== GOTOWE ===${NC}
 IP tego hosta w LAN: ${IP:-<nie wykryto>}
 Namespace davtro02: ${NS_STATUS}
 RBAC: ${ENABLE_RBAC} (1=wlaczone, 0=wylaczone)
+AUTO_SCALE_DOWN: ${AUTO_SCALE_DOWN}
 GitHub: ${GHCR_USER}/${GHCR_REPO}
 
 ${APP_OUT}
@@ -732,6 +807,7 @@ Jesli Vault lub Postgres nie wstaly:
   kubectl -n davtro02 describe pod postgres-db-0 | tail -20
   # Sprawdz pamiec: kubectl describe node parrot | grep -A5 "Allocated resources"
   # Jesli memory >90% - zwolnij: kubectl -n davtro02 scale deploy spark-master grafana loki --replicas=0
+  # Albo uruchom skrypt z AUTO_SCALE_DOWN=1
 
 Jesli vault-0 utknal na istio-init:
   # Sprawdz, czy vault.yaml ma sidecar.istio.io/inject: "false"
