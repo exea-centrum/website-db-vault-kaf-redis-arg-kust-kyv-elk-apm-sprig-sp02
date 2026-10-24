@@ -217,7 +217,7 @@ log "=== Krok 2: dodatki MicroK8s ==="
 MK enable dns
 MK enable hostpath-storage
 
-log "Odtwarzam StorageClass microk8s-hostpath..."
+log "Odtwarzam StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer..."
 KC delete storageclass microk8s-hostpath 2>/dev/null || true
 KC apply -f - <<'YAML'
 apiVersion: storage.k8s.io/v1
@@ -232,6 +232,7 @@ volumeBindingMode: WaitForFirstConsumer
 YAML
 ok "StorageClass microk8s-hostpath: WaitForFirstConsumer."
 
+log "Czekam na ClusterRole/ClusterRoleBinding microk8s-hostpath..."
 for i in $(seq 1 30); do
   if KC get clusterrole microk8s-hostpath >/dev/null 2>&1 && KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1; then
     ok "ClusterRole/ClusterRoleBinding microk8s-hostpath gotowe."; break
@@ -244,7 +245,8 @@ if ! KC get clusterrole microk8s-hostpath >/dev/null 2>&1; then
   KC apply -f - <<'YAML'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata: { name: microk8s-hostpath }
+metadata:
+  name: microk8s-hostpath
 rules:
   - apiGroups: [""]; resources: ["persistentvolumes"]; verbs: ["get","list","watch","create","delete"]
   - apiGroups: [""]; resources: ["persistentvolumeclaims"]; verbs: ["get","list","watch","update"]
@@ -260,45 +262,64 @@ if ! KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1; then
   KC apply -f - <<'YAML'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-metadata: { name: microk8s-hostpath }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: microk8s-hostpath }
-subjects: [{ kind: ServiceAccount, name: microk8s-hostpath, namespace: kube-system }]
+metadata:
+  name: microk8s-hostpath
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: microk8s-hostpath
+subjects:
+  - kind: ServiceAccount
+    name: microk8s-hostpath
+    namespace: kube-system
 YAML
 fi
 
-log "Usuwam taint control-plane/master..."
+log "Usuwam taint control-plane/master (dev, hostpath bug)..."
 NODES=$(KC get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
 for node in $NODES; do
   KC taint nodes "$node" node-role.kubernetes.io/control-plane- 2>/dev/null || true
   KC taint nodes "$node" node-role.kubernetes.io/master- 2>/dev/null || true
 done
 REMAINING_TAINTS=$(KC get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}' 2>/dev/null | grep -E 'control-plane|master' || true)
-[ -z "$REMAINING_TAINTS" ] && ok "Tainty usuniete." || warn "Tainty nadal sa: $REMAINING_TAINTS"
+[ -z "$REMAINING_TAINTS" ] && ok "Tainty control-plane/master usuniete (dev)." || warn "Tainty nadal sa: $REMAINING_TAINTS"
 
-log "Usuwam PV z pustym nodeAffinity..."
-PVS=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' | awk '{print $1}' || true)
-if [ -n "$PVS" ]; then for pv in $PVS; do KC delete pv "$pv" --wait=false 2>/dev/null || true; done; fi
+log "Usuwam PV z pustym nodeAffinity (bug MicroK8s)..."
+PVS_TO_DELETE=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' | awk '{print $1}' || true)
+if [ -n "$PVS_TO_DELETE" ]; then
+  for pv in $PVS_TO_DELETE; do warn "Usuwam PV $pv (pusty nodeAffinity)."; KC delete pv "$pv" --wait=false 2>/dev/null || true; done
+else
+  ok "Brak PV z pustym nodeAffinity."
+fi
 
-log "Patchuje hostpath-provisioner toleracjami..."
+log "Dodaje toleracje do hostpath-provisioner (kubectl apply)..."
 sleep 3
 CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
 if [ "$CURRENT" != "{}" ]; then
   NEW=$(echo "$CURRENT" | jq '.spec.template.spec.tolerations = [
-    {"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},
-    {"key":"node-role.kubernetes.io/master","operator":"Exists","effect":"NoSchedule"},
-    {"key":"node.kubernetes.io/not-ready","operator":"Exists","effect":"NoExecute","tolerationSeconds":300},
-    {"key":"node.kubernetes.io/unreachable","operator":"Exists","effect":"NoExecute","tolerationSeconds":300}
-  ]' | jq 'del(.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.status)')
-  echo "$NEW" | KC apply -f - 2>/dev/null && ok "hostpath-provisioner toleracje ustawione."
+    {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
+    {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
+    {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
+    {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
+  ]' | jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .status)')
+  echo "$NEW" | KC apply -f - 2>/dev/null && ok "hostpath-provisioner: tolerations ustawione (apply)." || warn "Nie udalo sie patchowac hostpath-provisioner."
 fi
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
-for i in $(seq 1 30); do KC -n kube-system get pods -l k8s-app=hostpath-provisioner 2>/dev/null | grep -q Running && break; sleep 2; done
+VERIFY_TOL=$(KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || true)
+echo "$VERIFY_TOL" | grep -q 'control-plane' && ok "hostpath-provisioner ma toleracje na control-plane." || warn "hostpath-provisioner NIE ma toleracji."
+log "Czekam na hostpath-provisioner..."
+for i in $(seq 1 30); do KC -n kube-system get pods -l k8s-app=hostpath-provisioner 2>/dev/null | grep -q Running && { ok "hostpath-provisioner dziala."; break; }; sleep 2; done
 
-if [ "$ENABLE_RBAC" = "1" ]; then MK enable rbac; ok "RBAC wlaczone."; else log "RBAC pominiete."; fi
+if [ "$ENABLE_RBAC" = "1" ]; then
+  warn "Wlaczam RBAC — to moze zepsuc Dashboard/ArgoCD/Traefik!"
+  MK enable rbac; ok "RBAC wlaczone."
+else
+  log "RBAC pominiete."
+fi
 MK enable metallb:"$METALLB_RANGE"
 MK enable dashboard
 MK enable ingress
-ok "dodatki wlaczone."
+ok "dns, hostpath-storage (PVC), metallb, dashboard, ingress wlaczone."
 
 log "=== Krok 3: Helm ==="
 if ! command -v helm >/dev/null 2>&1; then sudo snap install helm --classic; fi
@@ -331,7 +352,7 @@ if ! command -v istioctl >/dev/null 2>&1; then
   rm -rf "$TMP"
 fi
 istioctl version --remote=false
-if [ -f "$REPO_DIR/istio/istio-operator.yaml" ]; then istioctl install -f "$REPO_DIR/istio/istio-operator.yaml" -y; else warn "Brak istio-operator.yaml."; istioctl install --set profile=default -y; fi
+if [ -f "$REPO_DIR/istio/istio-operator.yaml" ]; then istioctl install -f "$REPO_DIR/istio/istio-operator.yaml" -y; else warn "Brak istio-operator.yaml — instaluje domyslny profil."; istioctl install --set profile=default -y; fi
 KC wait --for=condition=Ready pod -l app=istiod -n istio-system --timeout=300s
 ok "Istio gotowy."
 
@@ -342,80 +363,23 @@ helm upgrade --install argo-cd argo/argo-cd -n argocd --create-namespace --wait 
 ok "ArgoCD gotowy."
 
 # ============================================================================
-# KROK 8.6: ARGOCD CUSTOM HEALTH CHECK DLA CERTIFICATE
+# KROK 8.6: ARGOCD CUSTOM HEALTH CHECK DLA CERTIFICATE (POPRAWNY FORMAT!)
 # ============================================================================
 log "=== Krok 8.6: ArgoCD custom health check dla Certificate ==="
 
-EXISTING_HEALTH=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}' 2>/dev/null || true)
-
-if [ -n "$EXISTING_HEALTH" ] && echo "$EXISTING_HEALTH" | grep -q 'Issuing'; then
-  ok "Certificate health check juz istnieje w argocd-cm — pomijam."
+EXISTING_CUSTOMIZATIONS=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations}' 2>/dev/null || true)
+if echo "$EXISTING_CUSTOMIZATIONS" | grep -q 'cert-manager.io/Certificate'; then
+  ok "Certificate health check juz istnieje w resource.customizations — pomijam."
 else
-  ARGOCD_CM_FILE=$(mktemp)
-  KC -n argocd get configmap argocd-cm -o yaml > "$ARGOCD_CM_FILE" 2>/dev/null || true
-
-  if [ -s "$ARGOCD_CM_FILE" ]; then
-    python3 - "$ARGOCD_CM_FILE" <<'PY'
-import sys, re
-file = sys.argv[1]
-with open(file) as f: content = f.read()
-
-health_lua = '''hs = {}
-if obj.status ~= nil and obj.status.conditions ~= nil then
-  for i, condition in ipairs(obj.status.conditions) do
-    if condition.type == "Ready" and condition.status == "True" then
-      hs.status = "Healthy"
-      hs.message = condition.message
-      return hs
-    end
-    if condition.type == "Issuing" and condition.status == "True" then
-      hs.status = "Progressing"
-      hs.message = condition.message or "Issuing certificate"
-      return hs
-    end
-    if condition.type == "Ready" and condition.status == "False" and condition.reason ~= "DoesNotExist" then
-      hs.status = "Degraded"
-      hs.message = condition.message
-      return hs
-    end
-  end
-end
-hs.status = "Progressing"
-hs.message = "Waiting for certificate"
-return hs'''
-
-if re.search(r'^data:\s*$', content, re.M):
-    lines = content.split('\n'); out = []; inserted = False
-    for i, line in enumerate(lines):
-        out.append(line)
-        if not inserted and re.match(r'^data:\s*$', line):
-            indent = "  "
-            for j in range(i+1, len(lines)):
-                m = re.match(r'^(\s+)\S', lines[j])
-                if m: indent = m.group(1); break
-            out.append(f'{indent}resource.customizations.health.cert-manager.io_Certificate: |')
-            for lua_line in health_lua.split('\n'):
-                out.append(f'{indent}  {lua_line}')
-            inserted = True
-    content = '\n'.join(out)
-else:
-    content += '\ndata:\n  resource.customizations.health.cert-manager.io_Certificate: |\n'
-    for lua_line in health_lua.split('\n'):
-        content += f'    {lua_line}\n'
-with open(file, 'w') as f: f.write(content)
-PY
-    KC apply -f "$ARGOCD_CM_FILE" && ok "Certificate health check dodany do argocd-cm." || warn "Nie udalo sie dodac health checka."
-    rm -f "$ARGOCD_CM_FILE"
-  else
-    warn "Nie udalo sie pobrac argocd-cm."
-  fi
+  KC -n argocd patch configmap argocd-cm --type json -p '[{"op":"remove","path":"/data/resource.customizations.health.cert-manager.io_Certificate"}]' 2>/dev/null || true
+  KC -n argocd patch configmap argocd-cm --type merge -p '{"data":{"resource.customizations":"cert-manager.io/Certificate:\n  health.lua: |\n    hs = {}\n    if obj.status ~= nil and obj.status.conditions ~= nil then\n      for i, condition in ipairs(obj.status.conditions) do\n        if condition.type == \"Ready\" and condition.status == \"True\" then\n          hs.status = \"Healthy\"\n          hs.message = condition.message\n          return hs\n        end\n        if condition.type == \"Issuing\" and condition.status == \"True\" then\n          hs.status = \"Progressing\"\n          hs.message = condition.message or \"Issuing certificate\"\n          return hs\n        end\n        if condition.type == \"Ready\" and condition.status == \"False\" and condition.reason ~= \"DoesNotExist\" then\n          hs.status = \"Degraded\"\n          hs.message = condition.message\n          return hs\n        end\n      end\n    end\n    hs.status = \"Progressing\"\n    hs.message = \"Waiting for certificate\"\n    return hs\n"}}' 2>/dev/null && ok "Certificate health check dodany (poprawny format)." || warn "Nie udalo sie dodac health checka."
 fi
 
-VERIFY_HEALTH=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}' 2>/dev/null || true)
-if echo "$VERIFY_HEALTH" | grep -q 'Issuing'; then
-  ok "Health check zweryfikowany (zawiera 'Issuing')."
+VERIFY_CUSTOMIZATIONS=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations}' 2>/dev/null || true)
+if echo "$VERIFY_CUSTOMIZATIONS" | grep -q 'cert-manager.io/Certificate'; then
+  ok "Health check zweryfikowany (resource.customizations zawiera Certificate)."
 else
-  warn "Health check NIE zawiera 'Issuing' — sprawdz recznie!"
+  warn "Health check NIE zawiera Certificate — sprawdz recznie!"
 fi
 
 KC -n argocd rollout restart statefulset argo-cd-argocd-application-controller 2>/dev/null || true
@@ -423,24 +387,18 @@ KC -n argocd rollout restart deployment argo-cd-argocd-server 2>/dev/null || tru
 KC -n argocd rollout status statefulset argo-cd-argocd-application-controller --timeout=120s 2>/dev/null || true
 ok "ArgoCD application-controller zrestartowany."
 
-# 8.6a: wyczysc zablokowany operationState
 log "Czyszcze zablokowany operationState Application davtro-website..."
 KC -n argocd patch application davtro-website --type merge -p '{"operation":null}' 2>/dev/null || true
 KC -n argocd patch application davtro-website --subresource status --type merge -p '{"status":{"operationState":null}}' 2>/dev/null || true
 ok "operationState wyczyszczony."
 
-# 8.6b: weryfikacja Issuer/vault-ca
-log "Weryfikacja Issuer/vault-ca..."
+sleep 3
 ISSUER_KIND=$(KC -n davtro02 get certificate vault-tls -o jsonpath='{.spec.issuerRef.kind}' 2>/dev/null || echo "")
 ISSUER_NAME=$(KC -n davtro02 get certificate vault-tls -o jsonpath='{.spec.issuerRef.name}' 2>/dev/null || echo "")
 if [ "$ISSUER_KIND" = "Issuer" ] && [ "$ISSUER_NAME" = "vault-ca" ]; then
   ok "Certificate/vault-tls uzywa Issuer/vault-ca (poprawnie)."
   ISSUER_READY=$(KC -n davtro02 get issuer vault-ca -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
-  if [ "$ISSUER_READY" = "True" ]; then
-    ok "Issuer/vault-ca jest Ready=True."
-  else
-    warn "Issuer/vault-ca NIE jest Ready=True (status: $ISSUER_READY)."
-  fi
+  [ "$ISSUER_READY" = "True" ] && ok "Issuer/vault-ca jest Ready=True." || warn "Issuer/vault-ca NIE jest Ready=True (status: $ISSUER_READY)."
 else
   warn "Certificate/vault-tls uzywa $ISSUER_KIND/$ISSUER_NAME (oczekiwano Issuer/vault-ca)."
 fi
@@ -619,13 +577,22 @@ if [ -n "$DASH_NS" ] && [ -n "$DASH_SVC" ]; then
   KC apply -f - <<'YAML'
 apiVersion: v1
 kind: ServiceAccount
-metadata: { name: admin-user, namespace: kube-system }
+metadata:
+  name: admin-user
+  namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-metadata: { name: admin-user }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin }
-subjects: [{ kind: ServiceAccount, name: admin-user, namespace: kube-system }]
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kube-system
 YAML
   DASH_TOKEN=$(KC -n kube-system create token admin-user --duration=999999h 2>/dev/null || true)
   [ -n "$DASH_TOKEN" ] && { echo "${GREEN}=== Kubernetes Dashboard token ===${NC}"; echo "$DASH_TOKEN"; echo; }
@@ -652,8 +619,8 @@ ${GREEN}=== GOTOWE ===${NC}
 IP: ${IP:-<nie wykryto>}
 
 Jesli ArgoCD czeka na "healthy state of Certificate/vault-tls":
-  # Health check powinien byc aktywny (Krok 8.6). Sprawdz:
-  kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}'
+  # Health check powinien byc aktywny (Krok 8.6, format resource.customizations).
+  kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations}'
   # Jesli pusty — zrestartuj controller:
   kubectl -n argocd rollout restart statefulset argo-cd-argocd-application-controller
   # Wyczysc operationState:
