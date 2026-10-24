@@ -58,7 +58,7 @@ log "AUTO_SCALE_DOWN:$AUTO_SCALE_DOWN"
 log "SKIP_WAIT:      $SKIP_WAIT"
 
 # ============================================================================
-# KROK A: PRZYGOTOWANIE MANIFESTÓW (przed instalacją)
+# KROK A: PRZYGOTOWANIE MANIFESTÓW (sync-wave + application.yaml)
 # ============================================================================
 log "=== Krok A: przygotowanie manifestow (sync-wave + application.yaml) ==="
 
@@ -217,7 +217,7 @@ log "=== Krok 2: dodatki MicroK8s ==="
 MK enable dns
 MK enable hostpath-storage
 
-log "Odtwarzam StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer..."
+log "Odtwarzam StorageClass microk8s-hostpath..."
 KC delete storageclass microk8s-hostpath 2>/dev/null || true
 KC apply -f - <<'YAML'
 apiVersion: storage.k8s.io/v1
@@ -232,7 +232,6 @@ volumeBindingMode: WaitForFirstConsumer
 YAML
 ok "StorageClass microk8s-hostpath: WaitForFirstConsumer."
 
-log "Czekam na ClusterRole/ClusterRoleBinding microk8s-hostpath..."
 for i in $(seq 1 30); do
   if KC get clusterrole microk8s-hostpath >/dev/null 2>&1 && KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1; then
     ok "ClusterRole/ClusterRoleBinding microk8s-hostpath gotowe."; break
@@ -245,30 +244,15 @@ if ! KC get clusterrole microk8s-hostpath >/dev/null 2>&1; then
   KC apply -f - <<'YAML'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata:
-  name: microk8s-hostpath
+metadata: { name: microk8s-hostpath }
 rules:
-  - apiGroups: [""]
-    resources: ["persistentvolumes"]
-    verbs: ["get", "list", "watch", "create", "delete"]
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "update"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "update", "patch"]
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch", "create", "delete"]
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]; resources: ["persistentvolumes"]; verbs: ["get","list","watch","create","delete"]
+  - apiGroups: [""]; resources: ["persistentvolumeclaims"]; verbs: ["get","list","watch","update"]
+  - apiGroups: ["storage.k8s.io"]; resources: ["storageclasses"]; verbs: ["get","list","watch"]
+  - apiGroups: [""]; resources: ["events"]; verbs: ["create","update","patch"]
+  - apiGroups: [""]; resources: ["nodes"]; verbs: ["get","list","watch"]
+  - apiGroups: [""]; resources: ["pods"]; verbs: ["get","list","watch","create","delete"]
+  - apiGroups: ["coordination.k8s.io"]; resources: ["leases"]; verbs: ["get","list","watch","create","update","patch","delete"]
 YAML
 fi
 if ! KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1; then
@@ -276,16 +260,9 @@ if ! KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1; then
   KC apply -f - <<'YAML'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-metadata:
-  name: microk8s-hostpath
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: microk8s-hostpath
-subjects:
-  - kind: ServiceAccount
-    name: microk8s-hostpath
-    namespace: kube-system
+metadata: { name: microk8s-hostpath }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: microk8s-hostpath }
+subjects: [{ kind: ServiceAccount, name: microk8s-hostpath, namespace: kube-system }]
 YAML
 fi
 
@@ -296,44 +273,32 @@ for node in $NODES; do
   KC taint nodes "$node" node-role.kubernetes.io/master- 2>/dev/null || true
 done
 REMAINING_TAINTS=$(KC get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}' 2>/dev/null | grep -E 'control-plane|master' || true)
-[ -z "$REMAINING_TAINTS" ] && ok "Tainty control-plane/master usuniete (dev)." || warn "Tainty nadal sa: $REMAINING_TAINTS"
+[ -z "$REMAINING_TAINTS" ] && ok "Tainty usuniete." || warn "Tainty nadal sa: $REMAINING_TAINTS"
 
-log "Usuwam PV z pustym nodeAffinity (bug MicroK8s)..."
-PVS_TO_DELETE=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' | awk '{print $1}' || true)
-if [ -n "$PVS_TO_DELETE" ]; then
-  for pv in $PVS_TO_DELETE; do warn "Usuwam PV $pv (pusty nodeAffinity)."; KC delete pv "$pv" --wait=false 2>/dev/null || true; done
-else
-  ok "Brak PV z pustym nodeAffinity."
-fi
+log "Usuwam PV z pustym nodeAffinity..."
+PVS=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' | awk '{print $1}' || true)
+if [ -n "$PVS" ]; then for pv in $PVS; do KC delete pv "$pv" --wait=false 2>/dev/null || true; done; fi
 
-log "Dodaje toleracje do hostpath-provisioner (kubectl apply)..."
+log "Patchuje hostpath-provisioner toleracjami..."
 sleep 3
 CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
 if [ "$CURRENT" != "{}" ]; then
   NEW=$(echo "$CURRENT" | jq '.spec.template.spec.tolerations = [
-    {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
-    {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"},
-    {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
-    {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
-  ]' | jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .status)')
-  if echo "$NEW" | KC apply -f - 2>/dev/null; then ok "hostpath-provisioner: tolerations ustawione (apply)."; else warn "Nie udalo sie patchowac hostpath-provisioner."; fi
+    {"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},
+    {"key":"node-role.kubernetes.io/master","operator":"Exists","effect":"NoSchedule"},
+    {"key":"node.kubernetes.io/not-ready","operator":"Exists","effect":"NoExecute","tolerationSeconds":300},
+    {"key":"node.kubernetes.io/unreachable","operator":"Exists","effect":"NoExecute","tolerationSeconds":300}
+  ]' | jq 'del(.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.status)')
+  echo "$NEW" | KC apply -f - 2>/dev/null && ok "hostpath-provisioner toleracje ustawione."
 fi
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
-VERIFY_TOL=$(KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || true)
-echo "$VERIFY_TOL" | grep -q 'control-plane' && ok "hostpath-provisioner ma toleracje na control-plane." || warn "hostpath-provisioner NIE ma toleracji na control-plane."
-log "Czekam na hostpath-provisioner..."
-for i in $(seq 1 30); do KC -n kube-system get pods -l k8s-app=hostpath-provisioner 2>/dev/null | grep -q Running && { ok "hostpath-provisioner dziala."; break; }; sleep 2; done
+for i in $(seq 1 30); do KC -n kube-system get pods -l k8s-app=hostpath-provisioner 2>/dev/null | grep -q Running && break; sleep 2; done
 
-if [ "$ENABLE_RBAC" = "1" ]; then
-  warn "Wlaczam RBAC — to moze zepsuc Dashboard/ArgoCD/Traefik!"
-  MK enable rbac; ok "RBAC wlaczone."
-else
-  log "RBAC pominiete."
-fi
+if [ "$ENABLE_RBAC" = "1" ]; then MK enable rbac; ok "RBAC wlaczone."; else log "RBAC pominiete."; fi
 MK enable metallb:"$METALLB_RANGE"
 MK enable dashboard
 MK enable ingress
-ok "dns, hostpath-storage (PVC), metallb, dashboard, ingress wlaczone."
+ok "dodatki wlaczone."
 
 log "=== Krok 3: Helm ==="
 if ! command -v helm >/dev/null 2>&1; then sudo snap install helm --classic; fi
@@ -366,7 +331,7 @@ if ! command -v istioctl >/dev/null 2>&1; then
   rm -rf "$TMP"
 fi
 istioctl version --remote=false
-if [ -f "$REPO_DIR/istio/istio-operator.yaml" ]; then istioctl install -f "$REPO_DIR/istio/istio-operator.yaml" -y; else warn "Brak istio-operator.yaml — instaluje domyslny profil."; istioctl install --set profile=default -y; fi
+if [ -f "$REPO_DIR/istio/istio-operator.yaml" ]; then istioctl install -f "$REPO_DIR/istio/istio-operator.yaml" -y; else warn "Brak istio-operator.yaml."; istioctl install --set profile=default -y; fi
 KC wait --for=condition=Ready pod -l app=istiod -n istio-system --timeout=300s
 ok "Istio gotowy."
 
@@ -378,14 +343,18 @@ ok "ArgoCD gotowy."
 
 # ============================================================================
 # KROK 8.6: ARGOCD CUSTOM HEALTH CHECK DLA CERTIFICATE
-# Uzywamy get -o yaml > plik > edycja > apply (NIE kubectl patch!)
-# Bez tego ArgoCD v3.5.6 blokuje sync na Certificate/vault-tls.
 # ============================================================================
 log "=== Krok 8.6: ArgoCD custom health check dla Certificate ==="
-ARGOCD_CM_FILE=$(mktemp)
-KC -n argocd get configmap argocd-cm -o yaml > "$ARGOCD_CM_FILE" 2>/dev/null || true
-if [ -s "$ARGOCD_CM_FILE" ]; then
-  if ! grep -q 'resource.customizations.health.cert-manager.io_Certificate' "$ARGOCD_CM_FILE"; then
+
+EXISTING_HEALTH=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}' 2>/dev/null || true)
+
+if [ -n "$EXISTING_HEALTH" ] && echo "$EXISTING_HEALTH" | grep -q 'Issuing'; then
+  ok "Certificate health check juz istnieje w argocd-cm — pomijam."
+else
+  ARGOCD_CM_FILE=$(mktemp)
+  KC -n argocd get configmap argocd-cm -o yaml > "$ARGOCD_CM_FILE" 2>/dev/null || true
+
+  if [ -s "$ARGOCD_CM_FILE" ]; then
     python3 - "$ARGOCD_CM_FILE" <<'PY'
 import sys, re
 file = sys.argv[1]
@@ -435,18 +404,58 @@ else:
         content += f'    {lua_line}\n'
 with open(file, 'w') as f: f.write(content)
 PY
-    KC apply -f "$ARGOCD_CM_FILE" && ok "Certificate health check dodany do argocd-cm."
+    KC apply -f "$ARGOCD_CM_FILE" && ok "Certificate health check dodany do argocd-cm." || warn "Nie udalo sie dodac health checka."
+    rm -f "$ARGOCD_CM_FILE"
   else
-    ok "Certificate health check juz istnieje w argocd-cm."
+    warn "Nie udalo sie pobrac argocd-cm."
   fi
-  rm -f "$ARGOCD_CM_FILE"
-else
-  warn "Nie udalo sie pobrac argocd-cm — pomijam health check."
 fi
+
+VERIFY_HEALTH=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}' 2>/dev/null || true)
+if echo "$VERIFY_HEALTH" | grep -q 'Issuing'; then
+  ok "Health check zweryfikowany (zawiera 'Issuing')."
+else
+  warn "Health check NIE zawiera 'Issuing' — sprawdz recznie!"
+fi
+
 KC -n argocd rollout restart statefulset argo-cd-argocd-application-controller 2>/dev/null || true
 KC -n argocd rollout restart deployment argo-cd-argocd-server 2>/dev/null || true
+KC -n argocd rollout status statefulset argo-cd-argocd-application-controller --timeout=120s 2>/dev/null || true
 ok "ArgoCD application-controller zrestartowany."
 
+# 8.6a: wyczysc zablokowany operationState
+log "Czyszcze zablokowany operationState Application davtro-website..."
+KC -n argocd patch application davtro-website --type merge -p '{"operation":null}' 2>/dev/null || true
+KC -n argocd patch application davtro-website --subresource status --type merge -p '{"status":{"operationState":null}}' 2>/dev/null || true
+ok "operationState wyczyszczony."
+
+# 8.6b: weryfikacja Issuer/vault-ca
+log "Weryfikacja Issuer/vault-ca..."
+ISSUER_KIND=$(KC -n davtro02 get certificate vault-tls -o jsonpath='{.spec.issuerRef.kind}' 2>/dev/null || echo "")
+ISSUER_NAME=$(KC -n davtro02 get certificate vault-tls -o jsonpath='{.spec.issuerRef.name}' 2>/dev/null || echo "")
+if [ "$ISSUER_KIND" = "Issuer" ] && [ "$ISSUER_NAME" = "vault-ca" ]; then
+  ok "Certificate/vault-tls uzywa Issuer/vault-ca (poprawnie)."
+  ISSUER_READY=$(KC -n davtro02 get issuer vault-ca -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
+  if [ "$ISSUER_READY" = "True" ]; then
+    ok "Issuer/vault-ca jest Ready=True."
+  else
+    warn "Issuer/vault-ca NIE jest Ready=True (status: $ISSUER_READY)."
+  fi
+else
+  warn "Certificate/vault-tls uzywa $ISSUER_KIND/$ISSUER_NAME (oczekiwano Issuer/vault-ca)."
+fi
+
+sleep 2
+KC -n argocd annotate application davtro-website argocd.argoproj.io/refresh=hard --overwrite 2>/dev/null || true
+ok "Application davtro-website: refresh=hard."
+
+sleep 2
+KC -n argocd patch application davtro-website --type merge -p '{"operation":{"sync":{"revision":"HEAD"}}}' 2>/dev/null || true
+ok "Nowa synchronizacja uruchomiona."
+
+# ============================================================================
+# KROK 8.5: ArgoCD repo credentials
+# ============================================================================
 log "=== Krok 8.5: ArgoCD repo credentials ==="
 REPO_URL="https://github.com/${GHCR_USER}/${GHCR_REPO}.git"
 log "Repo URL: $REPO_URL"
@@ -647,6 +656,8 @@ Jesli ArgoCD czeka na "healthy state of Certificate/vault-tls":
   kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations\.health\.cert-manager\.io_Certificate}'
   # Jesli pusty — zrestartuj controller:
   kubectl -n argocd rollout restart statefulset argo-cd-argocd-application-controller
+  # Wyczysc operationState:
+  kubectl -n argocd patch application davtro-website --type merge -p '{"operation":null}'
 
 Jesli vault-issuer jest False:
   # To normalne — vault-bootstrap tworzy cert-manager-vault-token.
