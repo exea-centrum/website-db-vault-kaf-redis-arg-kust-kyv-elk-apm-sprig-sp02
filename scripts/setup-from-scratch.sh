@@ -105,8 +105,6 @@ MK enable dns
 MK enable hostpath-storage
 
 # KLUCZOWE 1: odtworz StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer
-# (dla hostpath lepszy jest WaitForFirstConsumer — PV tworzony na tym samym node,
-#  na ktorym bedzie pod. Immediate powoduje warning i potencjalne problemy z nodeAffinity.)
 log "Odtwarzam StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer..."
 KC delete storageclass microk8s-hostpath 2>/dev/null || true
 KC apply -f - <<'YAML'
@@ -131,7 +129,6 @@ for i in $(seq 1 30); do
   sleep 2
 done
 
-# KLUCZOWE 3: odtworz ClusterRole/ClusterRoleBinding, jesli nie istnieja
 if ! KC get clusterrole microk8s-hostpath >/dev/null 2>&1; then
   warn "ClusterRole microk8s-hostpath nie istnieje — odtwarzam."
   KC apply -f - <<'YAML'
@@ -167,9 +164,7 @@ subjects:
 YAML
 fi
 
-# KLUCZOWE 4: usun taint control-plane/master (dev, zeby helper pody provisionera
-# mogly sie schedulowac). To obejscie bug MicroK8s: provisioner nie przenosi
-# toleracji na helper pody, wiec PVC z hostpath nigdy sie nie binduja na taintowanym wezle.
+# KLUCZOWE 4: usun taint control-plane/master (dev, hostpath bug)
 log "Usuwam taint control-plane/master (dev, hostpath bug)..."
 NODES=$(KC get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
 for node in $NODES; do
@@ -179,7 +174,7 @@ done
 REMAINING_TAINTS=$(KC get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}' 2>/dev/null | grep -E 'control-plane|master' || true)
 [ -z "$REMAINING_TAINTS" ] && ok "Tainty usuniete." || warn "Tainty nadal sa: $REMAINING_TAINTS"
 
-# KLUCZOWE 5: usun stare PV z pustym nodeAffinity (bug MicroK8s: In [""])
+# KLUCZOWE 5: usun PV z pustym nodeAffinity
 log "Usuwam PV z pustym nodeAffinity (bug MicroK8s)..."
 PVS_TO_DELETE=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' | awk '{print $1}' || true)
 if [ -n "$PVS_TO_DELETE" ]; then
@@ -188,8 +183,7 @@ else
   ok "Brak PV z pustym nodeAffinity."
 fi
 
-# KLUCZOWE 6: patch hostpath-provisioner z toleracjami (kubectl apply — NIE replace,
-# bo replace uszkadzal ClusterRole microk8s-hostpath)
+# KLUCZOWE 6: patch hostpath-provisioner z toleracjami
 log "Dodaje toleracje do hostpath-provisioner (kubectl apply)..."
 sleep 3
 CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
@@ -415,9 +409,22 @@ fi
 # KROK 12.6 (WAZNE!): RECZNE ZAINICJALIZOWANIE VAULTA (przez nazwe DNS!)
 # Certyfikat vault-tls ma SAN tylko dla DNS (vault, vault.davtro02.svc...),
 # a NIE dla IP 127.0.0.1. Dlatego uzywamy nazwy DNS, a nie IP.
+#
+# UWAGA: Przed init sprawdzamy, czy /vault/data istnieje i ma wlasciciela
+# 100:1000. Jesli nie — usuwamy Poda vault-0, zeby StatefulSet odtworzyl go
+# z initContainerem fix-data-permissions, ktory zrobi chown.
 # ============================================================================
 log "=== Krok 12.6: reczne zainicjalizowanie Vaulta (przez DNS) ==="
 VAULT_DNS="https://vault.davtro02.svc.cluster.local:8203"
+
+# Sprawdz, czy /vault/data istnieje i ma wlasciciela 100:1000
+VAULT_DATA_OWNER=$(KC -n davtro02 exec vault-0 -- sh -c "stat -c '%u:%g' /vault/data 2>/dev/null || echo 'missing'" 2>/dev/null || echo "missing")
+if [ "$VAULT_DATA_OWNER" != "100:1000" ]; then
+  warn "/vault/data ma wlasciciela $VAULT_DATA_OWNER (oczekiwano 100:1000) — usuwam Pod vault-0, zeby initContainer zrobil chown."
+  KC -n davtro02 delete pod vault-0 2>/dev/null || true
+  log "  czekam na nowy Pod vault-0..."
+  for i in $(seq 1 60); do KC -n davtro02 get pod vault-0 2>/dev/null | grep -qE 'Running' && { ok "vault-0 wystartowal ponownie."; break; }; [ $((i % 12)) -eq 0 ] && log "    vault-0... ($((i*5))s)"; sleep 5; done
+fi
 
 VAULT_STATUS=$(KC -n davtro02 exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt vault status -format=json" 2>/dev/null || echo '{}')
 INIT=$(echo "$VAULT_STATUS" | jq -r '.initialized // false' 2>/dev/null || echo "false")
