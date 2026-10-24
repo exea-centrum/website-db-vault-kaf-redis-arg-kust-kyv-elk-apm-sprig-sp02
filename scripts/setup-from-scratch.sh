@@ -25,6 +25,9 @@
 #
 # UWAGA: ten skrypt NIE dodaje sync-wave (robisz to osobno: manifests/base/add-sync-waves.sh).
 #        Dzieki temu nie nadpisuje sync-wave z add-sync-waves.sh (pki-issuer w fali 2).
+# UWAGA: ten skrypt NIE dodaje health checka Certificate do argocd-cm (Krok 8.6 usuniety).
+#        ArgoCD v3.5.6 domyslnie poprawnie interpretuje Certificate (Ready=True -> Healthy).
+#        Health check nie jest potrzebny, gdy Certificate/vault-tls jest Ready=True.
 
 set -euo pipefail
 
@@ -265,25 +268,13 @@ helm upgrade --install argo-cd argo/argo-cd -n argocd --create-namespace --wait 
 ok "ArgoCD gotowy."
 
 # ============================================================================
-# KROK 8.6: ARGOCD CUSTOM HEALTH CHECK DLA CERTIFICATE (przez kubectl patch!)
-# ArgoCD v3.5.6 domyslnie uznaje Certificate z Ready=False/Issuing=True
-# za Degraded/Progressing i blokuje sync na Certificate/vault-tls.
-# Ten health check: Ready=True -> Healthy, Issuing=True -> Progressing,
-# Ready=False + reason!=DoesNotExist -> Degraded.
+# UWAGA: KROK 8.6 (health check Certificate) USUNIETY.
+# ArgoCD v3.5.6 domyslnie poprawnie interpretuje Certificate:
+#   - Ready=True -> Healthy
+#   - Issuing=True -> Progressing
+#   - Ready=False + reason!=DoesNotExist -> Degraded
+# Health check nie jest potrzebny, gdy Certificate/vault-tls jest Ready=True.
 # ============================================================================
-log "=== Krok 8.6: ArgoCD custom health check dla Certificate ==="
-
-KC -n argocd patch configmap argocd-cm --type json -p '[{"op":"remove","path":"/data/resource.customizations"}]' 2>/dev/null || true
-
-KC -n argocd patch configmap argocd-cm --type merge -p '{"data":{"resource.customizations":"cert-manager.io/Certificate:\n  health.lua: |\n    hs = {}\n    if obj.status ~= nil and obj.status.conditions ~= nil then\n      for i, condition in ipairs(obj.status.conditions) do\n        if condition.type == \"Ready\" and condition.status == \"True\" then\n          hs.status = \"Healthy\"\n          hs.message = condition.message\n          return hs\n        end\n        if condition.type == \"Issuing\" and condition.status == \"True\" then\n          hs.status = \"Progressing\"\n          hs.message = condition.message or \"Issuing certificate\"\n          return hs\n        end\n        if condition.type == \"Ready\" and condition.status == \"False\" and condition.reason ~= \"DoesNotExist\" then\n          hs.status = \"Degraded\"\n          hs.message = condition.message\n          return hs\n        end\n      end\n    end\n    hs.status = \"Progressing\"\n    hs.message = \"Waiting for certificate\"\n    return hs\n"}}'
-
-VERIFY=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations}' 2>/dev/null || true)
-echo "$VERIFY" | grep -q 'cert-manager.io/Certificate' && ok "Health check dodany poprawnie." || warn "Health check NIE zawiera Certificate."
-
-KC -n argocd rollout restart statefulset argo-cd-argocd-application-controller 2>/dev/null || true
-KC -n argocd rollout restart deployment argo-cd-argocd-server 2>/dev/null || true
-KC -n argocd rollout status statefulset argo-cd-argocd-application-controller --timeout=120s 2>/dev/null || true
-ok "ArgoCD application-controller zrestartowany."
 
 # ---------- Krok 8.5: ArgoCD repo credentials ----------
 log "=== Krok 8.5: ArgoCD repo credentials ==="
@@ -571,8 +562,8 @@ ${GREEN}=== GOTOWE ===${NC}
 IP: ${IP:-<nie wykryto>}
 
 Jesli ArgoCD czeka na "healthy state of Certificate/vault-tls":
-  # Health check powinien byc aktywny (Krok 8.6).
-  kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations}'
+  # Health check nie jest potrzebny — Certificate/vault-tls powinien byc Ready=True.
+  kubectl -n davtro02 get certificate vault-tls
 
 Jesli vault-issuer jest False:
   # To normalne — vault-bootstrap tworzy cert-manager-vault-token.
