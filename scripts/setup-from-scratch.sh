@@ -82,7 +82,7 @@ fi
 
 if ! id -nG "$USER" | grep -qw microk8s; then
   sudo usermod -a -G microk8s "$USER"
-  warn "Dodano $USER do grupy microk8s. Uzywam 'sg microk8s' — nie musisz sie wylogowywac."
+  warn "Dodano $USER do grupy microk8s. Uzywam 'sg microk8s'."
 fi
 
 MK() { sg microk8s -c "microk8s $*"; }
@@ -102,6 +102,8 @@ MK enable dns
 MK enable hostpath-storage
 
 # KLUCZOWE 1: odtworz StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer
+# (dla hostpath lepszy jest WaitForFirstConsumer — PV tworzony na tym samym node,
+#  na ktorym bedzie pod. Immediate powoduje warning i potencjalne problemy z nodeAffinity.)
 log "Odtwarzam StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer..."
 KC delete storageclass microk8s-hostpath 2>/dev/null || true
 KC apply -f - <<'YAML'
@@ -115,7 +117,7 @@ provisioner: microk8s.io/hostpath
 reclaimPolicy: Delete
 volumeBindingMode: WaitForFirstConsumer
 YAML
-ok "StorageClass microk8s-hostpath: volumeBindingMode=WaitForFirstConsumer."
+ok "StorageClass microk8s-hostpath: WaitForFirstConsumer."
 
 # KLUCZOWE 2: czekaj na ClusterRole/ClusterRoleBinding microk8s-hostpath
 log "Czekam na ClusterRole/ClusterRoleBinding microk8s-hostpath..."
@@ -162,7 +164,9 @@ subjects:
 YAML
 fi
 
-# KLUCZOWE 4: usun taint control-plane/master (dev, hostpath bug)
+# KLUCZOWE 4: usun taint control-plane/master (dev, zeby helper pody provisionera
+# mogly sie schedulowac). To obejscie bug MicroK8s: provisioner nie przenosi
+# toleracji na helper pody, wiec PVC z hostpath nigdy sie nie binduja na taintowanym wezle.
 log "Usuwam taint control-plane/master (dev, hostpath bug)..."
 NODES=$(KC get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
 for node in $NODES; do
@@ -170,18 +174,19 @@ for node in $NODES; do
   KC taint nodes "$node" node-role.kubernetes.io/master- 2>/dev/null || true
 done
 REMAINING_TAINTS=$(KC get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}' 2>/dev/null | grep -E 'control-plane|master' || true)
-[ -z "$REMAINING_TAINTS" ] && ok "Tainty control-plane/master usuniete (dev)." || warn "Tainty nadal sa: $REMAINING_TAINTS"
+[ -z "$REMAINING_TAINTS" ] && ok "Tainty usuniete." || warn "Tainty nadal sa: $REMAINING_TAINTS"
 
 # KLUCZOWE 5: usun stare PV z pustym nodeAffinity (bug MicroK8s: In [""])
 log "Usuwam PV z pustym nodeAffinity (bug MicroK8s)..."
 PVS_TO_DELETE=$(KC get pv -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeAffinity}{"\n"}{end}' 2>/dev/null | grep '""' | awk '{print $1}' || true)
 if [ -n "$PVS_TO_DELETE" ]; then
-  for pv in $PVS_TO_DELETE; do warn "Usuwam PV $pv (pusty nodeAffinity)."; KC delete pv "$pv" --wait=false 2>/dev/null || true; done
+  for pv in $PVS_TO_DELETE; do warn "Usuwam PV $pv."; KC delete pv "$pv" --wait=false 2>/dev/null || true; done
 else
   ok "Brak PV z pustym nodeAffinity."
 fi
 
-# KLUCZOWE 6: patch hostpath-provisioner z toleracjami
+# KLUCZOWE 6: patch hostpath-provisioner z toleracjami (kubectl apply — NIE replace,
+# bo replace uszkadzal ClusterRole microk8s-hostpath)
 log "Dodaje toleracje do hostpath-provisioner (kubectl apply)..."
 sleep 3
 CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
@@ -192,27 +197,25 @@ if [ "$CURRENT" != "{}" ]; then
     {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
     {"key": "node.kubernetes.io/unreachable", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
   ]' | jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .status)')
-  echo "$NEW" | KC apply -f - 2>/dev/null && ok "hostpath-provisioner: tolerations ustawione (apply)." || warn "Nie udalo sie patchowac hostpath-provisioner."
+  echo "$NEW" | KC apply -f - 2>/dev/null && ok "hostpath-provisioner: tolerations ustawione." || warn "Nie udalo sie patchowac hostpath-provisioner."
 fi
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
 VERIFY_TOL=$(KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || true)
-echo "$VERIFY_TOL" | grep -q 'control-plane' && ok "hostpath-provisioner ma toleracje na control-plane." || warn "hostpath-provisioner NIE ma toleracji."
+echo "$VERIFY_TOL" | grep -q 'control-plane' && ok "hostpath-provisioner ma toleracje." || warn "hostpath-provisioner NIE ma toleracji."
 log "Czekam na hostpath-provisioner..."
 for i in $(seq 1 30); do KC -n kube-system get pods -l k8s-app=hostpath-provisioner 2>/dev/null | grep -q Running && { ok "hostpath-provisioner dziala."; break; }; sleep 2; done
 
 if [ "$ENABLE_RBAC" = "1" ]; then
   warn "Wlaczam RBAC — to moze zepsuc Dashboard/ArgoCD/Traefik!"
   warn "Jesli cos padnie: microk8s disable rbac"
-  MK enable rbac
-  ok "RBAC wlaczone."
+  MK enable rbac; ok "RBAC wlaczone."
 else
-  log "RBAC pominiete (ENABLE_RBAC=0). Wlacz recznie: microk8s enable rbac"
+  log "RBAC pominiete."
 fi
-
 MK enable metallb:"$METALLB_RANGE"
 MK enable dashboard
 MK enable ingress
-ok "dns, hostpath-storage (PVC), metallb, dashboard, ingress wlaczone."
+ok "dodatki wlaczone."
 
 # ---------- Krok 3: Helm ----------
 log "=== Krok 3: Helm ==="
@@ -262,115 +265,33 @@ helm upgrade --install argo-cd argo/argo-cd -n argocd --create-namespace --wait 
 ok "ArgoCD gotowy."
 
 # ============================================================================
-# KROK 8.6: ARGOCD CUSTOM HEALTH CHECK DLA CERTIFICATE
-# Uzywamy get -o yaml > plik > edycja > apply (NIE kubectl patch z wieloliniowym
-# JSON, ktory nie dziala niezawodnie w tej wersji ArgoCD).
+# KROK 8.6: ARGOCD CUSTOM HEALTH CHECK DLA CERTIFICATE (przez kubectl patch!)
+# ArgoCD v3.5.6 domyslnie uznaje Certificate z Ready=False/Issuing=True
+# za Degraded/Progressing i blokuje sync na Certificate/vault-tls.
+# Ten health check: Ready=True -> Healthy, Issuing=True -> Progressing,
+# Ready=False + reason!=DoesNotExist -> Degraded.
 # ============================================================================
 log "=== Krok 8.6: ArgoCD custom health check dla Certificate ==="
 
-EXISTING_CUSTOMIZATIONS=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations}' 2>/dev/null || true)
-if echo "$EXISTING_CUSTOMIZATIONS" | grep -q 'cert-manager.io/Certificate'; then
-  ok "Certificate health check juz istnieje w resource.customizations — pomijam."
-else
-  ARGOCD_CM_FILE=$(mktemp)
-  KC -n argocd get configmap argocd-cm -o yaml > "$ARGOCD_CM_FILE" 2>/dev/null || true
+KC -n argocd patch configmap argocd-cm --type json -p '[{"op":"remove","path":"/data/resource.customizations"}]' 2>/dev/null || true
 
-  if [ -s "$ARGOCD_CM_FILE" ]; then
-    python3 - "$ARGOCD_CM_FILE" <<'PY'
-import sys, re
-file = sys.argv[1]
-with open(file) as f:
-    content = f.read()
+KC -n argocd patch configmap argocd-cm --type merge -p '{"data":{"resource.customizations":"cert-manager.io/Certificate:\n  health.lua: |\n    hs = {}\n    if obj.status ~= nil and obj.status.conditions ~= nil then\n      for i, condition in ipairs(obj.status.conditions) do\n        if condition.type == \"Ready\" and condition.status == \"True\" then\n          hs.status = \"Healthy\"\n          hs.message = condition.message\n          return hs\n        end\n        if condition.type == \"Issuing\" and condition.status == \"True\" then\n          hs.status = \"Progressing\"\n          hs.message = condition.message or \"Issuing certificate\"\n          return hs\n        end\n        if condition.type == \"Ready\" and condition.status == \"False\" and condition.reason ~= \"DoesNotExist\" then\n          hs.status = \"Degraded\"\n          hs.message = condition.message\n          return hs\n        end\n      end\n    end\n    hs.status = \"Progressing\"\n    hs.message = \"Waiting for certificate\"\n    return hs\n"}}'
 
-health_lua = '''hs = {}
-if obj.status ~= nil and obj.status.conditions ~= nil then
-  for i, condition in ipairs(obj.status.conditions) do
-    if condition.type == "Ready" and condition.status == "True" then
-      hs.status = "Healthy"
-      hs.message = condition.message
-      return hs
-    end
-    if condition.type == "Issuing" and condition.status == "True" then
-      hs.status = "Progressing"
-      hs.message = condition.message or "Issuing certificate"
-      return hs
-    end
-    if condition.type == "Ready" and condition.status == "False" and condition.reason ~= "DoesNotExist" then
-      hs.status = "Degraded"
-      hs.message = condition.message
-      return hs
-    end
-  end
-end
-hs.status = "Progressing"
-hs.message = "Waiting for certificate"
-return hs'''
-
-content = re.sub(r'\n\s*resource\.customizations\.health\.cert-manager\.io_Certificate:.*?(?=\n\s*\S|\Z)', '', content, flags=re.DOTALL)
-
-if re.search(r'^data:\s*$', content, re.M):
-    lines = content.split('\n'); out = []; inserted = False
-    for i, line in enumerate(lines):
-        out.append(line)
-        if not inserted and re.match(r'^data:\s*$', line):
-            indent = "  "
-            for j in range(i+1, len(lines)):
-                m = re.match(r'^(\s+)\S', lines[j])
-                if m: indent = m.group(1); break
-            out.append(f'{indent}resource.customizations: |')
-            out.append(f'{indent}  cert-manager.io/Certificate:')
-            out.append(f'{indent}    health.lua: |')
-            for lua_line in health_lua.split('\n'):
-                out.append(f'{indent}      {lua_line}')
-            inserted = True
-    content = '\n'.join(out)
-else:
-    content += '\ndata:\n  resource.customizations: |\n    cert-manager.io/Certificate:\n      health.lua: |\n'
-    for lua_line in health_lua.split('\n'):
-        content += f'        {lua_line}\n'
-
-with open(file, 'w') as f:
-    f.write(content)
-PY
-    KC apply -f "$ARGOCD_CM_FILE" && ok "Certificate health check dodany (poprawny format)." || warn "Nie udalo sie dodac health checka."
-    rm -f "$ARGOCD_CM_FILE"
-  else
-    warn "Nie udalo sie pobrac argocd-cm."
-  fi
-fi
-
-VERIFY_CUSTOMIZATIONS=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations}' 2>/dev/null || true)
-if echo "$VERIFY_CUSTOMIZATIONS" | grep -q 'cert-manager.io/Certificate'; then
-  ok "Health check zweryfikowany (resource.customizations zawiera Certificate)."
-else
-  warn "Health check NIE zawiera Certificate — sprawdz recznie!"
-fi
+VERIFY=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations}' 2>/dev/null || true)
+echo "$VERIFY" | grep -q 'cert-manager.io/Certificate' && ok "Health check dodany poprawnie." || warn "Health check NIE zawiera Certificate."
 
 KC -n argocd rollout restart statefulset argo-cd-argocd-application-controller 2>/dev/null || true
 KC -n argocd rollout restart deployment argo-cd-argocd-server 2>/dev/null || true
 KC -n argocd rollout status statefulset argo-cd-argocd-application-controller --timeout=120s 2>/dev/null || true
 ok "ArgoCD application-controller zrestartowany."
 
-# Wyczysc zablokowany operationState (ArgoCD wznawia stara operacje "waiting for healthy state")
-log "Czyszcze zablokowany operationState Application davtro-website..."
-KC -n argocd patch application davtro-website --type merge -p '{"operation":null}' 2>/dev/null || true
-KC -n argocd patch application davtro-website --subresource status --type merge -p '{"status":{"operationState":null}}' 2>/dev/null || true
-ok "operationState wyczyszczony."
-
-sleep 2
-KC -n argocd annotate application davtro-website argocd.argoproj.io/refresh=hard --overwrite 2>/dev/null || true
-ok "Application davtro-website: refresh=hard."
-
 # ---------- Krok 8.5: ArgoCD repo credentials ----------
 log "=== Krok 8.5: ArgoCD repo credentials ==="
 REPO_URL="https://github.com/${GHCR_USER}/${GHCR_REPO}.git"
 log "Repo URL: $REPO_URL"
 if [ -z "${GITHUB_PAT:-}" ]; then
-  echo "${YELLOW}Potrzebny GitHub PAT z uprawnieniami 'Contents: Read' do prywatnego repo.${NC}"
-  echo "Utworz go: https://github.com/settings/tokens"
-  echo "Jesli repo jest publiczne — nacisnij Enter, aby pominac."
-  echo
-  read -r -s -p "Wklej GITHUB_PAT (Enter=pomin): " GITHUB_PAT; echo
+  echo "${YELLOW}Potrzebny GitHub PAT (Contents: Read). Enter=pomin.${NC}"
+  read -r -s -p "Wklej GITHUB_PAT: " GITHUB_PAT; echo
 fi
 if [ -n "$GITHUB_PAT" ]; then
   KC -n argocd create secret generic davtro-github-repo \
@@ -378,9 +299,9 @@ if [ -n "$GITHUB_PAT" ]; then
     --from-literal=username="$GHCR_USER" --from-literal=password="$GITHUB_PAT" \
     --dry-run=client -o yaml | KC apply -f -
   KC -n argocd label secret davtro-github-repo argocd.argoproj.io/secret-type=repository --overwrite
-  ok "ArgoCD repo secret davtro-github-repo utworzony (${GHCR_USER}/${GHCR_REPO})."
+  ok "ArgoCD repo secret utworzony."
 else
-  warn "Brak GITHUB_PAT — ArgoCD sklonuje repo tylko jesli jest publiczne."
+  warn "Brak GITHUB_PAT."
 fi
 
 # ---------- Krok 9: manifests/istio-system ----------
@@ -390,9 +311,22 @@ ok "Gateway/Certificate zastosowane."
 
 # ---------- Krok 9.5: reczne utworzenie namespace davtro02 ----------
 log "=== Krok 9.5: reczne utworzenie namespace davtro02 ==="
-if ! KC get ns davtro02 >/dev/null 2>&1; then KC create namespace davtro02; ok "Namespace davtro02 utworzony."; else ok "Namespace davtro02 juz istnieje."; fi
+if ! KC get ns davtro02 >/dev/null 2>&1; then KC create namespace davtro02; ok "Namespace utworzony."; else ok "Namespace juz istnieje."; fi
 KC label namespace davtro02 istio-injection=enabled --overwrite || true
-ok "Namespace davtro02: istio-injection=enabled."
+ok "Namespace: istio-injection=enabled."
+
+# ============================================================================
+# KROK 9.6 (WAZNE!): RECZNE ZAAPLIKOWANIE PLIKOW VAULTA I POSTGRESA
+# Bez tego ArgoCD zablokuje sie na SecretStore/vault-backend (Degraded),
+# bo SecretStore (fala -1) czeka na vault-0 (fala 0), a vault-0 czeka na
+# SecretStore (fala -1). Reczne kubectl apply przerwie to bledne kolo.
+# ============================================================================
+log "=== Krok 9.6: reczne zaaplikowanie plikow Vaulta i Postgresa ==="
+KC apply -f "$REPO_DIR/manifests/base/vault-server-tls.yaml" 2>/dev/null || true
+KC apply -f "$REPO_DIR/manifests/base/vault-tls-certificate.yaml" 2>/dev/null || true
+KC apply -f "$REPO_DIR/manifests/base/vault.yaml" 2>/dev/null || true
+KC apply -f "$REPO_DIR/manifests/base/postgres.yaml" 2>/dev/null || true
+ok "Pliki Vaulta i Postgresa zaaplikowane recznie."
 
 # ---------- Krok 10: ArgoCD Applications ----------
 log "=== Krok 10: ArgoCD Applications ==="
@@ -432,7 +366,7 @@ while ! KC get ns davtro02 >/dev/null 2>&1; do
 done
 if KC get ns davtro02 >/dev/null 2>&1; then
   KC label namespace davtro02 istio-injection=enabled --overwrite || true
-  ok "Namespace davtro02 istnieje, istio-injection=enabled."
+  ok "Namespace davtro02 istnieje."
 else
   warn "Pomijam Krok 11 — namespace davtro02 nie istnieje."
 fi
@@ -444,7 +378,7 @@ if KC get ns davtro02 >/dev/null 2>&1 && ! KC -n davtro02 get secret davtro-secr
     --from-literal=DB_USER=davtro --from-literal=DB_PASSWORD=tymczasowe \
     --from-literal=SMTP_USER='' --from-literal=SMTP_PASSWORD='' \
     --from-literal=ADMIN_PASSWORD=tymczasowe --from-literal=JWT_SECRET=tymczasowe 2>/dev/null \
-    && ok "Tymczasowy davtro-secrets utworzony (ESO nadpisze go pozniej)." || warn "Nie udalo sie utworzyc tymczasowego davtro-secrets."
+    && ok "Tymczasowy davtro-secrets utworzony." || warn "Nie udalo sie utworzyc tymczasowego davtro-secrets."
 else
   ok "davtro-secrets juz istnieje lub brak namespace."
 fi
@@ -452,26 +386,24 @@ fi
 # ---------- Krok 11.6: GHCR pull secret ----------
 log "=== Krok 11.6: GHCR pull secret ==="
 if [ -z "${GHCR_USER:-}" ]; then
-  read -r -p "Podaj nazwe uzytkownika GitHub (GHCR) [domyslnie: exea-centrum]: " GHCR_USER_INPUT
+  read -r -p "Podaj GHCR user [exea-centrum]: " GHCR_USER_INPUT
   GHCR_USER="${GHCR_USER_INPUT:-exea-centrum}"
 fi
 log "GHCR user: $GHCR_USER"
 if KC get ns davtro02 >/dev/null 2>&1; then
   if [ -z "${GHCR_PAT:-}" ]; then
-    echo "${YELLOW}Potrzebny GitHub PAT do GHCR.${NC}"
-    echo "Wymagane uprawnienia: read:packages."
-    echo "Jesli pakiety GHCR sa PUBLIC — nacisnij Enter, aby pominac."
-    read -r -s -p "Wklej GHCR_PAT (Enter=pomin): " GHCR_PAT; echo
+    echo "${YELLOW}Potrzebny GHCR PAT (read:packages). Enter=pomin.${NC}"
+    read -r -s -p "Wklej GHCR_PAT: " GHCR_PAT; echo
   fi
   if [ -n "$GHCR_PAT" ]; then
     KC -n davtro02 create secret docker-registry ghcr-pull \
       --docker-server=ghcr.io --docker-username="$GHCR_USER" --docker-password="$GHCR_PAT" \
       --dry-run=client -o yaml | KC apply -f -
-    ok "Secret ghcr-pull utworzony/zaktualizowany."
+    ok "Secret ghcr-pull utworzony."
     SAS=$(KC -n davtro02 get sa -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
     for sa in $SAS; do KC -n davtro02 patch serviceaccount "$sa" -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}' 2>/dev/null || true; ok "ServiceAccount $sa -> ghcr-pull."; done
   else
-    warn "Brak PAT — pomijam ghcr-pull. Pakiety GHCR musza byc PUBLIC."
+    warn "Brak GHCR_PAT — pomijam ghcr-pull."
   fi
 fi
 
@@ -481,22 +413,79 @@ if KC get ns davtro02 >/dev/null 2>&1; then
   log "  czekam na vault-0..."
   VAULT_OK=0
   for i in $(seq 1 60); do KC -n davtro02 get pod vault-0 2>/dev/null | grep -qE 'Running|PodInitializing' && VAULT_OK=1 && break; [ $((i % 12)) -eq 0 ] && log "    vault-0... ($((i*5))s)"; sleep 5; done
-  if [ "$VAULT_OK" = "1" ]; then ok "vault-0 wystartowal (Running/PodInitializing)."; else warn "vault-0 nie wstal w 5 min."; KC -n davtro02 describe pod vault-0 2>/dev/null | grep -A10 "Events:" | tail -12 || true; KC -n davtro02 logs vault-0 -c istio-init --tail=15 2>/dev/null || true; fi
+  if [ "$VAULT_OK" = "1" ]; then ok "vault-0 wystartowal."; else warn "vault-0 nie wstal w 5 min."; KC -n davtro02 describe pod vault-0 2>/dev/null | grep -A10 "Events:" | tail -12 || true; fi
   log "  czekam na postgres-db-0..."
   PG_OK=0
   for i in $(seq 1 60); do KC -n davtro02 get pod postgres-db-0 2>/dev/null | grep -qE 'Running|PodInitializing' && PG_OK=1 && break; [ $((i % 12)) -eq 0 ] && log "    postgres-db-0... ($((i*5))s)"; sleep 5; done
-  if [ "$PG_OK" = "1" ]; then ok "postgres-db-0 wystartowal (Running/PodInitializing)."; else warn "postgres-db-0 nie wstal w 5 min."; KC -n davtro02 describe pod postgres-db-0 2>/dev/null | grep -A10 "Events:" | tail -12 || true; fi
+  if [ "$PG_OK" = "1" ]; then ok "postgres-db-0 wystartowal."; else warn "postgres-db-0 nie wstal w 5 min."; KC -n davtro02 describe pod postgres-db-0 2>/dev/null | grep -A10 "Events:" | tail -12 || true; fi
   ok "Krok 12 zakonczony (Vault=$VAULT_OK Postgres=$PG_OK)."
 fi
 
-# ---------- Krok 12.5: diagnostyka Pending ----------
-log "=== Krok 12.5: diagnostyka Pending ==="
-PENDING_PODS=$(KC -n davtro02 get pods --field-selector=status.phase=Pending -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
-if [ -n "$PENDING_PODS" ]; then
-  for p in $PENDING_PODS; do warn "PENDING: $p"; KC -n davtro02 describe pod "$p" 2>/dev/null | grep -A10 "Events:" | tail -12 || true; KC -n davtro02 get pod "$p" -o jsonpath='{range .status.initContainerStatuses[*]}{.name}: {.state}{"\n"}{end}' 2>/dev/null || true; done
+# ============================================================================
+# KROK 12.6 (WAZNE!): RECZNE ZAINICJALIZOWANIE VAULTA (przez nazwe DNS!)
+# Certyfikat vault-tls ma SAN tylko dla DNS (vault, vault.davtro02.svc...),
+# a NIE dla IP 127.0.0.1. Dlatego uzywamy nazwy DNS, a nie IP.
+# ============================================================================
+log "=== Krok 12.6: reczne zainicjalizowanie Vaulta (przez DNS) ==="
+VAULT_DNS="https://vault.davtro02.svc.cluster.local:8203"
+
+VAULT_STATUS=$(KC -n davtro02 exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt vault status -format=json" 2>/dev/null || echo '{}')
+INIT=$(echo "$VAULT_STATUS" | jq -r '.initialized // false' 2>/dev/null || echo "false")
+SEALED=$(echo "$VAULT_STATUS" | jq -r '.sealed // true' 2>/dev/null || echo "true")
+
+if [ "$INIT" != "true" ]; then
+  log "Vault niezainicjalizowany — inicjalizuje przez DNS..."
+  KC -n davtro02 exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt vault operator init -key-shares=1 -key-threshold=1 -format=json" > /tmp/vault-init.json
+  UKEY=$(jq -r '.unseal_keys_b64[0]' /tmp/vault-init.json)
+  RTOKEN=$(jq -r '.root_token' /tmp/vault-init.json)
+  KC -n davtro02 exec vault-0 -- sh -c "printf '%s\n%s\n' '$UKEY' '$RTOKEN' > /vault/data/bootstrap-keys && chmod 600 /vault/data/bootstrap-keys"
+  ok "Vault zainicjalizowany."
 else
-  ok "Brak Pending Podow w davtro02."
+  log "Vault juz zainicjalizowany."
+  UKEY=$(KC -n davtro02 exec vault-0 -- sh -c "head -n1 /vault/data/bootstrap-keys" 2>/dev/null || echo "")
+  RTOKEN=$(KC -n davtro02 exec vault-0 -- sh -c "tail -n1 /vault/data/bootstrap-keys" 2>/dev/null || echo "")
 fi
+
+if [ "$SEALED" = "true" ] && [ -n "$UKEY" ]; then
+  log "Odsealowuje Vault..."
+  KC -n davtro02 exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt vault operator unseal '$UKEY'" 2>/dev/null || true
+  ok "Vault odsealowany."
+fi
+
+# ============================================================================
+# KROK 12.7 (WAZNE!): RECZNE WLACZENIE AUTH KUBERNETES W VAULCIE
+# Bez tego SecretStore/vault-backend bedzie InvalidProviderConfig.
+# ============================================================================
+log "=== Krok 12.7: reczne wlaczenie auth Kubernetes w Vaultcie ==="
+KC -n davtro02 exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt VAULT_TOKEN='$RTOKEN' vault auth enable kubernetes" 2>/dev/null || true
+KC -n davtro02 exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt VAULT_TOKEN='$RTOKEN' vault write auth/kubernetes/config kubernetes_host='https://kubernetes.default.svc' kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt disable_iss_validation=true" 2>/dev/null || true
+ok "Auth Kubernetes wlaczone."
+
+# ============================================================================
+# KROK 12.8 (WAZNE!): RECZNE UTWORZENIE POLICY I ROLE DAVTRO-APPS
+# Bez tego SecretStore/vault-backend bedzie InvalidProviderConfig
+# (bo rola davtro-apps nie istnieje w Vaultcie).
+# ============================================================================
+log "=== Krok 12.8: reczne utworzenie policy i role davtro-apps ==="
+KC -n davtro02 exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt VAULT_TOKEN='$RTOKEN' vault policy write davtro-apps - <<'EOF'
+path \"davtro/data/*\" { capabilities = [\"read\"] }
+path \"database/creds/davtro-app-rw\" { capabilities = [\"read\"] }
+EOF" 2>/dev/null || true
+KC -n davtro02 exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt VAULT_TOKEN='$RTOKEN' vault write auth/kubernetes/role/davtro-apps bound_service_account_names=davtro-sa bound_service_account_namespaces=davtro02 policies=davtro-apps ttl=1h" 2>/dev/null || true
+ok "Policy i rola davtro-apps utworzone."
+
+# Wymus reconcile SecretStore
+KC -n davtro02 annotate secretstore vault-backend force-reconcile=$(date +%s) --overwrite 2>/dev/null || true
+ok "SecretStore/vault-backend: force-reconcile."
+
+# ============================================================================
+# KROK 12.9 (WAZNE!): RECZNE ZAAPLIKOWANIE VAULT-BOOTSTRAP
+# ArgoCD moze nie zaaplikowac fali 1, jesli SecretStore (fala -1) byl Degraded.
+# Reczne kubectl apply uruchomi vault-bootstrap, ktory wykona DONE.
+# ============================================================================
+log "=== Krok 12.9: reczne zaaplikowanie vault-bootstrap ==="
+KC apply -f "$REPO_DIR/manifests/base/vault-bootstrap.yaml" 2>/dev/null || true
+ok "vault-bootstrap zaaplikowany recznie."
 
 # ---------- Krok 13: Weryfikacja ----------
 log "=== Krok 13: weryfikacja ==="
@@ -515,6 +504,9 @@ echo "--- cert-manager-vault-token ---"; KC -n cert-manager get secret cert-mana
 echo "--- Istio analyze ---"; istioctl analyze -n davtro02 2>/dev/null || warn "istioctl analyze zglosil uwagi."
 echo "--- Gateway/VirtualService ---"; KC -n davtro02 get gateway,virtualservice 2>/dev/null || true
 echo "--- ArgoCD Applications ---"; KC -n argocd get applications 2>/dev/null || true
+echo "--- SecretStore ---"; KC -n davtro02 get secretstore 2>/dev/null || true
+echo "--- ExternalSecret ---"; KC -n davtro02 get externalsecret 2>/dev/null || true
+echo "--- vault-bootstrap (log) ---"; KC -n davtro02 logs deploy/vault-bootstrap --tail=20 2>/dev/null || echo "  (brak deploy)"
 echo "--- Pending Pody (przyczyny) ---"
 for p in $(KC -n davtro02 get pods --field-selector=status.phase=Pending -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do echo "  $p:"; KC -n davtro02 describe pod "$p" 2>/dev/null | grep -A3 "Events:" | tail -4 || true; done
 echo "--- ImagePullBackOff ---"
@@ -579,17 +571,17 @@ ${GREEN}=== GOTOWE ===${NC}
 IP: ${IP:-<nie wykryto>}
 
 Jesli ArgoCD czeka na "healthy state of Certificate/vault-tls":
-  # Health check powinien byc aktywny (Krok 8.6, format resource.customizations).
+  # Health check powinien byc aktywny (Krok 8.6).
   kubectl -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations}'
-  # Jesli pusty — zrestartuj controller:
-  kubectl -n argocd rollout restart statefulset argo-cd-argocd-application-controller
-  # Wyczysc operationState:
-  kubectl -n argocd patch application davtro-website --type merge -p '{"operation":null}'
 
 Jesli vault-issuer jest False:
   # To normalne — vault-bootstrap tworzy cert-manager-vault-token.
   kubectl -n davtro02 get deploy vault-bootstrap
   kubectl -n davtro02 logs deploy/vault-bootstrap --tail=50 | grep -i "DONE\\|token"
+
+Jesli SecretStore jest InvalidProviderConfig:
+  # Sprawdz, czy vault-0 jest Initialized/Sealed, i czy auth Kubernetes jest wlaczone.
+  kubectl -n davtro02 exec vault-0 -- sh -c 'VAULT_ADDR=https://vault.davtro02.svc.cluster.local:8203 VAULT_CACERT=/vault/tls/ca.crt vault status'
 
 Nacisnij Ctrl+C, aby zakonczyc port-forwardy.
 EOF
