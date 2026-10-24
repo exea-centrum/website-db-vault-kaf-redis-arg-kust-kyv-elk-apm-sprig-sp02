@@ -12,9 +12,6 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: davtro02
-
-  # ArgoCD nie bedzie blokowal sie na Certificate/vault-tls podczas
-  # wystawiania (Ready=False/DoesNotExist). Nie dotykamy argocd-cm!
   ignoreDifferences:
     - group: cert-manager.io
       kind: Certificate
@@ -25,7 +22,6 @@ spec:
       name: vault-bootstrap
       jsonPointers:
         - /status
-
   syncPolicy:
     automated:
       prune: true
