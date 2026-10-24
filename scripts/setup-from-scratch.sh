@@ -210,7 +210,6 @@ for i in $(seq 1 30); do KC -n kube-system get pods -l k8s-app=hostpath-provisio
 
 if [ "$ENABLE_RBAC" = "1" ]; then
   warn "Wlaczam RBAC — to moze zepsuc Dashboard/ArgoCD/Traefik!"
-  warn "Jesli cos padnie: microk8s disable rbac"
   MK enable rbac; ok "RBAC wlaczone."
 else
   log "RBAC pominiete."
@@ -465,7 +464,6 @@ EOF" 2>/dev/null || true
 KC -n davtro02 exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt VAULT_TOKEN='$RTOKEN' vault write auth/kubernetes/role/davtro-apps bound_service_account_names=davtro-sa bound_service_account_namespaces=davtro02 policies=davtro-apps ttl=1h" 2>/dev/null || true
 ok "Policy i rola davtro-apps utworzone."
 
-# Wymus reconcile SecretStore
 KC -n davtro02 annotate secretstore vault-backend force-reconcile=$(date +%s) --overwrite 2>/dev/null || true
 ok "SecretStore/vault-backend: force-reconcile."
 
