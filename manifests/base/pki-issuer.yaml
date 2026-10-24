@@ -15,7 +15,8 @@ kind: ClusterIssuer
 metadata:
   name: vault-issuer
   annotations:
-    argocd.argoproj.io/sync-wave: "-2"
+    argocd.argoproj.io/sync-wave: "2"
+  annotations:
 spec:
   vault:
     server: https://vault.davtro02.svc.cluster.local:8203
@@ -29,6 +30,7 @@ spec:
         name: cert-manager-vault-token
         key: token
 ---
+
 # KROK 6 (mTLS): ClusterIssuer dla certyfikatów wewnętrznych (davtro-internal).
 # Używany przez mtls-certificates.yaml do wystawiania certyfikatów client-cert.
 # Token auth (jak vault-issuer) - działa niezależnie od Kubernetes auth config.
@@ -37,6 +39,8 @@ apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   name: vault-issuer-internal
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   vault:
     server: https://vault.davtro02.svc.cluster.local:8203
@@ -55,12 +59,15 @@ spec:
         name: cert-manager-vault-token
         key: token
 ---
+
 # ISTIO (opcja B): issuer dla cert-manager-istio-csr - podpisuje certy workloadow mesh
 # (URI SAN spiffe://cluster.local/ns/<ns>/sa/<sa>) przez Vault PKI, rola pki/sign/davtro-mesh.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   name: vault-issuer-mesh
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   vault:
     server: https://vault.davtro02.svc.cluster.local:8203

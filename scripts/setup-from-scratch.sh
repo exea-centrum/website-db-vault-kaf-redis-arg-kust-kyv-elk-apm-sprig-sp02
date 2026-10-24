@@ -22,6 +22,9 @@
 #
 # Wymaga: sudo, dostep do internetu, repozytorium sklonowane lokalnie.
 # NIE uruchamiaj jako root — MicroK8s wymaga zwyklego uzytkownika w grupie microk8s.
+#
+# UWAGA: ten skrypt NIE dodaje sync-wave (robisz to osobno: manifests/base/add-sync-waves.sh).
+#        Dzieki temu nie nadpisuje sync-wave z add-sync-waves.sh (pki-issuer w fali 2).
 
 set -euo pipefail
 
@@ -58,144 +61,6 @@ log "AUTO_SCALE_DOWN:$AUTO_SCALE_DOWN"
 log "SKIP_WAIT:      $SKIP_WAIT"
 
 # ============================================================================
-# KROK A: PRZYGOTOWANIE MANIFESTÓW (sync-wave + application.yaml)
-# - Dodaje sync-wave do wszystkich manifestów w manifests/base/
-# - Generuje argocd/application.yaml z ignoreDifferences
-# ============================================================================
-log "=== Krok A: przygotowanie manifestow (sync-wave + application.yaml) ==="
-
-# Funkcja pomocnicza: dodaje sync-wave do pierwszego metadata.name w pliku.
-# Idempotentna — jesli plik juz ma sync-wave, pomija.
-add_wave() {
-  local file="$1"; local wave="$2"
-  [ -f "$file" ] || return
-  grep -q 'argocd.argoproj.io/sync-wave' "$file" && return
-  python3 - "$file" "$wave" <<'PY'
-import sys, re
-file, wave = sys.argv[1], sys.argv[2]
-with open(file) as f: content = f.read()
-lines = content.split('\n'); out = []; in_meta = False; added = False
-for line in lines:
-    out.append(line)
-    if not added and re.match(r'^\s*metadata:\s*$', line): in_meta = True
-    elif in_meta and not added and re.match(r'^\s*name:\s*\S+', line):
-        indent = re.match(r'^(\s*)', line).group(1)
-        out.append(f'{indent}annotations:')
-        out.append(f'{indent}  argocd.argoproj.io/sync-wave: "{wave}"')
-        added = True; in_meta = False
-if added:
-    with open(file, 'w') as f: f.write('\n'.join(out))
-PY
-}
-
-# vault.yaml: 3 zasoby z roznymi falami.
-# - ConfigMap vault-config  -> -1 (Pod montuje start.sh)
-# - Service vault           -> -1 (Pod rejestruje sie w Service)
-# - StatefulSet vault       -> 0  (startuje po ConfigMap/Service)
-# Dodatkowo: StatefulSet dostaje sidecar.istio.io/inject: "false"
-# (bez tego vault-0 utknie na istio-init).
-add_wave_to_vault_yaml() {
-  local file="$REPO_DIR/manifests/base/vault.yaml"
-  [ -f "$file" ] || return
-  python3 - "$file" <<'PY'
-import sys, re
-file = sys.argv[1]
-with open(file) as f: content = f.read()
-docs = re.split(r'(?m)^---\s*$', content)
-
-def add_ann(doc, kind, name, wave, istio=False):
-    if not re.search(rf'^kind:\s*{kind}\s*$', doc, re.M): return doc, False
-    if not re.search(rf'^\s*name:\s*{name}\s*$', doc, re.M): return doc, False
-    if 'argocd.argoproj.io/sync-wave' in doc: return doc, False
-    lines = doc.split('\n'); out = []; in_meta = False; added = False
-    for line in lines:
-        out.append(line)
-        if not added and re.match(r'^metadata:\s*$', line): in_meta = True
-        elif in_meta and not added and re.match(r'^\s+name:\s*\S+', line):
-            indent = re.match(r'^(\s+)', line).group(1)
-            out.append(f'{indent}annotations:')
-            out.append(f'{indent}  argocd.argoproj.io/sync-wave: "{wave}"')
-            added = True; in_meta = False
-    doc = '\n'.join(out)
-    if istio:
-        lines = doc.split('\n'); out = []; state = None; added_i = False
-        for line in lines:
-            out.append(line)
-            if re.match(r'^\s+template:\s*$', line): state = 'wait_meta'
-            elif state == 'wait_meta' and re.match(r'^\s+metadata:\s*$', line): state = 'in_meta'
-            elif state == 'in_meta' and not added_i and re.match(r'^\s+labels:', line):
-                indent = re.match(r'^(\s+)', line).group(1)
-                out.append(f'{indent}annotations:')
-                out.append(f'{indent}  sidecar.istio.io/inject: "false"')
-                added_i = True; state = None
-        doc = '\n'.join(out)
-    return doc, True
-
-new_docs = []; changed = False
-for doc in docs:
-    d, c1 = add_ann(doc, 'ConfigMap', 'vault-config', '-1')
-    if c1: changed = True; doc = d
-    d, c2 = add_ann(doc, 'Service', 'vault', '-1')
-    if c2: changed = True; doc = d
-    d, c3 = add_ann(doc, 'StatefulSet', 'vault', '0', istio=True)
-    if c3: changed = True; doc = d
-    new_docs.append(doc)
-if changed:
-    with open(file, 'w') as f: f.write('---\n'.join(new_docs))
-PY
-}
-
-cd "$REPO_DIR/manifests/base"
-for f in pki-issuer.yaml vault-server-tls.yaml vault-tls-certificate.yaml; do add_wave "$f" "-2"; done
-for f in namespace.yaml serviceaccount.yaml configmap.yaml secret-store.yaml transit-helpers.yaml service.yaml; do add_wave "$f" "-1"; done
-for f in postgres.yaml redis.yaml kafka.yaml; do add_wave "$f" "0"; done
-add_wave_to_vault_yaml
-for f in vault-bootstrap.yaml vault-snapshot.yaml; do add_wave "$f" "1"; done
-for f in external-secrets.yaml external-secrets-db-dynamic.yaml; do add_wave "$f" "2"; done
-for f in deployment.yaml frontend.yaml message-processor.yaml spring-app.yaml hpa.yaml pdb.yaml istio-gateway.yaml istio-security.yaml network-policies.yaml; do add_wave "$f" "3"; done
-for f in prometheus.yaml grafana.yaml loki.yaml promtail.yaml tempo.yaml alertmanager.yaml exporters.yaml cert-expiry-exporter.yaml pgadmin.yaml kafka-ui.yaml service-monitors.yaml vault-servicemonitor.yaml; do add_wave "$f" "4"; done
-add_wave "kyverno-policy.yaml" "5"
-ok "Sync-wave dodane."
-
-log "Generuje argocd/application.yaml z ignoreDifferences..."
-mkdir -p "$REPO_DIR/argocd"
-cat > "$REPO_DIR/argocd/application.yaml" <<'APPYAML'
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: davtro-website
-  namespace: argocd
-spec:
-  project: default
-  source:
-    repoURL: https://github.com/exea-centrum/website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02.git
-    targetRevision: HEAD
-    path: manifests/overlays/production
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: davtro02
-  ignoreDifferences:
-    - group: cert-manager.io
-      kind: Certificate
-      jsonPointers:
-        - /status
-    - group: apps
-      kind: Deployment
-      name: vault-bootstrap
-      jsonPointers:
-        - /status
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
-      - RespectIgnoreDifferences=true
-APPYAML
-ok "argocd/application.yaml wygenerowany."
-cd "$REPO_DIR"
-
-# ============================================================================
 # KROK 0-17: instalacja klastra
 # ============================================================================
 
@@ -214,15 +79,21 @@ if ! command -v microk8s >/dev/null 2>&1; then
 else
   warn "MicroK8s juz zainstalowany — pomijam instalacje."
 fi
+
 if ! id -nG "$USER" | grep -qw microk8s; then
   sudo usermod -a -G microk8s "$USER"
   warn "Dodano $USER do grupy microk8s. Uzywam 'sg microk8s' — nie musisz sie wylogowywac."
 fi
+
 MK() { sg microk8s -c "microk8s $*"; }
 KC() { sg microk8s -c "microk8s kubectl $*"; }
+
 MK status --wait-ready || die "MicroK8s nie wstal."
+
 log "Generuje ~/.kube/config z MicroK8s..."
-mkdir -p "$HOME/.kube"; MK config > "$HOME/.kube/config"; chmod 600 "$HOME/.kube/config"
+mkdir -p "$HOME/.kube"
+MK config > "$HOME/.kube/config"
+chmod 600 "$HOME/.kube/config"
 ok "~/.kube/config gotowy."
 
 # ---------- Krok 2: Dodatki MicroK8s ----------
@@ -231,8 +102,6 @@ MK enable dns
 MK enable hostpath-storage
 
 # KLUCZOWE 1: odtworz StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer
-# (dla hostpath lepszy jest WaitForFirstConsumer — PV tworzony na tym samym node,
-#  na ktorym bedzie pod. Immediate powoduje warning i potencjalne problemy z nodeAffinity.)
 log "Odtwarzam StorageClass microk8s-hostpath z volumeBindingMode: WaitForFirstConsumer..."
 KC delete storageclass microk8s-hostpath 2>/dev/null || true
 KC apply -f - <<'YAML'
@@ -293,9 +162,7 @@ subjects:
 YAML
 fi
 
-# KLUCZOWE 4: usun taint control-plane/master (dev, zeby helper pody provisionera
-# mogly sie schedulowac). To obejscie bug MicroK8s: provisioner nie przenosi
-# toleracji na helper pody, wiec PVC z hostpath nigdy sie nie binduja na taintowanym wezle.
+# KLUCZOWE 4: usun taint control-plane/master (dev, hostpath bug)
 log "Usuwam taint control-plane/master (dev, hostpath bug)..."
 NODES=$(KC get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
 for node in $NODES; do
@@ -314,8 +181,7 @@ else
   ok "Brak PV z pustym nodeAffinity."
 fi
 
-# KLUCZOWE 6: patch hostpath-provisioner z toleracjami (kubectl apply — NIE replace,
-# bo replace uszkadzal ClusterRole microk8s-hostpath)
+# KLUCZOWE 6: patch hostpath-provisioner z toleracjami
 log "Dodaje toleracje do hostpath-provisioner (kubectl apply)..."
 sleep 3
 CURRENT=$(KC -n kube-system get deployment hostpath-provisioner -o json 2>/dev/null || echo '{}')
@@ -330,17 +196,19 @@ if [ "$CURRENT" != "{}" ]; then
 fi
 KC -n kube-system rollout restart deployment hostpath-provisioner 2>/dev/null || true
 VERIFY_TOL=$(KC -n kube-system get deployment hostpath-provisioner -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null || true)
-echo "$VERIFY_TOL" | grep -q 'control-plane' && ok "hostpath-provisioner ma toleracje na control-plane." || warn "hostpath-provisioner NIE ma toleracji na control-plane — sprawdz recznie."
+echo "$VERIFY_TOL" | grep -q 'control-plane' && ok "hostpath-provisioner ma toleracje na control-plane." || warn "hostpath-provisioner NIE ma toleracji."
 log "Czekam na hostpath-provisioner..."
 for i in $(seq 1 30); do KC -n kube-system get pods -l k8s-app=hostpath-provisioner 2>/dev/null | grep -q Running && { ok "hostpath-provisioner dziala."; break; }; sleep 2; done
 
 if [ "$ENABLE_RBAC" = "1" ]; then
   warn "Wlaczam RBAC — to moze zepsuc Dashboard/ArgoCD/Traefik!"
   warn "Jesli cos padnie: microk8s disable rbac"
-  MK enable rbac; ok "RBAC wlaczone."
+  MK enable rbac
+  ok "RBAC wlaczone."
 else
   log "RBAC pominiete (ENABLE_RBAC=0). Wlacz recznie: microk8s enable rbac"
 fi
+
 MK enable metallb:"$METALLB_RANGE"
 MK enable dashboard
 MK enable ingress
@@ -394,10 +262,9 @@ helm upgrade --install argo-cd argo/argo-cd -n argocd --create-namespace --wait 
 ok "ArgoCD gotowy."
 
 # ============================================================================
-# KROK 8.6: ARGOCD CUSTOM HEALTH CHECK DLA CERTIFICATE (POPRAWNY FORMAT!)
-# ArgoCD wymaga resource.customizations z zagnieżdżonym YAML, a NIE płaskiego
-# klucza resource.customizations.health.cert-manager.io_Certificate.
-# Bez tego ArgoCD v3.5.6 blokuje sync na Certificate/vault-tls (Issuing=True).
+# KROK 8.6: ARGOCD CUSTOM HEALTH CHECK DLA CERTIFICATE
+# Uzywamy get -o yaml > plik > edycja > apply (NIE kubectl patch z wieloliniowym
+# JSON, ktory nie dziala niezawodnie w tej wersji ArgoCD).
 # ============================================================================
 log "=== Krok 8.6: ArgoCD custom health check dla Certificate ==="
 
@@ -405,10 +272,71 @@ EXISTING_CUSTOMIZATIONS=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.da
 if echo "$EXISTING_CUSTOMIZATIONS" | grep -q 'cert-manager.io/Certificate'; then
   ok "Certificate health check juz istnieje w resource.customizations — pomijam."
 else
-  # Usun plaski klucz (jesli istnieje) — ArgoCD go ignoruje
-  KC -n argocd patch configmap argocd-cm --type json -p '[{"op":"remove","path":"/data/resource.customizations.health.cert-manager.io_Certificate"}]' 2>/dev/null || true
-  # Dodaj poprawny resource.customizations (zagnieżdżony YAML)
-  KC -n argocd patch configmap argocd-cm --type merge -p '{"data":{"resource.customizations":"cert-manager.io/Certificate:\n  health.lua: |\n    hs = {}\n    if obj.status ~= nil and obj.status.conditions ~= nil then\n      for i, condition in ipairs(obj.status.conditions) do\n        if condition.type == \"Ready\" and condition.status == \"True\" then\n          hs.status = \"Healthy\"\n          hs.message = condition.message\n          return hs\n        end\n        if condition.type == \"Issuing\" and condition.status == \"True\" then\n          hs.status = \"Progressing\"\n          hs.message = condition.message or \"Issuing certificate\"\n          return hs\n        end\n        if condition.type == \"Ready\" and condition.status == \"False\" and condition.reason ~= \"DoesNotExist\" then\n          hs.status = \"Degraded\"\n          hs.message = condition.message\n          return hs\n        end\n      end\n    end\n    hs.status = \"Progressing\"\n    hs.message = \"Waiting for certificate\"\n    return hs\n"}}' 2>/dev/null && ok "Certificate health check dodany (poprawny format)." || warn "Nie udalo sie dodac health checka."
+  ARGOCD_CM_FILE=$(mktemp)
+  KC -n argocd get configmap argocd-cm -o yaml > "$ARGOCD_CM_FILE" 2>/dev/null || true
+
+  if [ -s "$ARGOCD_CM_FILE" ]; then
+    python3 - "$ARGOCD_CM_FILE" <<'PY'
+import sys, re
+file = sys.argv[1]
+with open(file) as f:
+    content = f.read()
+
+health_lua = '''hs = {}
+if obj.status ~= nil and obj.status.conditions ~= nil then
+  for i, condition in ipairs(obj.status.conditions) do
+    if condition.type == "Ready" and condition.status == "True" then
+      hs.status = "Healthy"
+      hs.message = condition.message
+      return hs
+    end
+    if condition.type == "Issuing" and condition.status == "True" then
+      hs.status = "Progressing"
+      hs.message = condition.message or "Issuing certificate"
+      return hs
+    end
+    if condition.type == "Ready" and condition.status == "False" and condition.reason ~= "DoesNotExist" then
+      hs.status = "Degraded"
+      hs.message = condition.message
+      return hs
+    end
+  end
+end
+hs.status = "Progressing"
+hs.message = "Waiting for certificate"
+return hs'''
+
+content = re.sub(r'\n\s*resource\.customizations\.health\.cert-manager\.io_Certificate:.*?(?=\n\s*\S|\Z)', '', content, flags=re.DOTALL)
+
+if re.search(r'^data:\s*$', content, re.M):
+    lines = content.split('\n'); out = []; inserted = False
+    for i, line in enumerate(lines):
+        out.append(line)
+        if not inserted and re.match(r'^data:\s*$', line):
+            indent = "  "
+            for j in range(i+1, len(lines)):
+                m = re.match(r'^(\s+)\S', lines[j])
+                if m: indent = m.group(1); break
+            out.append(f'{indent}resource.customizations: |')
+            out.append(f'{indent}  cert-manager.io/Certificate:')
+            out.append(f'{indent}    health.lua: |')
+            for lua_line in health_lua.split('\n'):
+                out.append(f'{indent}      {lua_line}')
+            inserted = True
+    content = '\n'.join(out)
+else:
+    content += '\ndata:\n  resource.customizations: |\n    cert-manager.io/Certificate:\n      health.lua: |\n'
+    for lua_line in health_lua.split('\n'):
+        content += f'        {lua_line}\n'
+
+with open(file, 'w') as f:
+    f.write(content)
+PY
+    KC apply -f "$ARGOCD_CM_FILE" && ok "Certificate health check dodany (poprawny format)." || warn "Nie udalo sie dodac health checka."
+    rm -f "$ARGOCD_CM_FILE"
+  else
+    warn "Nie udalo sie pobrac argocd-cm."
+  fi
 fi
 
 VERIFY_CUSTOMIZATIONS=$(KC -n argocd get configmap argocd-cm -o jsonpath='{.data.resource\.customizations}' 2>/dev/null || true)
@@ -429,25 +357,9 @@ KC -n argocd patch application davtro-website --type merge -p '{"operation":null
 KC -n argocd patch application davtro-website --subresource status --type merge -p '{"status":{"operationState":null}}' 2>/dev/null || true
 ok "operationState wyczyszczony."
 
-# Weryfikacja Issuer/vault-ca (Certificate/vault-tls uzywa Issuer/vault-ca, a NIE ClusterIssuer/vault-issuer)
-sleep 3
-ISSUER_KIND=$(KC -n davtro02 get certificate vault-tls -o jsonpath='{.spec.issuerRef.kind}' 2>/dev/null || echo "")
-ISSUER_NAME=$(KC -n davtro02 get certificate vault-tls -o jsonpath='{.spec.issuerRef.name}' 2>/dev/null || echo "")
-if [ "$ISSUER_KIND" = "Issuer" ] && [ "$ISSUER_NAME" = "vault-ca" ]; then
-  ok "Certificate/vault-tls uzywa Issuer/vault-ca (poprawnie)."
-  ISSUER_READY=$(KC -n davtro02 get issuer vault-ca -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
-  [ "$ISSUER_READY" = "True" ] && ok "Issuer/vault-ca jest Ready=True." || warn "Issuer/vault-ca NIE jest Ready=True (status: $ISSUER_READY)."
-else
-  warn "Certificate/vault-tls uzywa $ISSUER_KIND/$ISSUER_NAME (oczekiwano Issuer/vault-ca)."
-fi
-
 sleep 2
 KC -n argocd annotate application davtro-website argocd.argoproj.io/refresh=hard --overwrite 2>/dev/null || true
 ok "Application davtro-website: refresh=hard."
-
-sleep 2
-KC -n argocd patch application davtro-website --type merge -p '{"operation":{"sync":{"revision":"HEAD"}}}' 2>/dev/null || true
-ok "Nowa synchronizacja uruchomiona."
 
 # ---------- Krok 8.5: ArgoCD repo credentials ----------
 log "=== Krok 8.5: ArgoCD repo credentials ==="
@@ -476,10 +388,7 @@ log "=== Krok 9: manifests/istio-system ==="
 KC apply -k "$REPO_DIR/manifests/istio-system"
 ok "Gateway/Certificate zastosowane."
 
-# ---------- Krok 9.5: reczne utworzenie namespace davtro02 (WAZNE!) ----------
-# Bez tego ArgoCD z CreateNamespace=true moze nie zdazyc utworzyc namespace
-# przed uplywem 10 min (widac: "Namespace davtro02 nie powstal w 10 min").
-# Reczne utworzenie namespace PRZED Applications eliminuje ten problem.
+# ---------- Krok 9.5: reczne utworzenie namespace davtro02 ----------
 log "=== Krok 9.5: reczne utworzenie namespace davtro02 ==="
 if ! KC get ns davtro02 >/dev/null 2>&1; then KC create namespace davtro02; ok "Namespace davtro02 utworzony."; else ok "Namespace davtro02 juz istnieje."; fi
 KC label namespace davtro02 istio-injection=enabled --overwrite || true
@@ -487,8 +396,8 @@ ok "Namespace davtro02: istio-injection=enabled."
 
 # ---------- Krok 10: ArgoCD Applications ----------
 log "=== Krok 10: ArgoCD Applications ==="
-[ -f "$REPO_DIR/argocd/application.yaml" ] && KC apply -f "$REPO_DIR/argocd/application.yaml"
-[ -f "$REPO_DIR/argocd/application-istio.yaml" ] && KC apply -f "$REPO_DIR/argocd/application-istio.yaml"
+if [ -f "$REPO_DIR/argocd/application.yaml" ]; then KC apply -f "$REPO_DIR/argocd/application.yaml"; fi
+if [ -f "$REPO_DIR/argocd/application-istio.yaml" ]; then KC apply -f "$REPO_DIR/argocd/application-istio.yaml"; fi
 ok "Applications zastosowane."
 
 # ---------- Krok 10.7: sprawdz pamiec w wezle ----------
@@ -498,7 +407,6 @@ if [ -n "$NODE_NAME" ]; then
   MEM_PCT=$(KC describe node "$NODE_NAME" 2>/dev/null | grep -A6 "Allocated resources" | grep 'memory' | grep -oE '[0-9]+%' | head -1 | tr -d '%' || echo "0")
   if [ -n "$MEM_PCT" ] && [ "$MEM_PCT" -ge 90 ] 2>/dev/null; then
     warn "Node $NODE_NAME ma requests memory = ${MEM_PCT}% (>=90%)."
-    warn "vault-0 / postgres-db-0 moga nie wystartowac (Pending: Insufficient memory)."
     if [ "$AUTO_SCALE_DOWN" = "1" ]; then
       log "AUTO_SCALE_DOWN=1 — wstrzymuje niekrytyczne Deploymenty..."
       for d in spark-master spark-worker grafana loki tempo kafka-ui frontend pgadmin alertmanager prometheus; do
@@ -506,7 +414,7 @@ if [ -n "$NODE_NAME" ]; then
       done
       sleep 10
     else
-      warn "Ustaw AUTO_SCALE_DOWN=1, aby skrypt zrobil to automatycznie."
+      warn "Ustaw AUTO_SCALE_DOWN=1 lub zwolnij pamiec recznie."
     fi
   else
     ok "Node $NODE_NAME: requests memory = ${MEM_PCT:-?}% (OK)."
