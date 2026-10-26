@@ -286,6 +286,8 @@ ok "Kyverno gotowy."
 
 # ---------- Krok 7: Istio ----------
 log "=== Krok 7: Istio $ISTIO_VERSION ==="
+# istiod domyslnie rezerwuje 2Gi, a sidecary po 128Mi — na jednym wezle dev to zjada pamiec (pody Pending: Insufficient memory).
+ISTIO_LOWMEM=(--set components.pilot.k8s.resources.requests.memory=256Mi --set values.global.proxy.resources.requests.memory=64Mi)
 if ! command -v istioctl >/dev/null 2>&1; then
   TMP=$(mktemp -d)
   ( cd "$TMP" && curl -sSL https://istio.io/downloadIstio | ISTIO_VERSION="$ISTIO_VERSION" sh - )
@@ -294,10 +296,10 @@ if ! command -v istioctl >/dev/null 2>&1; then
 fi
 istioctl version --remote=false
 if [ -f "$REPO_DIR/istio/istio-operator.yaml" ]; then
-  istioctl install -f "$REPO_DIR/istio/istio-operator.yaml" -y
+  istioctl install -f "$REPO_DIR/istio/istio-operator.yaml" "${ISTIO_LOWMEM[@]}" -y
 else
   warn "Brak istio-operator.yaml — instaluje domyslny profil."
-  istioctl install --set profile=default -y
+  istioctl install --set profile=default "${ISTIO_LOWMEM[@]}" -y
 fi
 KC wait --for=condition=Ready pod -l app=istiod -n istio-system --timeout=300s
 ok "Istio gotowy."

@@ -20,6 +20,15 @@ GITHUB_PAT='ghp_...........................' \
   ./scripts/setup-from-scratch.sh 2>&1 | tee /tmp/setup-$(date +%F-%H%M).log
 
 ```
+```bash
+# Pełen opis w /scripts/Port-forwarding-deepseek.md
+./scripts/Port-forwarding-deepseek-cleanup-sierot.sh https-all
+```
+```bash
+# Pełen opis w  /scripts/unblock-sync.md
+# gdy brak pamięci --> ratunek node >99% requests memory pod VMs 8GB RAMu i 4 CPU):
+SCALE_DOWN="spark-worker spark-master" ./scripts/unblock-sync.sh
+```
 2. Z pytaniem (skrypt sam zapyta o wszystko):
 
 ```bash

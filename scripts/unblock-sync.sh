@@ -30,6 +30,7 @@ NS="${NS:-davtro02}"
 ARGO_APP="${ARGO_APP:-davtro-website}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 RENDER_DIR="${RENDER_DIR:-$REPO_DIR/manifests/base}"
+# UWAGA: przy wlaczonym selfHeal ArgoCD cofa skalowanie (przywraca replicas z gita) — uzyj tylko tymczasowo.
 SCALE_DOWN="${SCALE_DOWN:-}"   # np. SCALE_DOWN="spark-worker spark-master" — deploymenty do wylaczenia (zwolnienie pamieci)
 VAULT_DNS="${VAULT_DNS:-https://vault.davtro02.svc.cluster.local:8203}"
 
@@ -234,6 +235,32 @@ for m,n,ph,side in rows[:12]: print("  %6.0f Mi  %-62s %-8s (sidecar istio: %.0f
 KC get pods -A -o json 2>/dev/null | python3 -c "$MEMTOP" || true
 echo "  (sidecary Istio: sprawdz 'values.global.proxy.resources.requests.memory' w istio/istio-operator.yaml)"
 
+# ---------- 2d. istiod rezerwuje domyslnie 2Gi pamieci (faktyczne uzycie ~60Mi) ----------
+# To najwiekszy pojedynczy "requests" na wezle; obnizenie zwalnia ~1.8Gi bez ruszania aplikacji.
+ISTIOD_MEM="${ISTIOD_MEM:-256Mi}"
+log "=== 2d: istiod requests.memory -> $ISTIOD_MEM ==="
+CUR=$(KC -n istio-system get deploy istiod -o jsonpath='{.spec.template.spec.containers[0].resources.requests.memory}' 2>/dev/null || true)
+if [ -n "$CUR" ]; then
+  NEED=$(python3 - "$CUR" "$ISTIOD_MEM" <<'PY'
+import sys
+def mi(v):
+    for u,f in {"Ki":1/1024,"Mi":1,"Gi":1024}.items():
+        if v.endswith(u): return float(v[:-2])*f
+    return float(v)/1048576
+print(1 if mi(sys.argv[1])>mi(sys.argv[2]) else 0)
+PY
+)
+  if [ "$NEED" = "1" ]; then
+    KC -n istio-system patch deploy istiod --type json \
+      -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/requests/memory\",\"value\":\"$ISTIOD_MEM\"}]" >/dev/null 2>&1 \
+      && ok "istiod: $CUR -> $ISTIOD_MEM (rollout; trwale: istio-operator.yaml / setup-from-scratch.sh)." || warn "Nie udalo sie zmienic requests istiod."
+  else
+    ok "istiod ma juz requests.memory=$CUR."
+  fi
+else
+  warn "Nie znaleziono deploy/istiod (ns istio-system)."
+fi
+
 # ---------- 3. ESO + ArgoCD ----------
 log "=== 3/4: reconcile SecretStore/ExternalSecret + refresh ArgoCD ==="
 TS=$(date +%s)
@@ -250,6 +277,10 @@ KC -n argocd annotate application "$ARGO_APP" argocd.argoproj.io/refresh=hard --
 PHASE=$(KC -n argocd get application "$ARGO_APP" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
 log "ArgoCD: operationState.phase=${PHASE:-brak}"
 KC -n argocd get application "$ARGO_APP" -o jsonpath='{.status.operationState.message}{"\n"}{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}' 2>/dev/null | head -c 1500
+echo "  --- zasoby, ktore nie przeszly sync (ArgoCD syncResult) ---"
+KC -n argocd get application "$ARGO_APP" -o json 2>/dev/null | jq -r '(.status.operationState.syncResult.resources // [])[] | select(.status=="SyncFailed" or .hookPhase=="Failed") | "  BLAD: \(.kind)/\(.name) (fala \(.syncWave // 0)): \(.message)"' 2>/dev/null | head -c 3000
+echo "  --- zasoby OutOfSync/Missing w najnizszej fali ---"
+KC -n argocd get application "$ARGO_APP" -o json 2>/dev/null | jq -r '[.status.resources[]? | select(.status!="Synced")] | map({k:"\(.kind)/\(.name)",s:.status,w:(.syncWave // 0)}) | sort_by(.w) | .[:8][] | "  fala \(.w): \(.k) \(.s)"' 2>/dev/null
 if [ "$PHASE" = "Running" ]; then
   warn "Sync nadal trwa (czeka na zdrowe zasoby) — poczekaj; jesli stoi >10 min: kubectl -n argocd patch application $ARGO_APP --type merge -p '{\"operation\":null}' i uruchom skrypt ponownie."
 else
@@ -270,10 +301,12 @@ for p in $(KC -n "$NS" get pods --no-headers 2>/dev/null | awk '$3 ~ /Pending|In
 done
 
 
+if KC -n "$NS" get pod kafka-kraft-0 --no-headers 2>/dev/null | grep -q Pending; then
 echo "${YELLOW}--- kafka-kraft-0: dlaczego Pending? (Eventy wygasaja po 1h, wiec patrzymy na status poda) ---${NC}"
 KC -n "$NS" get pod kafka-kraft-0 -o jsonpath='schedulerName={.spec.schedulerName}{"\n"}schedulingGates={.spec.schedulingGates}{"\n"}nodeName={.spec.nodeName}{"\n"}conditions={.status.conditions}{"\n"}' 2>/dev/null || true
 KC -n "$NS" describe pvc kafka-data-kafka-kraft-0 2>/dev/null | sed -n '/^Status:/p;/^StorageClass:/p;/^Events:/,$p' | tail -8 || true
 KC describe node 2>/dev/null | sed -n '/Allocated resources/,/Events:/p' | head -12 || true
+fi
 
 cat <<EOF
 
