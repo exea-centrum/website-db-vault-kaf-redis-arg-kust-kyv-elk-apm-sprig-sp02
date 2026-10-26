@@ -458,7 +458,21 @@ fi
 
 # Pomocnik: wykonaj polecenie vault w vault-0 (DNS, nie IP — cert ma SAN tylko dla DNS)
 vexec() { # vexec "<polecenie vault ...>"
-  KC -n "$NS" exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt $1"
+  # Laczymy sie z procesem Vaulta w poda (IP poda), NIE przez Service DNS: niezainicjalizowany/sealed Vault
+  # nie jest Ready, wiec Service nie ma endpointow => "connection refused". TLS weryfikujemy po nazwie z certyfikatu.
+  KC -n "$NS" exec vault-0 -- sh -c "VAULT_ADDR=https://\$(hostname -i | awk '{print \$1}'):8203 VAULT_TLS_SERVER_NAME=vault.davtro02.svc.cluster.local VAULT_CACERT=/vault/tls/ca.crt $1"
+}
+
+# Czekaj az API Vaulta odpowie (status zwraca JSON takze gdy sealed / niezainicjalizowany)
+wait_vault_api() {
+  local i out
+  for i in $(seq 1 36); do
+    out=$(vexec "vault status -format=json" 2>/dev/null || true)
+    if echo "$out" | jq -e . >/dev/null 2>&1; then echo "$out"; return 0; fi
+    [ $((i % 6)) -eq 0 ] && log "  czekam na API Vaulta... ($((i*5))s)" >&2
+    sleep 5
+  done
+  return 1
 }
 
 # ============================================================================
@@ -483,13 +497,13 @@ if KC -n "$NS" get pod vault-0 2>/dev/null | grep -q 'Running'; then
   fi
 fi
 
-# `vault status` konczy sie kodem 2 gdy sealed — nie wolno doklejac `|| echo '{}'` do stdout!
-VAULT_STATUS=$(vexec "vault status -format=json" 2>/dev/null || true)
-echo "$VAULT_STATUS" | jq -e . >/dev/null 2>&1 || VAULT_STATUS='{}'
+# `vault status` konczy sie kodem 2 gdy sealed — wait_vault_api akceptuje kazdy poprawny JSON.
+VAULT_STATUS=$(wait_vault_api) || die "API Vaulta nie odpowiada po 3 min (kubectl -n $NS logs vault-0; kubectl -n $NS describe pod vault-0)."
 INIT=$(echo "$VAULT_STATUS" | jq -r '.initialized | tostring')
 SEALED=$(echo "$VAULT_STATUS" | jq -r '.sealed | tostring')
+log "Vault: initialized=$INIT sealed=$SEALED"
 
-if [ "$INIT" = "false" ] || [ "$INIT" = "null" ]; then
+if [ "$INIT" = "false" ]; then
   log "Vault niezainicjalizowany — inicjalizuje przez DNS..."
   vexec "vault operator init -key-shares=1 -key-threshold=1 -format=json" > /tmp/vault-init.json \
     || die "vault operator init nie powiodl sie (sprawdz: kubectl -n $NS logs vault-0)."
@@ -528,10 +542,10 @@ else
   # KROK 12.8: POLICY I ROLA davtro-apps
   # ==========================================================================
   log "=== Krok 12.8: reczne utworzenie policy i role davtro-apps ==="
-  printf '%s\n' \
-    'path "davtro/data/*" { capabilities = ["read"] }' \
-    'path "database/creds/davtro-app-rw" { capabilities = ["read"] }' \
-  | sg microk8s -c "microk8s kubectl -n $NS exec -i vault-0 -- sh -c \"VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt VAULT_TOKEN='$RTOKEN' vault policy write davtro-apps -\"" >>"$LOG_FILE" 2>&1 \
+  vexec "VAULT_TOKEN='$RTOKEN' vault policy write davtro-apps - <<'POLICY_EOF'
+path \"davtro/data/*\" { capabilities = [\"read\"] }
+path \"database/creds/davtro-app-rw\" { capabilities = [\"read\"] }
+POLICY_EOF" >>"$LOG_FILE" 2>&1 \
     && ok "Policy davtro-apps utworzona." || warn "vault policy write nie powiodl sie ($LOG_FILE)."
   vexec "VAULT_TOKEN='$RTOKEN' vault write auth/kubernetes/role/davtro-apps bound_service_account_names=davtro-sa bound_service_account_namespaces=$NS policies=davtro-apps ttl=1h" >>"$LOG_FILE" 2>&1 \
     && ok "Rola davtro-apps utworzona." || warn "vault write auth/kubernetes/role/davtro-apps nie powiodl sie ($LOG_FILE)."
@@ -688,7 +702,7 @@ Jesli vault-issuer jest False:
 
 Jesli SecretStore jest InvalidProviderConfig / Degraded po restarcie wezla:
   # Vault po restarcie jest SEALED — ./scripts/unblock-sync.sh odsealuje go z /vault/data/bootstrap-keys.
-  kubectl -n $NS exec vault-0 -- sh -c 'VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt vault status'
+  kubectl -n $NS exec vault-0 -- sh -c 'VAULT_ADDR=https://127.0.0.1:8203 VAULT_TLS_SERVER_NAME=vault.davtro02.svc.cluster.local VAULT_CACERT=/vault/tls/ca.crt vault status'
 
 Logi bledow skryptu: $LOG_FILE
 Nacisnij Ctrl+C, aby zakonczyc port-forwardy.
