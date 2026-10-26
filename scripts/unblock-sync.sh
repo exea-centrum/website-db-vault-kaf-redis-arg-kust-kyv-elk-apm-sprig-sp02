@@ -89,25 +89,66 @@ else
   warn "Nie udalo sie wyrenderowac manifestow: $(head -3 /tmp/unblock-render.err 2>/dev/null)"
 fi
 
-# ---------- 2. Vault: unseal po restarcie ----------
-log "=== 2/4: sprawdzam Vault (sealed po restarcie wezla?) ==="
-vexec() { KC -n "$NS" exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt $*"; }
+# ---------- 2. Vault: init / unseal / auth kubernetes / policy ----------
+log "=== 2/4: Vault (init, unseal, auth kubernetes, policy davtro-apps) ==="
+vexec() { KC -n "$NS" exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt $1"; }
 
-ST=$(vexec vault status -format=json 2>/dev/null || true)   # vault status zwraca exit 2 gdy sealed!
-SEALED=$(echo "${ST:-}" | jq -r '.sealed // "unknown"' 2>/dev/null | head -1)
-INITED=$(echo "${ST:-}" | jq -r '.initialized // "unknown"' 2>/dev/null | head -1)
-log "Vault: initialized=${INITED:-unknown} sealed=${SEALED:-unknown}"
+# vault status zwraca exit 2 gdy sealed -> `|| true`. UWAGA: w jq `false // x` daje x, wiec uzywamy tostring.
+ST=$(vexec "vault status -format=json" 2>/dev/null || true)
+echo "$ST" | jq -e . >/dev/null 2>&1 || ST='{}'
+INITED=$(echo "$ST" | jq -r '.initialized | tostring')
+SEALED=$(echo "$ST" | jq -r '.sealed | tostring')
+log "Vault: initialized=$INITED sealed=$SEALED"
+
+UKEY=""; RTOKEN=""
+if [ "$INITED" = "false" ]; then
+  log "Vault NIE jest zainicjalizowany — inicjalizuje (1 klucz, tryb DEV)..."
+  INIT_JSON=$(vexec "vault operator init -key-shares=1 -key-threshold=1 -format=json" 2>/tmp/vault-init.err || true)
+  if echo "$INIT_JSON" | jq -e .root_token >/dev/null 2>&1; then
+    UKEY=$(echo "$INIT_JSON" | jq -r '.unseal_keys_b64[0]')
+    RTOKEN=$(echo "$INIT_JSON" | jq -r '.root_token')
+    # kopia zapasowa kluczy u Ciebie (chmod 600) + plik, z ktorego korzysta vault-bootstrap
+    umask 077; echo "$INIT_JSON" > "$HOME/vault-init-$NS.json"; umask 022
+    KC -n "$NS" exec vault-0 -- sh -c "printf '%s\n%s\n' '$UKEY' '$RTOKEN' > /vault/data/bootstrap-keys && chmod 600 /vault/data/bootstrap-keys" \
+      && ok "Vault zainicjalizowany. Klucze: ~/vault-init-$NS.json oraz /vault/data/bootstrap-keys (DEV!)." \
+      || warn "Nie zapisano /vault/data/bootstrap-keys — vault-bootstrap moze go nie znalezc."
+    SEALED="true"
+  else
+    warn "vault operator init nie powiodl sie: $(head -c 300 /tmp/vault-init.err 2>/dev/null)"
+  fi
+elif [ "$INITED" = "true" ]; then
+  UKEY=$(KC -n "$NS" exec vault-0 -- sh -c "head -n1 /vault/data/bootstrap-keys" 2>/dev/null || true)
+  RTOKEN=$(KC -n "$NS" exec vault-0 -- sh -c "tail -n1 /vault/data/bootstrap-keys" 2>/dev/null || true)
+else
+  warn "Nie moge odpytac Vaulta (vault-0 nie gotowy / blad TLS?). Sprawdz: kubectl -n $NS logs vault-0"
+fi
 
 if [ "$SEALED" = "true" ]; then
-  UKEY=$(KC -n "$NS" exec vault-0 -- sh -c "head -n1 /vault/data/bootstrap-keys" 2>/dev/null || true)
   if [ -n "$UKEY" ]; then
-    vexec vault operator unseal "$UKEY" >/dev/null 2>&1 && ok "Vault odsealowany." || warn "Unseal sie nie udal."
+    vexec "vault operator unseal '$UKEY'" >/dev/null 2>&1 && ok "Vault odsealowany." || warn "Unseal sie nie udal."
+    sleep 3
   else
-    warn "Brak /vault/data/bootstrap-keys — odsealuj Vault recznie."
+    warn "Vault sealed, ale brak klucza — odsealuj recznie."
   fi
-elif [ "$SEALED" = "unknown" ]; then
-  warn "Nie moge odpytac Vaulta (pod vault-0 nie gotowy?)."
 fi
+
+if [ -n "$RTOKEN" ]; then
+  vexec "VAULT_TOKEN='$RTOKEN' vault auth enable kubernetes" >/dev/null 2>&1 || true   # "already in use" = OK
+  vexec "VAULT_TOKEN='$RTOKEN' vault write auth/kubernetes/config kubernetes_host='https://kubernetes.default.svc' kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt disable_iss_validation=true" >/dev/null 2>&1 \
+    && ok "auth/kubernetes skonfigurowane." || warn "auth/kubernetes/config nie powiodl sie."
+  printf '%s\n' 'path "davtro/data/*" { capabilities = ["read"] }' 'path "database/creds/davtro-app-rw" { capabilities = ["read"] }' \
+    | sg microk8s -c "microk8s kubectl -n $NS exec -i vault-0 -- sh -c \"VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt VAULT_TOKEN='$RTOKEN' vault policy write davtro-apps -\"" >/dev/null 2>&1 \
+    && ok "policy davtro-apps zapisana." || warn "vault policy write nie powiodl sie."
+  vexec "VAULT_TOKEN='$RTOKEN' vault write auth/kubernetes/role/davtro-apps bound_service_account_names=davtro-sa bound_service_account_namespaces=$NS policies=davtro-apps ttl=1h" >/dev/null 2>&1 \
+    && ok "rola davtro-apps zapisana." || warn "vault write auth/kubernetes/role/davtro-apps nie powiodl sie."
+else
+  warn "Brak root tokena — pomijam auth/policy/role."
+fi
+
+# Joby vault-snapshot, ktore padly bez dzialajacego Vaulta, trzymaja aplikacje w Degraded (CronJob utworzy nowe).
+for j in $(KC -n "$NS" get jobs -o jsonpath='{range .items[?(@.status.failed)]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep '^vault-snapshot' || true); do
+  KC -n "$NS" delete job "$j" >/dev/null 2>&1 && echo "  usunieto nieudany job $j"
+done
 
 # ---------- 3. ESO + ArgoCD ----------
 log "=== 3/4: reconcile SecretStore/ExternalSecret + refresh ArgoCD ==="
@@ -130,6 +171,12 @@ for p in $(KC -n "$NS" get pods --no-headers 2>/dev/null | awk '$3 ~ /Pending|In
   echo "${YELLOW}--- $p ---${NC}"
   KC -n "$NS" describe pod "$p" 2>/dev/null | sed -n '/^Events:/,$p' | tail -6
 done
+
+
+echo "${YELLOW}--- kafka-kraft-0: dlaczego Pending? (Eventy wygasaja po 1h, wiec patrzymy na status poda) ---${NC}"
+KC -n "$NS" get pod kafka-kraft-0 -o jsonpath='schedulerName={.spec.schedulerName}{"\n"}schedulingGates={.spec.schedulingGates}{"\n"}nodeName={.spec.nodeName}{"\n"}conditions={.status.conditions}{"\n"}' 2>/dev/null || true
+KC -n "$NS" describe pvc kafka-data-kafka-kraft-0 2>/dev/null | sed -n '/^Status:/p;/^StorageClass:/p;/^Events:/,$p' | tail -8 || true
+KC describe node 2>/dev/null | sed -n '/Allocated resources/,/Events:/p' | head -12 || true
 
 cat <<EOF
 
