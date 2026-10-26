@@ -91,11 +91,26 @@ fi
 
 # ---------- 2. Vault: init / unseal / auth kubernetes / policy ----------
 log "=== 2/4: Vault (init, unseal, auth kubernetes, policy davtro-apps) ==="
-vexec() { KC -n "$NS" exec vault-0 -- sh -c "VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt $1"; }
+vexec() { # vexec "<polecenie vault ...>"
+  # Laczymy sie z procesem Vaulta w poda (IP poda), NIE przez Service DNS: niezainicjalizowany/sealed Vault
+  # nie jest Ready, wiec Service nie ma endpointow => "connection refused". TLS weryfikujemy po nazwie z certyfikatu.
+  KC -n "$NS" exec vault-0 -- sh -c "VAULT_ADDR=https://\$(hostname -i | awk '{print \$1}'):8203 VAULT_TLS_SERVER_NAME=vault.davtro02.svc.cluster.local VAULT_CACERT=/vault/tls/ca.crt $1"
+}
 
-# vault status zwraca exit 2 gdy sealed -> `|| true`. UWAGA: w jq `false // x` daje x, wiec uzywamy tostring.
-ST=$(vexec "vault status -format=json" 2>/dev/null || true)
-echo "$ST" | jq -e . >/dev/null 2>&1 || ST='{}'
+# Czekaj az API Vaulta odpowie (status zwraca JSON takze gdy sealed / niezainicjalizowany)
+wait_vault_api() {
+  local i out
+  for i in $(seq 1 36); do
+    out=$(vexec "vault status -format=json" 2>/dev/null || true)
+    if echo "$out" | jq -e . >/dev/null 2>&1; then echo "$out"; return 0; fi
+    [ $((i % 6)) -eq 0 ] && log "  czekam na API Vaulta... ($((i*5))s)" >&2
+    sleep 5
+  done
+  return 1
+}
+
+# vault status zwraca exit 2 gdy sealed; w jq `false // x` daje x, wiec uzywamy tostring.
+ST=$(wait_vault_api) || ST='{}'
 INITED=$(echo "$ST" | jq -r '.initialized | tostring')
 SEALED=$(echo "$ST" | jq -r '.sealed | tostring')
 log "Vault: initialized=$INITED sealed=$SEALED"
@@ -136,8 +151,10 @@ if [ -n "$RTOKEN" ]; then
   vexec "VAULT_TOKEN='$RTOKEN' vault auth enable kubernetes" >/dev/null 2>&1 || true   # "already in use" = OK
   vexec "VAULT_TOKEN='$RTOKEN' vault write auth/kubernetes/config kubernetes_host='https://kubernetes.default.svc' kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt disable_iss_validation=true" >/dev/null 2>&1 \
     && ok "auth/kubernetes skonfigurowane." || warn "auth/kubernetes/config nie powiodl sie."
-  printf '%s\n' 'path "davtro/data/*" { capabilities = ["read"] }' 'path "database/creds/davtro-app-rw" { capabilities = ["read"] }' \
-    | sg microk8s -c "microk8s kubectl -n $NS exec -i vault-0 -- sh -c \"VAULT_ADDR=$VAULT_DNS VAULT_CACERT=/vault/tls/ca.crt VAULT_TOKEN='$RTOKEN' vault policy write davtro-apps -\"" >/dev/null 2>&1 \
+  vexec "VAULT_TOKEN='$RTOKEN' vault policy write davtro-apps - <<'POLICY_EOF'
+path \"davtro/data/*\" { capabilities = [\"read\"] }
+path \"database/creds/davtro-app-rw\" { capabilities = [\"read\"] }
+POLICY_EOF" >/dev/null 2>&1 \
     && ok "policy davtro-apps zapisana." || warn "vault policy write nie powiodl sie."
   vexec "VAULT_TOKEN='$RTOKEN' vault write auth/kubernetes/role/davtro-apps bound_service_account_names=davtro-sa bound_service_account_namespaces=$NS policies=davtro-apps ttl=1h" >/dev/null 2>&1 \
     && ok "rola davtro-apps zapisana." || warn "vault write auth/kubernetes/role/davtro-apps nie powiodl sie."
