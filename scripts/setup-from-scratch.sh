@@ -661,7 +661,7 @@ subjects:
   name: admin-user
   namespace: kube-system
 YAML
-  DASH_TOKEN=$(KC -n kube-system create token admin-user --duration=999999h 2>/dev/null || true)
+  DASH_TOKEN=$(KC -n kube-system create token admin-user --duration=24h 2>/dev/null || true)
   [ -n "$DASH_TOKEN" ] && { echo "${GREEN}=== Kubernetes Dashboard token ===${NC}"; echo "$DASH_TOKEN"; echo; }
 fi
 ARGOCD_PASS=$(KC -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)

@@ -30,6 +30,7 @@ NS="${NS:-davtro02}"
 ARGO_APP="${ARGO_APP:-davtro-website}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 RENDER_DIR="${RENDER_DIR:-$REPO_DIR/manifests/base}"
+SCALE_DOWN="${SCALE_DOWN:-}"   # np. SCALE_DOWN="spark-worker spark-master" — deploymenty do wylaczenia (zwolnienie pamieci)
 VAULT_DNS="${VAULT_DNS:-https://vault.davtro02.svc.cluster.local:8203}"
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
@@ -167,6 +168,72 @@ for j in $(KC -n "$NS" get jobs -o jsonpath='{range .items[?(@.status.failed)]}{
   KC -n "$NS" delete job "$j" >/dev/null 2>&1 && echo "  usunieto nieudany job $j"
 done
 
+# ---------- 2b. PVC w Pending (WaitForFirstConsumer) blokuje fale ArgoCD ----------
+# ArgoCD uznaje PVC w Pending za "Progressing" i nie przechodzi do kolejnych fal. PVC vault-backup ma
+# konsumenta dopiero w CronJobie (03:00), wiec nigdy sie nie zwiaze. Tymczasowy pod go wiaze (PV zostaje).
+log "=== 2b: PVC w Pending (WaitForFirstConsumer) ==="
+PENDING_PVCS=$(KC -n "$NS" get pvc --no-headers 2>/dev/null | awk '$2=="Pending"{print $1}')
+[ -z "$PENDING_PVCS" ] && ok "Brak PVC w Pending."
+for pvc in $PENDING_PVCS; do
+  log "  PVC $pvc: tworze tymczasowy pod, zeby zwiazac wolumen..."
+  KC -n "$NS" delete pod "pvc-bind-$pvc" --ignore-not-found >/dev/null 2>&1
+  KC -n "$NS" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-bind-$pvc
+  labels: {app: pvc-bind}
+  annotations: {sidecar.istio.io/inject: "false"}
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bind
+    image: hashicorp/vault:1.17
+    imagePullPolicy: IfNotPresent
+    command: ["sh","-c","sleep 20"]
+    volumeMounts: [{name: d, mountPath: /d}]
+  volumes:
+  - name: d
+    persistentVolumeClaim: {claimName: $pvc}
+YAML
+  BOUND=0
+  for i in $(seq 1 24); do
+    if [ "$(KC -n "$NS" get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Bound" ]; then BOUND=1; break; fi
+    sleep 5
+  done
+  [ "$BOUND" = "1" ] && ok "  PVC $pvc: Bound." || warn "  PVC $pvc nadal Pending — kubectl -n $NS describe pod pvc-bind-$pvc"
+  KC -n "$NS" delete pod "pvc-bind-$pvc" --wait=false >/dev/null 2>&1
+done
+
+# ---------- 2c. Pamiec wezla ----------
+log "=== 2c: pamiec wezla (requests) ==="
+if [ -n "$SCALE_DOWN" ]; then
+  for d in $SCALE_DOWN; do
+    KC -n "$NS" scale deploy "$d" --replicas=0 >/dev/null 2>&1 && ok "  $d -> 0 replik" || warn "  nie znaleziono deploy/$d"
+  done
+fi
+KC describe node 2>/dev/null | sed -n '/Allocated resources/,/hugepages-2Mi/p' | grep -E 'cpu|memory' || true
+MEMTOP='
+import sys, json
+U={"Ki":1/1024,"Mi":1,"Gi":1024,"k":1000/1048576,"M":1e6/1048576,"G":1e9/1048576}
+def mi(v):
+    for u,f in U.items():
+        if v.endswith(u): return float(v[:-len(u)])*f
+    return float(v)/1048576
+rows=[]; tot=0
+for p in json.load(sys.stdin)["items"]:
+    if p["status"].get("phase") in ("Succeeded","Failed"): continue
+    m=sum(mi(c.get("resources",{}).get("requests",{}).get("memory","0")) for c in p["spec"]["containers"])
+    side=sum(mi(c.get("resources",{}).get("requests",{}).get("memory","0")) for c in p["spec"].get("initContainers",[]) if c["name"]=="istio-proxy")
+    m+=side; tot+=m
+    rows.append((m,p["metadata"]["namespace"]+"/"+p["metadata"]["name"],p["status"].get("phase"),side))
+rows.sort(reverse=True)
+print("Suma requests pamieci: %.0f Mi" % tot)
+for m,n,ph,side in rows[:12]: print("  %6.0f Mi  %-62s %-8s (sidecar istio: %.0f Mi)" % (m,n,ph,side))
+'
+KC get pods -A -o json 2>/dev/null | python3 -c "$MEMTOP" || true
+echo "  (sidecary Istio: sprawdz 'values.global.proxy.resources.requests.memory' w istio/istio-operator.yaml)"
+
 # ---------- 3. ESO + ArgoCD ----------
 log "=== 3/4: reconcile SecretStore/ExternalSecret + refresh ArgoCD ==="
 TS=$(date +%s)
@@ -179,6 +246,18 @@ done
 KC -n argocd annotate application "$ARGO_APP" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 \
   && ok "ArgoCD: hard refresh $ARGO_APP." || warn "Nie znaleziono Application $ARGO_APP w ns argocd."
 
+# Nieudany sync (np. "Sync failed ... 1 Error") NIE jest ponawiany przez auto-sync dla tej samej rewizji.
+PHASE=$(KC -n argocd get application "$ARGO_APP" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
+log "ArgoCD: operationState.phase=${PHASE:-brak}"
+KC -n argocd get application "$ARGO_APP" -o jsonpath='{.status.operationState.message}{"\n"}{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}' 2>/dev/null | head -c 1500
+if [ "$PHASE" = "Running" ]; then
+  warn "Sync nadal trwa (czeka na zdrowe zasoby) — poczekaj; jesli stoi >10 min: kubectl -n argocd patch application $ARGO_APP --type merge -p '{\"operation\":null}' i uruchom skrypt ponownie."
+else
+  KC -n argocd patch application "$ARGO_APP" --type merge -p '{"operation":{"initiatedBy":{"username":"unblock-sync"},"sync":{}}}' >/dev/null 2>&1 \
+    && ok "ArgoCD: uruchomiono nowy sync $ARGO_APP." || warn "Nie udalo sie uruchomic sync (zrob to w UI: SYNC)."
+fi
+
+
 # ---------- 4. Diagnostyka ----------
 log "=== 4/4: pody, ktore nadal nie sa gotowe (po ~30 s) ==="
 sleep 30
@@ -186,6 +265,7 @@ KC -n "$NS" get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if ($3!="
 echo
 for p in $(KC -n "$NS" get pods --no-headers 2>/dev/null | awk '$3 ~ /Pending|Init|ContainerCreating|Error|CrashLoop/ {print $1}'); do
   echo "${YELLOW}--- $p ---${NC}"
+  KC -n "$NS" get pod "$p" -o jsonpath='{.status.conditions[?(@.type=="PodScheduled")].message}{"\n"}' 2>/dev/null
   KC -n "$NS" describe pod "$p" 2>/dev/null | sed -n '/^Events:/,$p' | tail -6
 done
 
