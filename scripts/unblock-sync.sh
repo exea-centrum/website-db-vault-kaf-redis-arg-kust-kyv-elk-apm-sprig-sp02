@@ -35,7 +35,11 @@ set -uo pipefail
 NS="${NS:-davtro02}"
 ARGO_APP="${ARGO_APP:-davtro-website}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-RENDER_DIR="${RENDER_DIR:-$REPO_DIR/manifests/base}"
+# ArgoCD renderuje manifests/overlays/production (Application.spec.source.path) — uzywamy tego samego, jesli istnieje.
+if [ -z "${RENDER_DIR:-}" ]; then
+  if [ -d "$REPO_DIR/manifests/overlays/production" ]; then RENDER_DIR="$REPO_DIR/manifests/overlays/production"
+  else RENDER_DIR="$REPO_DIR/manifests/base"; fi
+fi
 # UWAGA: przy wlaczonym selfHeal ArgoCD cofa skalowanie (przywraca replicas z gita) — uzyj tylko tymczasowo.
 SCALE_DOWN="${SCALE_DOWN:-}"   # np. SCALE_DOWN="spark-worker spark-master" — deploymenty do wylaczenia (zwolnienie pamieci)
 VAULT_DNS="${VAULT_DNS:-https://vault.davtro02.svc.cluster.local:8203}"
@@ -392,6 +396,11 @@ fi
 
 
 # ---------- 4. Diagnostyka ----------
+log "=== 3b: ClusterIssuery (wave 2) — dlaczego nie Ready ==="
+for ci in vault-issuer vault-issuer-internal vault-issuer-mesh; do
+  echo "  [$ci] $(KC get clusterissuer "$ci" -o jsonpath='{.status.conditions[*].reason}: {.status.conditions[*].message}' 2>/dev/null | cut -c1-600)"
+done
+
 log "=== 4/4: pody, ktore nadal nie sa gotowe (po ~30 s) ==="
 sleep 30
 KC -n "$NS" get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if ($3!="Running" && $3!="Completed" || a[1]!=a[2]) print}' || true
