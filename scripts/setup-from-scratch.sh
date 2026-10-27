@@ -413,6 +413,19 @@ else
   ok "davtro-secrets juz istnieje lub brak namespace."
 fi
 
+# Przypisuje ghcr-pull do WSZYSTKICH ServiceAccountow w $NS.
+# UWAGA: uruchamiaj tez PONOWNIE po dosyncowaniu manifestow (Krok 13) — ServiceAccount-y
+# tworzone przez ArgoCD (fastapi, frontend, message-processor...) powstaja PO kroku 11.6
+# i bez tego ich pody dostaja 401 Unauthorized przy pullu z GHCR (ImagePullBackOff).
+patch_sas_ghcr() {
+  local sa
+  SAS_LIST=$(KC -n "$NS" get sa -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+  for sa in $SAS_LIST; do
+    KC -n "$NS" patch serviceaccount "$sa" --type merge -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}' >>"$LOG_FILE" 2>&1 \
+      && ok "ServiceAccount $sa -> ghcr-pull." || true
+  done
+}
+
 # ---------- Krok 11.6: GHCR pull secret ----------
 log "=== Krok 11.6: GHCR pull secret ==="
 log "GHCR user: $GHCR_USER"
@@ -426,11 +439,7 @@ if KC get ns "$NS" >/dev/null 2>&1; then
       --docker-server=ghcr.io --docker-username="$GHCR_USER" --docker-password="$GHCR_PAT" \
       --dry-run=client -o yaml | KC apply -f -
     ok "Secret ghcr-pull utworzony."
-    SAS=$(KC -n "$NS" get sa -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
-    for sa in $SAS; do
-      KC -n "$NS" patch serviceaccount "$sa" -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}' >>"$LOG_FILE" 2>&1 \
-        && ok "ServiceAccount $sa -> ghcr-pull." || true
-    done
+    patch_sas_ghcr
   else
     warn "Brak GHCR_PAT — pomijam ghcr-pull."
   fi
@@ -585,6 +594,14 @@ else
   warn "Brak $SCRIPT_DIR/unblock-sync.sh — dodaj go do repo (patrz komentarz wyzej)."
 fi
 
+# ---------- Krok 12.11: ponowne przypisanie ghcr-pull (nowe SA z manifestow) ----------
+log "=== Krok 12.11: przypisuje ghcr-pull do wszystkich ServiceAccountow (rowniez nowych) ==="
+if KC -n "$NS" get secret ghcr-pull >/dev/null 2>&1; then
+  patch_sas_ghcr
+else
+  warn "Brak secretu ghcr-pull — pomijam (podaj GHCR_PAT przy kolejnym uruchomieniu)."
+fi
+
 # ---------- Krok 13: Weryfikacja ----------
 log "=== Krok 13: weryfikacja ==="
 echo "--- Wersje ---"; istioctl version 2>/dev/null | head -3 || true
@@ -601,6 +618,12 @@ KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1 && echo "  ClusterRo
 echo "--- Dashboard (svc) ---"; KC get svc -A 2>/dev/null | grep -i dashboard || echo "  (brak svc/kubernetes-dashboard)"
 echo "--- Certyfikaty ---"; KC -n "$NS" get certificate,secret 2>/dev/null | grep -E 'tls|NAME' || true
 echo "--- Issuer/ClusterIssuer ---"; KC -n "$NS" get issuer,clusterissuer 2>/dev/null || true
+echo "--- ClusterIssuery: caBundle + Ready ---"
+for ci in $(KC get clusterissuer -o name 2>/dev/null | grep vault-issuer); do
+  CB=$(KC get "$ci" -o jsonpath='{.spec.vault.caBundle}' 2>/dev/null || true)
+  RD=$(KC get "$ci" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+  echo "  $ci caBundle=$([ -n "$CB" ] && echo OK || echo BRAK) ready=${RD:-brak}"
+done
 echo "--- cert-manager-vault-token ---"; KC -n cert-manager get secret cert-manager-vault-token 2>/dev/null || echo "  (brak — vault-bootstrap GO NIE TWORZY; tworzy go ./scripts/unblock-sync.sh, krok 2f)"
 echo "--- Istio analyze ---"; istioctl analyze -n "$NS" 2>/dev/null || warn "istioctl analyze zglosil uwagi."
 echo "--- Gateway/VirtualService ---"; KC -n "$NS" get gateway,virtualservice 2>/dev/null || true
@@ -706,6 +729,26 @@ Jesli SecretStore jest InvalidProviderConfig / Degraded po restarcie wezla:
   # Vault po restarcie jest SEALED — ./scripts/unblock-sync.sh odsealuje go z /vault/data/bootstrap-keys.
   kubectl -n $NS exec vault-0 -- sh -c 'VAULT_ADDR=https://127.0.0.1:8203 VAULT_TLS_SERVER_NAME=vault.davtro02.svc.cluster.local VAULT_CACERT=/vault/tls/ca.crt vault status'
 
+Jesli syncResult pokazuje "x509: certificate signed by unknown authority" przy ClusterIssuerach:
+  # cert-manager nie ufa CA Vaulta. unblock-sync.sh (krok 2g) wstawia caBundle NA ZYWO
+  # i czeka na Ready PRZED wyzwoleniem syncu. Sprawdz najpierw:
+  kubectl get clusterissuer
+  kubectl get clusterissuer vault-issuer -o jsonpath='{.spec.vault.caBundle}' | wc -c
+  ./scripts/unblock-sync.sh
+  # UWAGA: samo wlaczenie selfHeal nic tu nie naprawia — blad lezy po stronie trustu, nie driftu.
+
+Jesli w syncResult zasoby sa w "fali 0", a powinny byc w wyzszej (np. ClusterIssuer/ExternalSecret):
+  # adnotacje sync-wave NIE SA w gicie — wygeneruj je i wypchnij (TRWALA naprawa kolejnosci):
+  cd manifests/base && ./add-sync-waves.sh --apply && git add -A && git commit -m "ci: sync-wave annotations" && git push
+
+Jesli ostatni sync skonczyl sie "Sync failed": auto-sync NIE ponawia tej samej rewizji.
+  kubectl -n argocd patch application davtro-website --type merge -p '{"operation":{"initiatedBy":{"username":"manual"},"sync":{}}}'
+
+Jesli pody fastapi/frontend/message-processor maja ImagePullBackOff z bledem 401 (GHCR):
+  # ServiceAccount tych podow nie ma imagePullSecrets — ghcr-pull dolaczono tylko do SA
+  # istniejacych w kroku 11.6. Napraw i odtworz pody:
+  kubectl -n davtro02 get sa -o name | xargs -I{} kubectl -n davtro02 patch {} --type merge -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}'
+  kubectl -n davtro02 delete pod --field-selector=status.phase=Pending
 Logi bledow skryptu: $LOG_FILE
 Nacisnij Ctrl+C, aby zakonczyc port-forwardy.
 EOF
