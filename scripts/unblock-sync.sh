@@ -10,6 +10,12 @@
 #   fala 0 nie jest Healthy. Pody wisza w Init:0/2, fala 0 nigdy nie bedzie
 #   Healthy => zakleszczenie (to samo kolo, ktore skrypt juz rozbija dla Vaulta).
 #
+# DRUGIE ZAKLESZCZENIE (widoczne w syncResult): ExternalSecret fastapi-db-creds i message-processor-db-creds
+#   nie maja sync-wave (=fala 0) i odwoluja sie do VaultDynamicSecret/db-creds-davtro-app-rw z fali 2.
+#   Fala 2 startuje dopiero gdy fala 0 jest zdrowa, a ExternalSecret nie jest zdrowy bez generatora.
+#   Skrypt aplikuje wiec VaultDynamicSecret recznie. TRWALA NAPRAWA w repo: nadaj tym ExternalSecretom
+#   adnotacje argocd.argoproj.io/sync-wave: "3" (patrz add-sync-waves.sh).
+#
 # CO ROBI TEN SKRYPT:
 #   1. Renderuje manifests/base i aplikuje RECZNIE tylko "zasoby zaleznosci":
 #      ConfigMap, ServiceAccount, PVC, Role, RoleBinding.
@@ -63,7 +69,7 @@ render() {
 
 FILTER='
 import sys, yaml
-KINDS = {"ConfigMap", "ServiceAccount", "PersistentVolumeClaim", "Role", "RoleBinding"}
+KINDS = {"ConfigMap", "ServiceAccount", "PersistentVolumeClaim", "Role", "RoleBinding", "VaultDynamicSecret"}
 out = []
 for d in yaml.safe_load_all(sys.stdin):
     if not isinstance(d, dict) or d.get("kind") not in KINDS:
@@ -162,6 +168,15 @@ POLICY_EOF" >/dev/null 2>&1 \
     && ok "rola davtro-apps zapisana." || warn "vault write auth/kubernetes/role/davtro-apps nie powiodl sie."
 else
   warn "Brak root tokena — pomijam auth/policy/role."
+fi
+
+# Rola bazy w Vaultcie (tworzona przez vault-bootstrap) — bez niej VaultDynamicSecret nie wygeneruje hasel.
+if [ -n "$RTOKEN" ]; then
+  if vexec "VAULT_TOKEN='$RTOKEN' vault read database/roles/davtro-app-rw" >/dev/null 2>&1; then
+    ok "Vault: database/roles/davtro-app-rw istnieje."
+  else
+    warn "Vault: BRAK database/roles/davtro-app-rw — vault-bootstrap jeszcze jej nie utworzyl (kubectl -n $NS logs deploy/vault-bootstrap --all-containers --tail=50)."
+  fi
 fi
 
 # Joby vault-snapshot, ktore padly bez dzialajacego Vaulta, trzymaja aplikacje w Degraded (CronJob utworzy nowe).
@@ -272,6 +287,9 @@ for r in $(KC -n "$NS" get externalsecret -o name 2>/dev/null); do
 done
 KC -n argocd annotate application "$ARGO_APP" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 \
   && ok "ArgoCD: hard refresh $ARGO_APP." || warn "Nie znaleziono Application $ARGO_APP w ns argocd."
+echo "  --- ESO: ostatni realny blad dla ExternalSecretow ---"
+KC -n external-secrets logs deploy/external-secrets --tail=300 2>/dev/null | grep -iE 'fastapi-db-creds|message-processor-db-creds' | tail -3 | cut -c1-500
+
 
 # Nieudany sync (np. "Sync failed ... 1 Error") NIE jest ponawiany przez auto-sync dla tej samej rewizji.
 PHASE=$(KC -n argocd get application "$ARGO_APP" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
