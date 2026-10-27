@@ -3,7 +3,7 @@ kind: Namespace
 metadata:
   name: davtro
   annotations:
-    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-wave: "-5"
   labels:
     app.kubernetes.io/part-of: davtro-platform
     istio-injection: enabled   # ISTIO: auto-wstrzykiwanie sidecara Envoy

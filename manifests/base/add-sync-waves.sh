@@ -1,351 +1,167 @@
 #!/bin/bash
-# add-sync-waves.sh — dodaje argocd.argoproj.io/sync-wave do manifestów
+# add-sync-waves.sh (v2) — ustawia argocd.argoproj.io/sync-wave PER DOKUMENT YAML (kazdy zasob osobno).
 #
-# Uzycie:
-#   cd manifests/base/
-#   chmod +x add-sync-waves.sh
-#   ./add-sync-waves.sh
+# POPRZEDNIA WERSJA miala blad: dodawala adnotacje tylko do PIERWSZEGO zasobu w pliku
+# (flaga "added"), wiec w plikach wielodokumentowych reszta zasobow zostawala w fali 0.
+# Skutek: np. ConfigMapy observability w fali 4, a ich Deployment-y w fali 0; ExternalSecret-y z fali 0
+# a generator VaultDynamicSecret z fali 2; Service/NetworkPolicy/AuthorizationPolicy bez fali itd.
 #
-# Idempotentny: pomija pliki, ktore juz maja sync-wave.
-# vault.yaml i pki-issuer.yaml obsluguje osobno (rozne fale dla roznych zasobow).
+# Uzycie (z katalogu manifests/base):
+#   ./add-sync-waves.sh            # DRY-RUN: tylko pokazuje plan (nic nie zapisuje)
+#   ./add-sync-waves.sh --apply    # zapisuje zmiany
+# Potem:  git diff   (sprawdz) -> commit -> push.
+# Idempotentny: ustawia/aktualizuje wartosc fali, nie dubluje kluczy "annotations:".
 #
-# KOLEJNOSC FAL (od najwczesniejszej):
-#   -3: vault-server-tls.yaml (Issuer/vault-selfsigned + Certificate/vault-ca + Issuer/vault-ca)
-#   -2: vault-tls-certificate.yaml (Certificate/vault-tls — uzywa Issuer/vault-ca z -3)
-#       pki-issuer.yaml: Issuer/vault-selfsigned (musi byc przed Certificate/vault-ca)
-#   -1: namespace, serviceaccount, configmap, secret-store, transit-helpers, service
-#    0: postgres, vault (StatefulSet), redis, kafka
-#    1: vault-bootstrap (tworzy cert-manager-vault-token), vault-snapshot
-#    2: pki-issuer.yaml: ClusterIssuer/vault-issuer (ma token z 1), external-secrets
-#    3: aplikacje (deployment, frontend, message-processor, spring-app, hpa, pdb, istio, netpol)
-#    4: observability (prometheus, grafana, loki, promtail, tempo, alertmanager, exporters, pgadmin, kafka-ui)
-#    5: kyverno-policy
+# REGULY (kolejnosc: nazwa -> rodzaj -> plik):
+#   -5 Namespace
+#   -4 Issuer/vault-selfsigned          -3 Certificate/vault-ca
+#   -2 Issuer/vault-ca                  -1 Certificate/vault-tls, DestinationRule/vault-own-tls, PeerAuthentication/vault
+#   -1 ServiceAccount, ConfigMap, Secret, Service, Role, RoleBinding, ClusterRole, ClusterRoleBinding
+#    0 postgres.yaml, vault.yaml, redis.yaml, kafka.yaml (StatefulSet/Deployment itd.)
+#    1 vault-bootstrap.yaml, vault-snapshot.yaml (+ PVC vault-backup: PVC musi byc w fali swojego konsumenta —
+#      Pending PVC (WaitForFirstConsumer) = Progressing w ArgoCD)
+#    2 SecretStore, ClusterSecretStore, VaultDynamicSecret, ExternalSecret, ClusterIssuer
+#    3 aplikacje + istio/netpol: deployment, frontend, message-processor, spring-app, hpa, pdb, istio-*, network-policies
+#    4 observability: prometheus, grafana, loki, promtail, tempo, alertmanager, exporters, cert-expiry-exporter, pgadmin, kafka-ui
+#    5 ClusterPolicy (kyverno)
+# Zasoby bez reguly sa pozostawiane bez zmian i wypisywane jako "BEZ REGULY".
 
 set -euo pipefail
+APPLY=0; [ "${1:-}" = "--apply" ] && APPLY=1
+export APPLY
+python3 - <<'PY'
+import os, re, glob
 
-add_wave() {
-  local file="$1"
-  local wave="$2"
-  if [ ! -f "$file" ]; then
-    echo "  SKIP: $file (nie istnieje)"
-    return
-  fi
-  if grep -q 'argocd.argoproj.io/sync-wave' "$file"; then
-    echo "  SKIP: $file (juz ma sync-wave)"
-    return
-  fi
-  python3 - "$file" "$wave" <<'PY'
-import sys, re
-file, wave = sys.argv[1], sys.argv[2]
-with open(file) as f:
-    content = f.read()
-lines = content.split('\n')
-out = []
-in_metadata = False
-added = False
-for line in lines:
-    out.append(line)
-    if not added and re.match(r'^\s*metadata:\s*$', line):
-        in_metadata = True
-    elif in_metadata and not added and re.match(r'^\s*name:\s*\S+', line):
-        indent = re.match(r'^(\s*)', line).group(1)
-        out.append(f'{indent}annotations:')
-        out.append(f'{indent}  argocd.argoproj.io/sync-wave: "{wave}"')
-        added = True
-        in_metadata = False
-if added:
-    with open(file, 'w') as f:
-        f.write('\n'.join(out))
-    print(f'  OK: {file} -> fala {wave}')
-else:
-    print(f'  WARN: {file} - nie znaleziono metadata.name')
-PY
+APPLY = os.environ.get("APPLY") == "1"
+
+NAME_WAVE = {
+    ("Issuer", "vault-selfsigned"): -4,
+    ("Certificate", "vault-ca"): -3,
+    ("Issuer", "vault-ca"): -2,
+    ("Certificate", "vault-tls"): -1,
+    ("DestinationRule", "vault-own-tls"): -1,
+    ("PeerAuthentication", "vault"): -1,
 }
+KIND_WAVE = {"Namespace": -5}
+for k in ("ServiceAccount", "ConfigMap", "Secret", "Service", "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding"):
+    KIND_WAVE[k] = -1
+for k in ("SecretStore", "ClusterSecretStore", "VaultDynamicSecret", "ExternalSecret", "ClusterIssuer"):
+    KIND_WAVE[k] = 2
+KIND_WAVE["ClusterPolicy"] = 5
 
-# ---------------------------------------------------------------------------
-# vault.yaml: 3 zasoby z roznymi falami.
-# - ConfigMap vault-config  -> -1 (Pod montuje start.sh)
-# - Service vault           -> -1 (Pod rejestruje sie w Service)
-# - StatefulSet vault       -> 0  (startuje po ConfigMap/Service)
-# Dodatkowo: StatefulSet dostaje sidecar.istio.io/inject: "false"
-# (bez tego vault-0 utknie na istio-init).
-# ---------------------------------------------------------------------------
-add_wave_to_vault_yaml() {
-  local file="vault.yaml"
-  if [ ! -f "$file" ]; then
-    echo "  SKIP: $file (nie istnieje)"
-    return
-  fi
+FILE_WAVE = {}
+for f in ("postgres.yaml", "vault.yaml", "redis.yaml", "kafka.yaml"): FILE_WAVE[f] = 0
+for f in ("vault-bootstrap.yaml", "vault-snapshot.yaml"): FILE_WAVE[f] = 1
+for f in ("deployment.yaml", "frontend.yaml", "message-processor.yaml", "spring-app.yaml", "hpa.yaml", "pdb.yaml",
+          "istio-gateway.yaml", "istio-security.yaml", "network-policies.yaml"): FILE_WAVE[f] = 3
+for f in ("prometheus.yaml", "grafana.yaml", "loki.yaml", "promtail.yaml", "tempo.yaml", "alertmanager.yaml",
+          "exporters.yaml", "cert-expiry-exporter.yaml", "pgadmin.yaml", "kafka-ui.yaml"): FILE_WAVE[f] = 4
+FILE_WAVE["kyverno-policy.yaml"] = 5
 
-  local has_cm_wave has_svc_wave has_sts_wave has_istio
-  has_cm_wave=$(python3 - "$file" <<'PY'
-import sys, yaml
-try:
-    docs = list(yaml.safe_load_all(open(sys.argv[1])))
-    for d in docs:
-        if d and d.get('kind') == 'ConfigMap' and d['metadata']['name'] == 'vault-config':
-            ann = d['metadata'].get('annotations', {})
-            print('yes' if ann.get('argocd.argoproj.io/sync-wave') == '-1' else 'no')
-            sys.exit(0)
-    print('missing')
-except Exception:
-    print('error')
+def wave_for(fname, kind, name):
+    if (kind, name) in NAME_WAVE: return NAME_WAVE[(kind, name)]
+    if kind in KIND_WAVE: return KIND_WAVE[kind]
+    return FILE_WAVE.get(fname)
+
+KEY = "argocd.argoproj.io/sync-wave"
+
+def patch_doc(doc, wave):
+    """Zwraca (nowy_dokument, status) — status: 'ok'/'zmiana'/'blad:<powod>'."""
+    lines = doc.split("\n")
+    # top-level 'metadata:'
+    mi = next((i for i, l in enumerate(lines) if re.match(r"^metadata:\s*$", l)), None)
+    if mi is None:
+        fi = next((i for i, l in enumerate(lines) if re.match(r"^metadata:\s*\{.*\}\s*$", l)), None)
+        if fi is None:
+            return doc, "blad:nie znaleziono 'metadata:' — dodaj recznie"
+        if "annotations" in lines[fi]:
+            return doc, "blad:metadata w stylu flow z annotations — dodaj recznie"
+        if f'"{wave}"' in lines[fi] and KEY in lines[fi]:
+            return doc, "ok"
+        lines[fi] = re.sub(r"\s*\}\s*$", f', annotations: {{ {KEY}: "{wave}" }} }}', lines[fi])
+        return "\n".join(lines), "zmiana"
+    # zakres bloku metadata
+    end = len(lines)
+    for j in range(mi + 1, len(lines)):
+        l = lines[j]
+        if l.strip() == "" or l.lstrip().startswith("#"):
+            continue
+        if not l.startswith((" ", "\t")):
+            end = j; break
+    block = list(range(mi + 1, end))
+    ind = None
+    for j in block:
+        l = lines[j]
+        if l.strip() and not l.lstrip().startswith("#"):
+            ind = re.match(r"^(\s*)", l).group(1); break
+    if ind is None:
+        return doc, "blad:pusty blok metadata"
+    want = f'"{wave}"'
+    # 1) istnieje klucz sync-wave w metadata -> podmien wartosc
+    for j in block:
+        m = re.match(rf"^(\s+){re.escape(KEY)}:\s*(.*?)\s*(#.*)?$", lines[j])
+        if m and len(m.group(1)) > len(ind):
+            cur = m.group(2).strip().strip('"\'')
+            if cur == str(wave): return doc, "ok"
+            lines[j] = f'{m.group(1)}{KEY}: {want}'
+            return "\n".join(lines), "zmiana"
+    # 2) istnieje 'annotations:' (blokowe) -> dopisz klucz
+    for j in block:
+        if re.match(rf"^{re.escape(ind)}annotations:\s*$", lines[j]):
+            child = ind + "  "
+            for k in range(j + 1, end):
+                if lines[k].strip() and not lines[k].lstrip().startswith("#"):
+                    c = re.match(r"^(\s*)", lines[k]).group(1)
+                    if len(c) > len(ind): child = c
+                    break
+            lines.insert(j + 1, f"{child}{KEY}: {want}")
+            return "\n".join(lines), "zmiana"
+        if re.match(rf"^{re.escape(ind)}annotations:\s*\{{.*\}}\s*$", lines[j]):
+            return doc, "blad:annotations w stylu flow ({...}) — dodaj recznie"
+    # 3) brak annotations -> po linii 'name:'
+    for j in block:
+        if re.match(rf"^{re.escape(ind)}name:\s*\S+", lines[j]):
+            lines.insert(j + 1, f"{ind}annotations:")
+            lines.insert(j + 2, f"{ind}  {KEY}: {want}")
+            return "\n".join(lines), "zmiana"
+    return doc, "blad:nie znaleziono metadata.name"
+
+total_changed = 0; problems = []; norule = []
+for path in sorted(glob.glob("*.yaml")):
+    content = open(path).read()
+    parts = re.split(r"(?m)^(---[ \t]*)$", content)   # zachowuje separatory
+    changed = False
+    for i in range(0, len(parts), 2):
+        doc = parts[i]
+        km = re.search(r"(?m)^kind:\s*(\S+)", doc)
+        if not km: continue
+        kind = km.group(1)
+        nm = None
+        mm = re.search(r"(?m)^metadata:\s*\n((?:[ \t]+.*\n|[ \t]*#.*\n|\n)*)", doc + "\n")
+        if mm:
+            n = re.search(r"(?m)^[ \t]+name:\s*[\"']?([^\s\"']+)", mm.group(1))
+            nm = n.group(1) if n else None
+        if nm is None:
+            n = re.search(r"(?m)^metadata:.*\bname:\s*[\"']?([^\s\"',}]+)", doc)
+            nm = n.group(1) if n else "?"
+        wave = wave_for(path, kind, nm)
+        if wave is None:
+            norule.append(f"{path}: {kind}/{nm}")
+            continue
+        new, st = patch_doc(doc, wave)
+        if st.startswith("blad"):
+            problems.append(f"{path}: {kind}/{nm}: {st[5:]}")
+            print(f"  !! {path}: {kind}/{nm} -> fala {wave}  [{st[5:]}]")
+        elif st == "zmiana":
+            parts[i] = new; changed = True; total_changed += 1
+            print(f"  {path}: {kind}/{nm} -> fala {wave}")
+    if changed and APPLY:
+        open(path, "w").write("".join(parts))
+
+print()
+if norule:
+    print("BEZ REGULY (bez zmian):"); [print("  " + x) for x in norule]
+if problems:
+    print("DO RECZNEJ POPRAWKI:"); [print("  " + x) for x in problems]
+print(f"\n{'ZAPISANO' if APPLY else 'DRY-RUN (nic nie zapisano; uzyj --apply)'}: {total_changed} zasobow do zmiany.")
 PY
-)
-  has_svc_wave=$(python3 - "$file" <<'PY'
-import sys, yaml
-try:
-    docs = list(yaml.safe_load_all(open(sys.argv[1])))
-    for d in docs:
-        if d and d.get('kind') == 'Service' and d['metadata']['name'] == 'vault':
-            ann = d['metadata'].get('annotations', {})
-            print('yes' if ann.get('argocd.argoproj.io/sync-wave') == '-1' else 'no')
-            sys.exit(0)
-    print('missing')
-except Exception:
-    print('error')
-PY
-)
-  has_sts_wave=$(python3 - "$file" <<'PY'
-import sys, yaml
-try:
-    docs = list(yaml.safe_load_all(open(sys.argv[1])))
-    for d in docs:
-        if d and d.get('kind') == 'StatefulSet' and d['metadata']['name'] == 'vault':
-            ann = d['metadata'].get('annotations', {})
-            print('yes' if ann.get('argocd.argoproj.io/sync-wave') == '0' else 'no')
-            sys.exit(0)
-    print('missing')
-except Exception:
-    print('error')
-PY
-)
-  has_istio=$(python3 - "$file" <<'PY'
-import sys, yaml
-try:
-    docs = list(yaml.safe_load_all(open(sys.argv[1])))
-    for d in docs:
-        if d and d.get('kind') == 'StatefulSet' and d['metadata']['name'] == 'vault':
-            ann = d['spec']['template']['metadata'].get('annotations', {})
-            print('yes' if ann.get('sidecar.istio.io/inject') == 'false' else 'no')
-            sys.exit(0)
-    print('missing')
-except Exception:
-    print('error')
-PY
-)
-
-  if [ "$has_cm_wave" = "yes" ] && [ "$has_svc_wave" = "yes" ] && [ "$has_sts_wave" = "yes" ] && [ "$has_istio" = "yes" ]; then
-    echo "  SKIP: $file (juz ma poprawne sync-wave + istio-inject)"
-    return
-  fi
-
-  python3 - "$file" <<'PY'
-import sys, re
-file = sys.argv[1]
-with open(file) as f:
-    content = f.read()
-docs = re.split(r'(?m)^---\s*$', content)
-
-def add_annotation_to_doc(doc, kind, name, wave, istio_false=False):
-    if not re.search(rf'^kind:\s*{kind}\s*$', doc, re.M):
-        return doc, False
-    if not re.search(rf'^\s*name:\s*{name}\s*$', doc, re.M):
-        return doc, False
-    if 'argocd.argoproj.io/sync-wave' in doc:
-        return doc, False
-    lines = doc.split('\n')
-    out = []
-    in_metadata = False
-    added_ann = False
-    for line in lines:
-        out.append(line)
-        if not added_ann and re.match(r'^metadata:\s*$', line):
-            in_metadata = True
-        elif in_metadata and not added_ann and re.match(r'^\s+name:\s*\S+', line):
-            indent = re.match(r'^(\s+)', line).group(1)
-            out.append(f'{indent}annotations:')
-            out.append(f'{indent}  argocd.argoproj.io/sync-wave: "{wave}"')
-            added_ann = True
-            in_metadata = False
-    doc = '\n'.join(out)
-    if istio_false:
-        lines = doc.split('\n')
-        out = []
-        in_template_meta = False
-        added_istio = False
-        for line in lines:
-            out.append(line)
-            if re.match(r'^\s+template:\s*$', line):
-                in_template_meta = 'waiting_metadata'
-            elif in_template_meta == 'waiting_metadata' and re.match(r'^\s+metadata:\s*$', line):
-                in_template_meta = 'in_metadata'
-            elif in_template_meta == 'in_metadata' and not added_istio and re.match(r'^\s+labels:', line):
-                indent = re.match(r'^(\s+)', line).group(1)
-                out.append(f'{indent}annotations:')
-                out.append(f'{indent}  sidecar.istio.io/inject: "false"')
-                added_istio = True
-                in_template_meta = False
-        doc = '\n'.join(out)
-    return doc, True
-
-new_docs = []
-changed = False
-for doc in docs:
-    d, c1 = add_annotation_to_doc(doc, 'ConfigMap', 'vault-config', '-1')
-    if c1: changed = True; doc = d
-    d, c2 = add_annotation_to_doc(doc, 'Service', 'vault', '-1')
-    if c2: changed = True; doc = d
-    d, c3 = add_annotation_to_doc(doc, 'StatefulSet', 'vault', '0', istio_false=True)
-    if c3: changed = True; doc = d
-    new_docs.append(doc)
-
-if changed:
-    with open(file, 'w') as f:
-        f.write('---\n'.join(new_docs))
-    print(f'  OK: {file} -> ConfigMap/Service fala -1, StatefulSet fala 0, istio-inject=false')
-else:
-    print(f'  WARN: {file} - nie udalo sie dodac adnotacji')
-PY
-}
-
-# ---------------------------------------------------------------------------
-# pki-issuer.yaml: Issuer/vault-selfsigned -> fala -2, ClusterIssuer/* -> fala 2
-# (ClusterIssuer/vault-issuer wymaga cert-manager-vault-token z fali 1)
-# ---------------------------------------------------------------------------
-add_wave_to_pki_issuer_yaml() {
-  local file="pki-issuer.yaml"
-  if [ ! -f "$file" ]; then
-    echo "  SKIP: $file (nie istnieje)"
-    return
-  fi
-
-  python3 - "$file" <<'PY'
-import sys, re
-file = sys.argv[1]
-with open(file) as f:
-    content = f.read()
-docs = re.split(r'(?m)^---\s*$', content)
-
-def add_ann(doc, kind, name, wave):
-    if not re.search(rf'^kind:\s*{kind}\s*$', doc, re.M):
-        return doc, False
-    if not re.search(rf'^\s*name:\s*{name}\s*$', doc, re.M):
-        return doc, False
-    if 'argocd.argoproj.io/sync-wave' in doc:
-        return doc, False
-    lines = doc.split('\n')
-    out = []
-    in_metadata = False
-    added = False
-    for line in lines:
-        out.append(line)
-        if not added and re.match(r'^metadata:\s*$', line):
-            in_metadata = True
-        elif in_metadata and not added and re.match(r'^\s+name:\s*\S+', line):
-            indent = re.match(r'^(\s+)', line).group(1)
-            out.append(f'{indent}annotations:')
-            out.append(f'{indent}  argocd.argoproj.io/sync-wave: "{wave}"')
-            added = True
-            in_metadata = False
-    return '\n'.join(out), True
-
-new_docs = []
-changed = False
-for doc in docs:
-    # Issuer/vault-selfsigned -> fala -2
-    d, c = add_ann(doc, 'Issuer', 'vault-selfsigned', '-2')
-    if c: changed = True; doc = d
-    # ClusterIssuer/vault-issuer -> fala 2
-    d, c = add_ann(doc, 'ClusterIssuer', 'vault-issuer', '2')
-    if c: changed = True; doc = d
-    # ClusterIssuer/vault-issuer-internal -> fala 2
-    d, c = add_ann(doc, 'ClusterIssuer', 'vault-issuer-internal', '2')
-    if c: changed = True; doc = d
-    # ClusterIssuer/vault-issuer-mesh -> fala 2
-    d, c = add_ann(doc, 'ClusterIssuer', 'vault-issuer-mesh', '2')
-    if c: changed = True; doc = d
-    new_docs.append(doc)
-
-if changed:
-    with open(file, 'w') as f:
-        f.write('---\n'.join(new_docs))
-    print(f'  OK: {file} -> Issuer/vault-selfsigned fala -2, ClusterIssuer/* fala 2')
-else:
-    print(f'  SKIP: {file} (juz ma poprawne sync-wave)')
-PY
-}
-
-# ============================================================================
-# FALA -3: bootstrap CA Vaulta (Issuer/vault-selfsigned + Certificate/vault-ca + Issuer/vault-ca)
-# ============================================================================
-echo "=== Fala -3: bootstrap CA Vaulta ==="
-add_wave "vault-server-tls.yaml" "-3"
-
-# ============================================================================
-# FALA -2: cert serwera Vaulta (Certificate/vault-tls — uzywa Issuer/vault-ca z -3)
-# ============================================================================
-echo "=== Fala -2: cert serwera Vaulta ==="
-add_wave "vault-tls-certificate.yaml" "-2"
-
-# ============================================================================
-# FALA -1: Namespace/RBAC/ConfigMap/SecretStore/Service
-# ============================================================================
-echo "=== Fala -1: Namespace/RBAC/ConfigMap/SecretStore/Service ==="
-for f in namespace.yaml serviceaccount.yaml configmap.yaml secret-store.yaml transit-helpers.yaml service.yaml; do
-  add_wave "$f" "-1"
-done
-
-# ============================================================================
-# FALA 0: Bazy i Vault
-# ============================================================================
-echo "=== Fala 0: Bazy i Vault ==="
-for f in postgres.yaml redis.yaml kafka.yaml; do
-  add_wave "$f" "0"
-done
-add_wave_to_vault_yaml
-
-# ============================================================================
-# FALA 1: Vault bootstrap (tworzy cert-manager-vault-token)
-# ============================================================================
-echo "=== Fala 1: Vault bootstrap ==="
-for f in vault-bootstrap.yaml vault-snapshot.yaml; do
-  add_wave "$f" "1"
-done
-
-# ============================================================================
-# FALA 2: ClusterIssuer (ma token z fali 1) + ExternalSecrets
-# ============================================================================
-echo "=== Fala 2: ClusterIssuer + ExternalSecrets ==="
-# pki-issuer.yaml obsluguje osobno (Issuer/vault-selfsigned -2, ClusterIssuer/* 2)
-add_wave_to_pki_issuer_yaml
-for f in external-secrets.yaml external-secrets-db-dynamic.yaml; do
-  add_wave "$f" "2"
-done
-
-# ============================================================================
-# FALA 3: Aplikacje
-# ============================================================================
-echo "=== Fala 3: Aplikacje ==="
-for f in deployment.yaml frontend.yaml message-processor.yaml spring-app.yaml hpa.yaml pdb.yaml istio-gateway.yaml istio-security.yaml network-policies.yaml; do
-  add_wave "$f" "3"
-done
-
-# ============================================================================
-# FALA 4: Observability
-# ============================================================================
-echo "=== Fala 4: Observability ==="
-for f in prometheus.yaml grafana.yaml loki.yaml promtail.yaml tempo.yaml alertmanager.yaml exporters.yaml cert-expiry-exporter.yaml pgadmin.yaml kafka-ui.yaml; do
-  add_wave "$f" "4"
-done
-
-# ============================================================================
-# FALA 5: Kyverno
-# ============================================================================
-echo "=== Fala 5: Kyverno ==="
-add_wave "kyverno-policy.yaml" "5"
-
-echo "=== GOTOWE ==="
-echo "Sprawdz: grep -r 'sync-wave' manifests/base/ | sort"
-echo "Sprawdz vault.yaml: grep -n 'sync-wave\\|sidecar.istio.io' manifests/base/vault.yaml"
-echo "Sprawdz pki-issuer.yaml: grep -n 'sync-wave' manifests/base/pki-issuer.yaml"

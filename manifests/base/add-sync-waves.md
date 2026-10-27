@@ -392,4 +392,73 @@ GHCR_USER='exea-centrum' GHCR_REPO='website-db-...' GHCR_PAT='ghp_xxx' GITHUB_PA
 # Z automatycznym zwolnieniem pamięci (gdy node >90% requests memory):
 AUTO_SCALE_DOWN=1 SKIP_WAIT=1 ENABLE_RBAC=1 \
 GHCR_USER='exea-centrum' GHCR_REPO='website-db-...' GHCR_PAT='ghp_xxx' GITHUB_PAT='ghp_yyy' \
-  ./scripts/setup-from-scratch.sh 2>&1 | tee /tmp/setup-$(date +%F-%H%M).log
+  ./scripts/setup-from-scratch.sh 2>&1 | tee /tmp/setup-$(date +%F-%H%M).logf
+
+# ffffffffffffffffff
+
+Odpowiadam wprost: to było mieszanie wiedzy z zgadywaniem.
+
+- **Wiedziałem**, bo miałem dowody w logach: że `ExternalSecret` z fali 0 czeka na generator z fali 2 (lista błędów z ArgoCD) i że `postgres-allow` nie przepuszcza `vault-0` (pełny YAML polityki plus `unexpected EOF` przy braku jakiejkolwiek próby w logu Postgresa). Oba poprawki potwierdziły Twoje wydruki: ExternalSecrety są Healthy, a Vault wydaje dane z bazy.
+- **Zgadywałem** przyczynę Degraded ClusterIssuerów („połączenie `cert-manager` z Vaultem albo rola auth”). Teraz jest w logu konkretny komunikat i hipoteza była nietrafiona.
+- **Przeniosłem cudzy błąd.** Komunikat w `setup-from-scratch.sh` („vault-bootstrap tworzy `cert-manager-vault-token`”) był w oryginale, a ja go powtórzyłem bez sprawdzania. W wklejonym `vault-bootstrap.yaml` nic takiego nie ma. Skrypt tworzy tylko role `cert-manager`, `cert-manager-internal` w auth Kubernetes.
+
+**Bieżący stan.** Poprawka w gicie działa: `postgres-allow` ma regułę, skrypt to potwierdza, a `selfHeal` jest włączony. Fala 3 nie rusza przez jedną rzecz. ClusterIssuery `vault-issuer`, `-internal` i `-mesh` zgłaszają:
+```
+Failed to initialize Vault client: secrets "cert-manager-vault-token" not found
+```
+Są w fali 2 i Degraded, więc ArgoCD nie przechodzi do fal 3–5. Tego Secretu nie tworzy ani manifest, ani `vault-bootstrap`.
+
+**Co dodałem.** Krok 2f w `unblock-sync.sh` czyta z klastra nazwę Secretu i klucz z `ClusterIssuer/vault-issuer` (`tokenSecretRef`). Tworzy w `cert-manager` token okresowy 768h z policy `pki-issuer` i `pki-internal`, zapisuje go jako ten Secret i wymusza ponowną weryfikację issuerów. Poprawiłem też błędne podpowiedzi w `setup-from-scratch.sh`. Oba pliki sprawdziłem tylko składniowo (`bash -n`), na klastrze ich nie uruchamiałem.
+
+Uruchom `./scripts/unblock-sync.sh` i szukaj linii `[OK] Utworzono Secret cert-manager/cert-manager-vault-token`. W kroku 3b ClusterIssuery powinny przestać zgłaszać błąd. Jeśli nadal coś zgłoszą, wklej mi komunikat.
+
+**To jest rozwiązanie tymczasowe.** Token żyje 768h (32 dni) i `cert-manager` go nie odnawia. Po tym czasie wystawianie certyfikatów przestanie działać, a skrypt trzeba będzie puścić ponownie. Docelowo `ClusterIssuer` powinien używać `auth.kubernetes` z rolą `cert-manager`, którą bootstrap już tworzy i wiąże z SA `cert-manager`/`cert-manager-vault`. Wymaga to zmiany w manifeście `pki-issuer.yaml`, którego nie widziałem. Jeśli go wkleisz, przygotuję tę poprawkę. Wtedy ani token, ani `unblock-sync.sh` nie będą potrzebne.
+# ################
+
+
+
+Kończę dwie poprawki: skrypt `add-sync-waves.sh` w wersji, która ustawia fale per zasób (nie tylko pierwszy w pliku), oraz krok w `unblock-sync.sh` dla błędu x509 w ClusterIssuerach. Za chwilę wysyłam pliki.
+
+Tak, grupy (fale) to ten skrypt, i ma błąd, który tłumaczy większość Waszych problemów.
+
+**Błąd w `add-sync-waves.sh`.** Funkcja `add_wave` ma flagę `added` i dopisuje adnotację tylko do pierwszego zasobu w pliku. W plikach wielodokumentowych reszta zasobów zostaje bez fali, czyli w fali 0. Dokładnie to widać w ArgoCD:
+- `ConfigMap`-y observability są w fali 4, a ich Deploymenty w 0.
+- `ExternalSecret`-y są w 0, a generator w 2.
+- `Service`, `NetworkPolicy` i `AuthorizationPolicy` nie mają fali.
+
+Jest też druga pułapka. `vault-bootstrap` w nagłówku skryptu „tworzy `cert-manager-vault-token`", a w manifeście tego nie robi.
+
+**Nowa wersja (v2).** Ustawia falę per zasób (każdy dokument YAML osobno), według rodzaju i nazwy, a nie pliku:
+- ConfigMap, SA, Service, Secret i RBAC: -1.
+- Vault, Postgres, Kafka, Redis: 0.
+- `vault-bootstrap` i `vault-snapshot`: 1.
+- SecretStore, ExternalSecret, VaultDynamicSecret i ClusterIssuer: 2.
+- Aplikacje i polityki Istio/netpol: 3.
+- Observability: 4.
+- Kyverno: 5.
+
+Przetestowałem ją na próbkach plików, na przykład `istio-security.yaml` i `prometheus.yaml`. Wynik po zapisie parsuje się jako YAML, a ponowne uruchomienie niczego nie zmienia. Na prawdziwych plikach z repo jej nie uruchamiałem.
+
+Domyślnie działa jako dry-run:
+
+``` bash
+cd manifests/base
+./add-sync-waves.sh            # tylko plan
+./add-sync-waves.sh --apply    # zapis
+git diff                       # sprawdź, potem commit i push
+```
+Zasoby bez reguły są wypisywane jako „BEZ REGULY", a te w nietypowym stylu YAML jako „DO RĘCZNEJ POPRAWKI".
+
+Dwie rzeczy do przemyślenia przed `--apply`:
+- Fala -1 dla wszystkich `Service`, `ConfigMap` i `Secret` jest przesądzona przeze mnie, bo nie widziałem reszty plików. Przejrzyj `git diff`.
+- Samo przestawienie fal nie rozwiąże problemu z ClusterIssuerami (opisanego niżej). Fala 2 wymaga Vaulta skonfigurowanego przez `vault-bootstrap`, a deployment w stanie Healthy tego nie gwarantuje.
+
+**Aktualny błąd z ostatniego logu.** Token Secret zadziałał, ale `cert-manager` zgłasza teraz:
+```
+x509: certificate signed by unknown authority
+```
+Certyfikat Vaulta pochodzi z `vault-ca` generowanego przez cert-manager, a ClusterIssuer nie ma tego CA w `caBundle`. Dodałem krok 2g do `unblock-sync.sh`: kopiuje `ca.crt` z `Secret/vault-tls` do pola `spec.vault.caBundle` trzech issuerów. To wynika z komunikatu błędu, ale nie widziałem `pki-issuer.yaml`, więc nie wiem, czy issuery nie mają tego pola ustawionego inaczej. Skrypt sprawdza, czy pole już jest. Plik sprawdziłem tylko składniowo (`bash -n`).
+
+Uruchom `./scripts/unblock-sync.sh` i wklej mi sekcję 2g i 3b. Jeśli w 3b nie będzie już błędów, fale 3–5 powinny ruszyć.
+
+Do gita to docelowo nie trafi, bo CA jest generowane. Trwałe rozwiązanie to `auth.kubernetes` w issuerach plus `caBundleSecretRef`, ale tego nie będę zgadywał bez `pki-issuer.yaml`.  

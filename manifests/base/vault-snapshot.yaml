@@ -23,6 +23,8 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: vault-snapshot
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
   namespace: davtro02
 spec:
   schedule: "0 3 * * *"

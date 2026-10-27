@@ -54,6 +54,8 @@ apiVersion: v1
 kind: Service
 metadata:
   name: kafka-kraft
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 spec:
   clusterIP: None
@@ -68,6 +70,7 @@ metadata:
   name: kafka-topic-job
   namespace: davtro02
   annotations:
+    argocd.argoproj.io/sync-wave: "0"
     argocd.argoproj.io/hook: PostSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:

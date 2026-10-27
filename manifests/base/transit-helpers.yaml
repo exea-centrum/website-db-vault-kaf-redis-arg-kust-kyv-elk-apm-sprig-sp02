@@ -109,6 +109,8 @@ apiVersion: external-secrets.io/v1
 kind: SecretStore
 metadata:
   name: vault-transit
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
   namespace: davtro02
 spec:
   provider:

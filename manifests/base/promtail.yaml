@@ -3,7 +3,7 @@ kind: ConfigMap
 metadata:
   name: promtail-config
   annotations:
-    argocd.argoproj.io/sync-wave: "4"
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 data:
   promtail.yaml: |
@@ -26,6 +26,8 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: promtail
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
   namespace: davtro02
 spec:
   selector: { matchLabels: { app: promtail } }

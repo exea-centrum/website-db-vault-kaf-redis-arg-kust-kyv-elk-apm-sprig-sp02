@@ -3,7 +3,7 @@ kind: ConfigMap
 metadata:
   name: grafana-datasource
   annotations:
-    argocd.argoproj.io/sync-wave: "4"
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 data:
   datasource.yaml: |
@@ -27,6 +27,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-dashboards
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 data:
   davtro-overview.json: |
@@ -36,6 +38,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: grafana
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
   namespace: davtro02
 spec:
   replicas: 1
@@ -67,6 +71,8 @@ apiVersion: v1
 kind: Service
 metadata:
   name: grafana
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 spec:
   selector: { app: grafana }

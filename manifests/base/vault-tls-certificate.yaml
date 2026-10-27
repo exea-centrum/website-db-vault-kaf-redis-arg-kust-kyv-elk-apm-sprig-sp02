@@ -12,7 +12,7 @@ kind: Certificate
 metadata:
   name: vault-tls
   annotations:
-    argocd.argoproj.io/sync-wave: "-2"
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 spec:
   secretName: vault-tls

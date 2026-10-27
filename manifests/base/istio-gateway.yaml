@@ -50,6 +50,8 @@ apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: davtro-routes
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   hosts: ["davtro.local"]
@@ -63,6 +65,8 @@ apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: spark-routes
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   hosts: ["spark.davtro.local"]
@@ -74,6 +78,8 @@ apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: kafka-ui-routes
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   hosts: ["kafka-ui.davtro.local"]
@@ -85,6 +91,8 @@ apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: grafana-routes
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   hosts: ["grafana.davtro.local"]
@@ -96,6 +104,8 @@ apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: pgadmin-routes
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   hosts: ["pgadmin.davtro.local"]
@@ -107,6 +117,8 @@ apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: tempo-routes
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   hosts: ["tempo.davtro.local"]
@@ -118,6 +130,8 @@ apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: prometheus-routes
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   hosts: ["prometheus.davtro.local"]
@@ -129,6 +143,8 @@ apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: loki-routes
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   hosts: ["loki.davtro.local"]
@@ -140,6 +156,8 @@ apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: spring-routes
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   hosts: ["spring.davtro.local"]

@@ -13,6 +13,8 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-intra-namespace
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   podSelector: {}
@@ -24,6 +26,8 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-eso-to-vault
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   podSelector:
@@ -42,6 +46,8 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-ingress-to-web
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   podSelector: { matchLabels: { app: fastapi-web-app } }
@@ -54,6 +60,8 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-ingress-to-frontend
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   podSelector: { matchLabels: { app: frontend } }
@@ -66,6 +74,8 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-ingress-controller-to-web
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   podSelector:
@@ -84,6 +94,8 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-ingress-controller-to-frontend
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   podSelector:
@@ -102,6 +114,8 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-certmanager-to-vault
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   podSelector:
@@ -120,6 +134,8 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-istio-gateway-to-ui
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
   namespace: davtro02
 spec:
   podSelector: {}

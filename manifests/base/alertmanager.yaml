@@ -7,7 +7,7 @@ kind: ConfigMap
 metadata:
   name: alertmanager-config
   annotations:
-    argocd.argoproj.io/sync-wave: "4"
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 data:
   alertmanager.yml.tpl: |
@@ -62,6 +62,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: alertmanager
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
   namespace: davtro02
   labels: { app: alertmanager }
 spec:
@@ -99,6 +101,8 @@ apiVersion: v1
 kind: Service
 metadata:
   name: alertmanager
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 spec:
   selector: { app: alertmanager }

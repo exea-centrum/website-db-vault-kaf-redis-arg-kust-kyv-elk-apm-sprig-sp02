@@ -45,6 +45,8 @@ apiVersion: v1
 kind: Service
 metadata:
   name: spring-app-svc
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
   namespace: davtro02
 spec:
   selector: { app: spring-app }
