@@ -294,6 +294,62 @@ else
   warn "Nie znaleziono deploy/istiod (ns istio-system)."
 fi
 
+# ---------- 2e. Vault -> Postgres: AuthorizationPolicy postgres-allow blokuje vault-0 ----------
+# vault-0 dziala BEZ sidecara Istio, wiec nie ma tozsamosci mTLS. postgres-allow przepuszcza tylko
+# sa/davtro-sa i sa/default => polaczenie jest zrywane ("unexpected EOF"), database/config/davtro-postgresql
+# nie powstaje, a VaultDynamicSecret dostaje 500 "failed to find entry for connection".
+log "=== 2e: dostep Vaulta (bez sidecara) do Postgresa — AuthorizationPolicy postgres-allow ==="
+VPOD_IP=$(KC -n "$NS" get pod vault-0 -o jsonpath='{.status.podIP}' 2>/dev/null || true)
+if [ -n "$VPOD_IP" ]; then
+  POD_CIDR="$(echo "$VPOD_IP" | cut -d. -f1-2).0.0/16"
+  if KC -n "$NS" get authorizationpolicy postgres-allow -o json 2>/dev/null | grep -q "$POD_CIDR"; then
+    ok "postgres-allow zawiera juz regule dla $POD_CIDR."
+  else
+    warn "postgres-allow nie przepuszcza vault-0 ($VPOD_IP). Dodaje regule ipBlocks $POD_CIDR (port 5432)."
+    # selfHeal cofnalby reczna zmiane w kilka sekund -> wstrzymujemy go; TRWALA poprawka musi trafic do gita.
+    KC -n argocd patch application "$ARGO_APP" --type merge -p '{"spec":{"syncPolicy":{"automated":{"selfHeal":false}}}}' >/dev/null 2>&1 \
+      && warn "ArgoCD selfHeal WYLACZONY dla $ARGO_APP (wlacz po wypchnieciu poprawki do gita — patrz nizej)."
+    KC -n "$NS" patch authorizationpolicy postgres-allow --type=json \
+      -p "[{\"op\":\"add\",\"path\":\"/spec/rules/-\",\"value\":{\"from\":[{\"source\":{\"ipBlocks\":[\"$POD_CIDR\"]}}],\"to\":[{\"operation\":{\"ports\":[\"5432\"]}}]}}]" \
+      && ok "postgres-allow zaktualizowana (live)."
+  fi
+  # vault-bootstrap ponawia zapis database/config w petli — restart skraca oczekiwanie.
+  KC -n "$NS" rollout restart deploy/vault-bootstrap >/dev/null 2>&1 && log "vault-bootstrap: rollout restart (ponowi database/config)."
+  log "Czekam do 5 min na database/config/davtro-postgresql w Vaultcie..."
+  DBOK=0
+  for i in $(seq 1 30); do
+    if vexec "VAULT_TOKEN='$RTOKEN' vault read -format=json database/config/davtro-postgresql" >/dev/null 2>&1; then DBOK=1; break; fi
+    sleep 10
+  done
+  if [ "$DBOK" = 1 ]; then
+    ok "Vault: database/config/davtro-postgresql istnieje."
+    if vexec "VAULT_TOKEN='$RTOKEN' vault read -format=json database/creds/davtro-app-rw" >/dev/null 2>&1; then
+      ok "Vault: database/creds/davtro-app-rw wydaje dane dostepowe."
+    else
+      warn "database/creds/davtro-app-rw nadal zwraca blad — sprawdz: vault read database/creds/davtro-app-rw"
+    fi
+  else
+    warn "Brak database/config/davtro-postgresql. Logi: kubectl -n $NS logs deploy/vault-bootstrap --all-containers --tail=80 | grep -iE 'database|postgres|error'"
+  fi
+  cat <<'NOTE'
+
+  >>> TRWALA POPRAWKA W GICIE (bez niej ArgoCD cofnie zmiane, a Vault straci dostep do bazy):
+  w manifescie AuthorizationPolicy/postgres-allow (manifests/base) dodaj do spec.rules druga regule:
+    - from:
+        - source:
+            ipBlocks: ["10.1.0.0/16"]     # siec podow; vault-0 nie ma sidecara => brak tozsamosci mTLS
+      to:
+        - operation:
+            ports: ["5432"]
+  Alternatywa (czystsza): wstrzyknij sidecar do vault-0 i dodaj principal cluster.local/ns/davtro02/sa/vault.
+  Potem: git commit && git push, a nastepnie wlacz selfHeal:
+    kubectl -n argocd patch application davtro-website --type merge -p '{"spec":{"syncPolicy":{"automated":{"selfHeal":true}}}}'
+
+NOTE
+else
+  warn "Nie znaleziono IP poda vault-0 — pomijam krok 2e."
+fi
+
 # ---------- 3. ESO + ArgoCD ----------
 log "=== 3/4: reconcile SecretStore/ExternalSecret + refresh ArgoCD ==="
 TS=$(date +%s)
@@ -305,8 +361,18 @@ for r in $(KC -n "$NS" get externalsecret -o name 2>/dev/null); do
 done
 KC -n argocd annotate application "$ARGO_APP" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 \
   && ok "ArgoCD: hard refresh $ARGO_APP." || warn "Nie znaleziono Application $ARGO_APP w ns argocd."
-echo "  --- ESO: ostatni realny blad dla ExternalSecretow ---"
-KC -n external-secrets logs deploy/external-secrets --tail=300 2>/dev/null | grep -iE 'fastapi-db-creds|message-processor-db-creds' | tail -3 | cut -c1-500
+echo "  --- ExternalSecret: pelny komunikat statusu ---"
+for es in fastapi-db-creds message-processor-db-creds; do
+  echo "  [$es] $(KC -n "$NS" get externalsecret "$es" -o jsonpath='{.status.conditions[*].reason}: {.status.conditions[*].message}' 2>/dev/null)"
+done
+echo "  --- ESO: ostatni pelny blad (po aplikacji generatora) ---"
+KC -n external-secrets logs deploy/external-secrets --since=10m 2>/dev/null | grep -iE 'fastapi-db-creds|message-processor-db-creds' | tail -1 | grep -o '"error":"[^}]*' | cut -c1-900
+echo "  --- VaultDynamicSecret ---"
+KC -n "$NS" get vaultdynamicsecret db-creds-davtro-app-rw -o jsonpath='path={.spec.path} method={.spec.method} provider={.spec.provider.server} ns-auth={.spec.provider.auth.kubernetes.role}{"\n"}' 2>/dev/null
+if [ -n "${RTOKEN:-}" ]; then
+  echo "  --- Vault: policy davtro-apps (czy zawiera database/creds) ---"
+  vexec "VAULT_TOKEN='$RTOKEN' vault policy read davtro-apps" 2>/dev/null | grep -nE 'path|capabilities' | head -20
+fi
 
 
 # Nieudany sync (np. "Sync failed ... 1 Error") NIE jest ponawiany przez auto-sync dla tej samej rewizji.

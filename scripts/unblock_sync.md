@@ -83,3 +83,14 @@ Jeśli po tym ArgoCD dalej stoi albo pojawi się nowy błąd, wklej wynik `./scr
 Files are in /tmp/work/scripts:
 - unblock-sync.sh
 - setup-from-scratch.sh
+
+Przyczyna unexpected EOF: nie jest jeszcze potwierdzona. Najbardziej prawdopodobna wydaje mi się blokada przez Istio. vault-0 działa bez sidecara, a postgres-db-0 ma sidecar i AuthorizationPolicy/postgres-allow. Połączenie bez tożsamości mTLS może być zerwane, co wygląda właśnie jak unexpected EOF. Inne możliwości to zła nazwa bazy/użytkownika albo hasło davtro rozjechane z tym, co jest w Postgresie. Nie widziałem manifestu vault-bootstrap.yaml ani polityki postgres-allow, więc nie chcę dopisywać do skryptu konfiguracji, której nie znam. Pobranie pliku z GitHuba było zablokowane, więc zgaduję bez treści.
+
+Wyślij mi wynik tych trzech poleceń:
+```bash
+kubectl -n davtro02 get authorizationpolicy postgres-allow -o yaml
+kubectl -n davtro02 logs postgres-db-0 -c postgres --tail=30
+kubectl -n davtro02 logs deploy/vault-bootstrap --all-containers --tail=300 | grep -iE 'database|postgres|davtro-postgresql|error'
+```
+
+Pierwsze pokaże, czy vault-0 ma prawo łączyć się z Postgresem. Drugie, czy Postgres odrzuca połączenie (hasło, pg_hba, TLS). Trzecie, w którym miejscu bootstrap dokładnie padł. Jeśli wkleisz też fragment vault-bootstrap.yaml od linii z database/config, dopiszę do unblock-sync.sh krok, który tworzy to połączenie ręcznie i sprawdza, czy vault read database/creds/davtro-app-rw zwraca użytkownika, a potem odpala sync.
