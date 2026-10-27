@@ -54,6 +54,12 @@ spec:
               - cluster.local/ns/davtro02/sa/default
       to:
         - operation: { ports: ["5432"] }
+    # vault-0 dziala bez sidecara Istio (brak tozsamosci mTLS) - przepuszczamy po IP z sieci podow.
+    - from:
+        - source:
+            ipBlocks: ["10.1.0.0/16"]
+      to:
+        - operation: { ports: ["5432"] }
 ---
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
