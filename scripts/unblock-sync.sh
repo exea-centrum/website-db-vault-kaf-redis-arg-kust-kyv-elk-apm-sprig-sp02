@@ -53,6 +53,14 @@ else
   KC() { sg microk8s -c "microk8s kubectl $(_q "$@")"; }
 fi
 
+# ---------- 0. Czekaj na API server (po restarcie wezla/MicroK8s bywa chwilowo niedostepny) ----------
+log "=== 0/4: czekam na API server ==="
+for i in $(seq 1 60); do
+  KC get --raw=/readyz >/dev/null 2>&1 && { ok "API server gotowy."; break; }
+  [ "$i" = 60 ] && { echo "${RED}[FAIL]${NC} API server niedostepny po 5 min. Sprawdz: microk8s status / sudo snap restart microk8s"; exit 1; }
+  sleep 5
+done
+
 # ---------- 1. Zasoby zaleznosci z pozniejszych fal ----------
 log "=== 1/4: aplikuje ConfigMap/ServiceAccount/PVC/Role/RoleBinding z $RENDER_DIR ==="
 command -v python3 >/dev/null || { echo "${RED}[FAIL]${NC} brak python3"; exit 1; }
@@ -88,8 +96,18 @@ trap 'rm -f "$TMP_YAML"' EXIT
 if render 2>/tmp/unblock-render.err | python3 -c "$FILTER" > "$TMP_YAML"; then
   COUNT=$(grep -c '^kind:' "$TMP_YAML" || true)
   if [ "${COUNT:-0}" -gt 0 ]; then
-    KC -n "$NS" apply -f "$TMP_YAML" && ok "Zaaplikowano $COUNT zasobow zaleznosci." \
-      || warn "kubectl apply zglosil bledy (patrz wyzej)."
+    APPLIED=0
+    for try_n in 1 2 3 4 5; do
+      if KC -n "$NS" apply --validate=false -f "$TMP_YAML"; then APPLIED=1; break; fi
+      warn "apply nieudany (proba $try_n/5) — czekam na API i ponawiam..."; sleep 10
+    done
+    [ "$APPLIED" = 1 ] && ok "Zaaplikowano $COUNT zasobow zaleznosci." \
+      || warn "kubectl apply nadal zglasza bledy (patrz wyzej)."
+    if KC -n "$NS" get vaultdynamicsecret db-creds-davtro-app-rw >/dev/null 2>&1; then
+      ok "VaultDynamicSecret/db-creds-davtro-app-rw istnieje."
+    else
+      warn "BRAK VaultDynamicSecret/db-creds-davtro-app-rw — ExternalSecrety w fali 0 nie ruszą."
+    fi
   else
     warn "Render nie zwrocil zadnych ConfigMap/SA/PVC — sprawdz RENDER_DIR=$RENDER_DIR ($(head -2 /tmp/unblock-render.err 2>/dev/null))"
   fi
