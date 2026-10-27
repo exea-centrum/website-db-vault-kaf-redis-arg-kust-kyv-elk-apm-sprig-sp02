@@ -601,7 +601,7 @@ KC get clusterrolebinding microk8s-hostpath >/dev/null 2>&1 && echo "  ClusterRo
 echo "--- Dashboard (svc) ---"; KC get svc -A 2>/dev/null | grep -i dashboard || echo "  (brak svc/kubernetes-dashboard)"
 echo "--- Certyfikaty ---"; KC -n "$NS" get certificate,secret 2>/dev/null | grep -E 'tls|NAME' || true
 echo "--- Issuer/ClusterIssuer ---"; KC -n "$NS" get issuer,clusterissuer 2>/dev/null || true
-echo "--- cert-manager-vault-token ---"; KC -n cert-manager get secret cert-manager-vault-token 2>/dev/null || echo "  (brak — vault-bootstrap jeszcze go nie utworzyl)"
+echo "--- cert-manager-vault-token ---"; KC -n cert-manager get secret cert-manager-vault-token 2>/dev/null || echo "  (brak — vault-bootstrap GO NIE TWORZY; tworzy go ./scripts/unblock-sync.sh, krok 2f)"
 echo "--- Istio analyze ---"; istioctl analyze -n "$NS" 2>/dev/null || warn "istioctl analyze zglosil uwagi."
 echo "--- Gateway/VirtualService ---"; KC -n "$NS" get gateway,virtualservice 2>/dev/null || true
 echo "--- ArgoCD Applications ---"; KC -n argocd get applications 2>/dev/null || true
@@ -698,7 +698,7 @@ Jesli ArgoCD czeka na "healthy state of Certificate/vault-tls":
   kubectl -n $NS get certificate vault-tls
 
 Jesli vault-issuer jest False:
-  # To normalne — vault-bootstrap tworzy cert-manager-vault-token.
+  # vault-bootstrap NIE tworzy cert-manager-vault-token — uruchom ./scripts/unblock-sync.sh (krok 2f).
   kubectl -n $NS get deploy vault-bootstrap
   kubectl -n $NS get pods | grep vault-bootstrap
 

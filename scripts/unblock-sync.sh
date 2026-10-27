@@ -355,6 +355,37 @@ else
 fi
 
 # ---------- 3. ESO + ArgoCD ----------
+# ---------- 2f. Token Vaulta dla cert-manager (ClusterIssuery vault-issuer*) ----------
+# ClusterIssuery (wave 2) czytaja token z Secretu (nazwa/klucz biora z .spec.vault.auth.tokenSecretRef).
+# Zaden manifest ani vault-bootstrap go nie tworzy => "secrets cert-manager-vault-token not found",
+# ClusterIssuery sa Degraded, a ArgoCD nie przechodzi do fal 3+.
+log "=== 2f: token Vaulta dla cert-manager (ClusterIssuery) ==="
+CM_NS="${CM_NS:-cert-manager}"
+TS_NAME=$(KC get clusterissuer vault-issuer -o jsonpath='{.spec.vault.auth.tokenSecretRef.name}' 2>/dev/null || true)
+TS_KEY=$(KC get clusterissuer vault-issuer -o jsonpath='{.spec.vault.auth.tokenSecretRef.key}' 2>/dev/null || true)
+[ -n "$TS_KEY" ] || TS_KEY=token
+if [ -z "$TS_NAME" ]; then
+  warn "ClusterIssuer/vault-issuer nie istnieje albo nie uzywa tokenSecretRef — pomijam krok 2f."
+elif KC -n "$CM_NS" get secret "$TS_NAME" >/dev/null 2>&1; then
+  ok "Secret $CM_NS/$TS_NAME juz istnieje."
+elif [ -z "$RTOKEN" ]; then
+  warn "Brak root tokena Vaulta — nie moge utworzyc $TS_NAME."
+else
+  CMTOK=$(vexec "VAULT_TOKEN='$RTOKEN' vault token create -orphan -policy=pki-issuer -policy=pki-internal -period=768h -field=token" 2>/dev/null | tr -d '\r\n ')
+  if [ -n "$CMTOK" ]; then
+    KC -n "$CM_NS" create secret generic "$TS_NAME" --from-literal="$TS_KEY=$CMTOK" >/dev/null \
+      && ok "Utworzono Secret $CM_NS/$TS_NAME (klucz: $TS_KEY, token okresowy 768h, policy pki-issuer + pki-internal)." \
+      || warn "Nie udalo sie utworzyc Secretu $TS_NAME."
+    TSX=$(date +%s)
+    for ci in $(KC get clusterissuer -o name 2>/dev/null | grep vault-issuer); do
+      KC annotate "$ci" reconcile-ts="$TSX" --overwrite >/dev/null 2>&1
+    done
+    log "ClusterIssuery: wymuszono ponowna weryfikacje."
+  else
+    warn "vault token create nie zwrocil tokena (policy pki-issuer/pki-internal istnieja? bootstrap skonczony?)."
+  fi
+fi
+
 log "=== 3/4: reconcile SecretStore/ExternalSecret + refresh ArgoCD ==="
 TS=$(date +%s)
 for r in $(KC -n "$NS" get secretstore -o name 2>/dev/null); do
