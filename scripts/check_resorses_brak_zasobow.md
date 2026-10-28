@@ -135,6 +135,112 @@ Suma: ok. **1–1,3 GiB mniej requests** → zejdziesz z 99% na ~80% i przestani
 Potwierdź mi: (a) co pokazały zapytania z pkt. 2 (kto robi rollout restart), (b) logi fastapi z kroku 3 — i od razu przygotuję Ci gotowe patche do `manifests/base/*.yaml` (requests + opcjonalnie `replicas` dla pgadmin/spark na dev), żeby wypchnąć jednym commitem.
 
 
+
+
+Stan jest teraz czytelny — i to nie jest już "przyciąć requests", tylko **trzy sprawy naraz**, w tym jedna pilna:
+
+## 0. PILNE: API server się sypie (`TLS handshake timeout`, `connection refused` na 16443)
+
+To objaw węzła na 99% RAM + swapie — apiserver nie wyrabia. W tej sytuacji każdy kolejny krok może wysypać się losowo. Najpierw zwolnij pamięć, potem reszta.
+
+## 1. Kyverno to Twój największy pożeracz — i ciągle się sypie
+
+Restarty: admission **83**, cleanup **78**, background **70**, reports **68**. Do tego 5 kontrolerów + osobny postgresql + reports-server. Na węźle 7,8 GiB to luksus, którego nie stać. Awaryjnie (odzyskujesz ~1–1,5 GiB):
+
+```bash
+kubectl -n kyverno scale deploy kyverno-admission-controller kyverno-background-controller \
+  kyverno-cleanup-controller kyverno-reports-controller kyverno-reports-server --replicas=0
+```
+
+⚠️ Sprawdź też, czy crashloopujący admission webhook nie blokuje API (`failurePolicy: Fail` + padnięty webhook = kłopoty):
+
+```bash
+kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration | grep kyverno
+```
+
+Na devie najrozsądniej **całkiem odinstalować Kyverno** (`helm uninstall kyverno -n kyverno`) — masz 1 węzeł i ClusterPolicy i tak nie ma sensu skoro kontrolery nie działają.
+
+## 2. Utknięty rollout spring-app (dlatego masz 3 działające pody zamiast 1)
+
+Widzę: 2× Running + 2× Pending z **czterech różnych ReplicaSetów**. Deployment chce wymienić pod, nowy jest Pending (brak RAM), więc starych nie zwalnia — a churn (pkt. 3) ciągle dokłada nowe RS. Po zwolnieniu pamięci:
+
+```bash
+kubectl -n davtro02 rollout status deploy/spring-app-deployment
+# albo, jak stoi długo:
+kubectl -n davtro02 rollout undo deploy/spring-app-deployment
+# wyczyść stare, puste RS:
+kubectl -n davtro02 delete rs $(kubectl -n davtro02 get rs -o jsonpath='{range .items[?(@.spec.replicas==0)]}{.metadata.name}{" "}{end}' | tr ' ' '\n' | grep -E 'spring-app|pgadmin|postgres-exporter' | tr '\n' ' ')
+```
+
+## 3. Churn ReplicaSetów NADAL trwa — i wciąż nie wiemy KTO
+
+Nowe RS pgadmin/spring/postgres-exporter co ~15–40 min. Adnotacja `kubectl.kubernetes.io/restartedAt` **nie pochodzi od ArgoCD ani CI** — ktoś ją ustawia. Wklej mi wyniki (tego wciąż brakuje):
+
+```bash
+# (a) czy to Kyverno? — to mój główny podejrzany (mutate policy potrafi dodawać adnotacje)
+kubectl get clusterpolicy davtro-baseline-policy -o yaml
+# (b) cron na hoście?
+crontab -l; sudo grep -rn "rollout restart" /etc/cron* 2>/dev/null
+# (c) coś w podach?
+kubectl get cronjobs -A
+# (d) kiedy dokładnie i dla kogo restartAt się zmienia:
+kubectl -n davtro02 get deploy pgadmin spring-app-deployment postgres-exporter \
+  -o jsonpath='{range .items[*]}{.metadata.name}{" gen="}{.metadata.generation}{" restartedAt="}{.spec.template.metadata.annotations.kubectl\.kubernetes\.io/restartedAt}{"\n"}{end}'
+```
+
+## 4. Szczera prawda o zasobach
+
+Host ma **7,8 GiB RAM**. Ten stack (Kafka + Spark×3 + Postgres + Redis + Vault + pełna obserwowalność Prometheus/Loki/Tempo/Grafana + Istio + ArgoCD + ESO + cert-manager + Kyverno) to realnie **10–12 GiB requests**. Przycinanie requests pomoże o 1–1,5 GiB, ale to plaster:
+
+```bash
+# dodatkowe tymczasowe luzowanie:
+kubectl -n davtro02 scale deploy spark-worker --replicas=1
+kubectl -n davtro02 scale deploy tempo loki --replicas=0   # jak traces/logi niepotrzebne teraz
+```
+
+**Trwałe rozwiązanie: daj VM 12–16 GiB RAM** (albo wywal Kyverno + Spark, jak to dev).
+
+Kolejność: (1) ubij Kyverno → (2) `rollout undo` spring → (3) wklej wyniki zapytań z pkt. 3 → dopiero wtedy przygotuję finalne patche requests do gita, bo bez znajomości winowajcy churnu przycięcie zasobów i tak będzie walczyć z objawami.
+
+
+Z tych logów wynika, że kyverno i argocd-server padają z jednego powodu: API server odpowiada za wolno. To skutek przeciążenia węzła, a nie osobne błędy.
+
+**Dowody w logach:**
+- kyverno-admission: „unable to return a response in the time allotted (get customresourcedefinitions policies.kyverno.io)”. Pojedyncze listowanie obiektów trwa 17–46 s.
+- argocd-server: zatrzymuje się na „Starting configmap/secret informers”, bo też nie dostaje odpowiedzi od API.
+- Twój skrypt na początku dostał „TLS handshake timeout” i „connection refused” z `127.0.0.1:16443`.
+- Do kyverno dochodzą jeszcze limity sond. Startup probe ma 20 prób co 6 s (około 2 min), a sam start trwa dłużej, więc kontener jest ubijany. To skutek, nie przyczyna.
+- `fastapi-web-app-hpa` pokazuje `cpu: <unknown>`, bo metrics-server też nie nadąża.
+
+Kyverno nie da się „naprawić” samo, dopóki API server jest zduszony. Trzeba zdjąć obciążenie.
+
+**Co zrobić, po kolei:**
+1. Podmień `manifests/overlays/production/kustomization.yaml` na plik, który wysłałem. Zmienia on:
+   - fastapi: 3 → 1 replika,
+   - frontend, spring: 1 replika,
+   - spark-worker, spark-master, pgadmin, kafka-ui: 0,
+   - HPA: min 1, max 2 (bez tego HPA przywróciłby 2 repliki; fastapi miał 3 w overlayu).
+
+   Dodaj do gita i wypchnij: `git add -A && git commit -m "prod: minimalne repliki" && git push`. Zapis do gita nie jest cofany przez selfHeal, w przeciwieństwie do ręcznego scale.
+2. Zdejmij obciążenie z Kyverno od razu, bo ten namespace nie jest zarządzany przez ArgoCD:
+   ```bash
+   kubectl -n kyverno scale deploy kyverno-cleanup-controller kyverno-reports-controller kyverno-reports-server --replicas=0
+   kubectl -n kyverno scale sts kyverno-postgresql --replicas=0
+   ```
+   Wyłączasz tylko raportowanie i sprzątanie. Admission i background controller zostają i wystarczą do działania polityk. Jeśli reports-server jest wymagany przez init `wait-for-reports-server`, admission controller może nie wstać, więc jeśli tak się stanie, napisz.
+3. Sprawdź węzeł, bo swap prawdopodobnie sam spowalnia API:
+   ```bash
+   free -h; microk8s status | head -5; swapon --show
+   ```
+   Wklej to, jeśli swap nadal jest mocno używany.
+4. Po paru minutach: `kubectl -n argocd get pods`, `kubectl -n kyverno get pods`, `kubectl -n argocd get applications`.
+
+**Czego nie wiem:**
+- Nie widziałem manifestów w `base`, więc nie ruszam limitów kontenerów (kafka 576Mi, sidecary).
+- Nie sprawdziłem, czy `kustomize build manifests/overlays/production` przechodzi z moim plikiem. Uruchom to przed commitem. Jeśli zgłosi błąd przy `replicas:` dla jakiejś nazwy, napisz mi, którą.
+
+`davtro-website` jest teraz OutOfSync/Degraded. Po tych zmianach i stabilizacji API sprawdzę, co jeszcze go blokuje, i dopiero wtedy ruszymy politykę Kyverno (wave 5).
+
 # Po tych kopitach się prawie szystko podnosi Commit 6ea69ea Commit b6ac801 Kimi 
 ci: aktualizacja obrazow na 694819e775be266ac99c458fc3de3bd5e11781eb
 skipped:
