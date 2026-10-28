@@ -28,6 +28,10 @@
 
 set -euo pipefail
 APPLY=0; [ "${1:-}" = "--apply" ] && APPLY=1
+if [ ! -f kustomization.yaml ] || [ ! -f vault.yaml ]; then
+  echo "BLAD: uruchom z katalogu manifests/base (tam jest kustomization.yaml i vault.yaml). Teraz: $(pwd)" >&2
+  exit 1
+fi
 export APPLY
 python3 - <<'PY'
 import os, re, glob
@@ -41,6 +45,7 @@ NAME_WAVE = {
     ("Certificate", "vault-tls"): -1,
     ("DestinationRule", "vault-own-tls"): -1,
     ("PeerAuthentication", "vault"): -1,
+    ("PeerAuthentication", "postgres-plaintext-from-vault"): -1,
 }
 KIND_WAVE = {"Namespace": -5}
 for k in ("ServiceAccount", "ConfigMap", "Secret", "Service", "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding"):
@@ -152,6 +157,8 @@ for path in sorted(glob.glob("*.yaml")):
         if st.startswith("blad"):
             problems.append(f"{path}: {kind}/{nm}: {st[5:]}")
             print(f"  !! {path}: {kind}/{nm} -> fala {wave}  [{st[5:]}]")
+        elif st == "ok":
+            print(f"  = {path}: {kind}/{nm} (fala {wave}, bez zmian)")
         elif st == "zmiana":
             parts[i] = new; changed = True; total_changed += 1
             print(f"  {path}: {kind}/{nm} -> fala {wave}")
@@ -163,5 +170,11 @@ if norule:
     print("BEZ REGULY (bez zmian):"); [print("  " + x) for x in norule]
 if problems:
     print("DO RECZNEJ POPRAWKI:"); [print("  " + x) for x in problems]
+try:
+    if "sidecar.istio.io/inject" not in open("vault.yaml").read():
+        print('WARN: vault.yaml nie ma adnotacji sidecar.istio.io/inject: "false" na StatefulSet/vault'
+              ' (stara wersja skryptu ja dodawala; bez niej vault-0 utknie na istio-init) — dodaj recznie w spec.template.metadata.annotations.')
+except OSError:
+    pass
 print(f"\n{'ZAPISANO' if APPLY else 'DRY-RUN (nic nie zapisano; uzyj --apply)'}: {total_changed} zasobow do zmiany.")
 PY

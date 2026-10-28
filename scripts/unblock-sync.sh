@@ -298,6 +298,41 @@ else
   warn "Nie znaleziono deploy/istiod (ns istio-system)."
 fi
 
+# ---------- 2h. mTLS: vault-0 (bez sidecara) -> Postgres (z sidecarem) ----------
+# Od kiedy ArgoCD dochodzi do fali 3, obowiazuje PeerAuthentication/default (mTLS). vault-0 nie ma sidecara,
+# wiec laczy sie z Postgresem czystym TCP: sidecar Postgresa go odrzuca. Skutki (widoczne w logach):
+#   - vault-bootstrap: "database/config odrzucone" -> ALIGN -> "rollout restart pgadmin/postgres-exporter/spring"
+#     W KAZDEJ petli (co ~2,5 min) => nieustanne restarty, pody Pending (Insufficient memory),
+#   - ExternalSecret fastapi-db-creds/message-processor-db-creds: SecretSyncedError (Vault nie moze wystawic hasla),
+#     wiec Secret ma stare, juz uniewaznione dane => fastapi: InvalidPasswordError, CrashLoopBackOff.
+log "=== 2h: mTLS Postgresa dla Vaulta ==="
+PA_DEF=$(KC -n "$NS" get peerauthentication default -o jsonpath='{.spec.mtls.mode}' 2>/dev/null || true)
+echo "  PeerAuthentication/default: mode=${PA_DEF:-brak}"
+if [ "${PA_DEF:-}" = "STRICT" ]; then
+  if KC -n "$NS" get peerauthentication postgres-plaintext-from-vault >/dev/null 2>&1; then
+    ok "PeerAuthentication/postgres-plaintext-from-vault juz istnieje."
+  else
+    KC -n "$NS" apply -f - <<YAML >/dev/null && ok "Utworzono PeerAuthentication/postgres-plaintext-from-vault (port 5432 PERMISSIVE; AuthorizationPolicy dalej ogranicza zrodla)."
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: postgres-plaintext-from-vault
+  namespace: $NS
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  selector:
+    matchLabels:
+      app: postgres-db
+  mtls:
+    mode: UNSET
+  portLevelMtls:
+    "5432":
+      mode: PERMISSIVE
+YAML
+  fi
+fi
+
 # ---------- 2e. Vault -> Postgres: AuthorizationPolicy postgres-allow blokuje vault-0 ----------
 # vault-0 dziala BEZ sidecara Istio, wiec nie ma tozsamosci mTLS. postgres-allow przepuszcza tylko
 # sa/davtro-sa i sa/default => polaczenie jest zrywane ("unexpected EOF"), database/config/davtro-postgresql
@@ -327,10 +362,12 @@ if [ -n "$VPOD_IP" ]; then
   done
   if [ "$DBOK" = 1 ]; then
     ok "Vault: database/config/davtro-postgresql istnieje."
-    if vexec "VAULT_TOKEN='$RTOKEN' vault read -format=json database/creds/davtro-app-rw" >/dev/null 2>&1; then
+    CREDOUT=$(vexec "VAULT_TOKEN='$RTOKEN' vault read -format=json database/creds/davtro-app-rw" 2>&1 || true)
+    if echo "$CREDOUT" | grep -q '"username"'; then
       ok "Vault: database/creds/davtro-app-rw wydaje dane dostepowe."
     else
-      warn "database/creds/davtro-app-rw nadal zwraca blad — sprawdz: vault read database/creds/davtro-app-rw"
+      warn "database/creds/davtro-app-rw zwraca blad:"
+      echo "$CREDOUT" | grep -iE 'error|\*|code|failed' | head -6 | cut -c1-300 | sed 's/^/    /'
     fi
   else
     warn "Brak database/config/davtro-postgresql. Logi: kubectl -n $NS logs deploy/vault-bootstrap --all-containers --tail=80 | grep -iE 'database|postgres|error'"
@@ -354,6 +391,7 @@ else
   warn "Nie znaleziono IP poda vault-0 — pomijam krok 2e."
 fi
 
+# ---------- 3. ESO + ArgoCD ----------
 # ---------- 2f. Token Vaulta dla cert-manager (ClusterIssuery vault-issuer*) ----------
 # ClusterIssuery (wave 2) czytaja token z Secretu (nazwa/klucz biora z .spec.vault.auth.tokenSecretRef).
 # Zaden manifest ani vault-bootstrap go nie tworzy => "secrets cert-manager-vault-token not found",
@@ -389,59 +427,66 @@ fi
 # Blad: "x509: certificate signed by unknown authority" (GET https://vault...:8203/v1/sys/health).
 # Serwer Vaulta ma cert z Issuera vault-ca (self-signed, generowany przez cert-manager), wiec CA nie moze byc
 # zapisane w gicie. Wstawiamy je do .spec.vault.caBundle ClusterIssuerow na zywo (ArgoCD nie cofa pol,
-# ktorych nie ma w manifescie z gita — selfHeal jest bezproblemowe).
-#
-# UWAGA NA KOLEJNOSC (poprzedni bug): ten krok MUSI wykonac sie PRZED ponownym uruchomieniem sync
-# (sekcja 3). Wczesniej sync byl wyzwalany najpierw, wiec konczyl sie tym samym bledem x509,
-# a dopiero potem dobijala poprawka. Teraz: 2f/2g -> wait Ready -> sync.
-#
-# Poprawione pobieranie CA: poprzednia wersja cicho pomijala caly krok, gdy secret vault-tls nie
-# zawieral klucza ca.crt (zdarza sie, zalezy od issuerref). Teraz sa 3 zrodla + weryfikacja.
+# ktorych nie ma w manifescie z gita).
 log "=== 2g: caBundle (CA Vaulta) w ClusterIssuerach ==="
-CABUNDLE=""
-CABUNDLE=$(KC -n "$NS" get secret vault-tls -o jsonpath='{.data.ca\.crt}' 2>/dev/null | tr -d '\r\n' || true)
-SRC="secret $NS/vault-tls (ca.crt)"
+CABUNDLE=$(KC -n "$NS" get secret vault-tls -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
 if [ -z "$CABUNDLE" ]; then
-  CABUNDLE=$(KC -n "$NS" get secret vault-ca -o jsonpath='{.data.tls\.crt}' 2>/dev/null | tr -d '\r\n' || true)
-  SRC="secret $NS/vault-ca (tls.crt)"
-fi
-if [ -z "$CABUNDLE" ]; then
-  CABUNDLE=$(KC -n "$NS" exec vault-0 -- cat /vault/tls/ca.crt 2>/dev/null | base64 -w0 || true)
-  SRC="/vault/tls/ca.crt w podzie vault-0"
-fi
-if [ -z "$CABUNDLE" ]; then
-  warn "Nie udalo sie pobrac CA Vaulta (probowano: vault-tls, vault-ca, /vault/tls/ca.crt)."
-  warn "Sprawdz: kubectl -n $NS get certificate; kubectl -n $NS get secret; kubectl -n $NS logs deploy/cert-manager -c cert-manager --tail=20"
+  warn "Brak ca.crt w Secret $NS/vault-tls — pomijam krok 2g."
 else
-  ok "CA Vaulta pobrane ze zrodla: $SRC (${#CABUNDLE} bajtow base64)"
   for ci in vault-issuer vault-issuer-internal vault-issuer-mesh; do
     KC get clusterissuer "$ci" >/dev/null 2>&1 || continue
-    HAVE=$(KC get clusterissuer "$ci" -o jsonpath='{.spec.vault.caBundle}' 2>/dev/null || true)
+    HAVE=$(KC get clusterissuer "$ci" -o jsonpath='{.spec.vault.caBundle}{.spec.vault.caBundleSecretRef.name}' 2>/dev/null || true)
     if [ -n "$HAVE" ]; then
-      ok "$ci: ma juz caBundle."
+      ok "$ci: ma juz caBundle/caBundleSecretRef."
     elif KC patch clusterissuer "$ci" --type merge -p "{\"spec\":{\"vault\":{\"caBundle\":\"$CABUNDLE\"}}}" >/dev/null 2>&1; then
       ok "$ci: dodano caBundle."
     else
       warn "$ci: nie udalo sie dodac caBundle."
     fi
   done
-  log "Czekam do 2 min az ClusterIssuery beda Ready..."
-  for i in $(seq 1 24); do
-    ALLREADY=1
-    for ci in vault-issuer vault-issuer-internal vault-issuer-mesh; do
-      KC get clusterissuer "$ci" >/dev/null 2>&1 || continue
-      READY=$(KC get clusterissuer "$ci" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
-      [ "$READY" != "True" ] && ALLREADY=0
-    done
-    if [ "$ALLREADY" = "1" ]; then ok "Wszystkie ClusterIssuery Ready."; break; fi
-    sleep 5
-  done
-  for ci in vault-issuer vault-issuer-internal vault-issuer-mesh; do
-    echo "  [$ci] ready=$(KC get clusterissuer "$ci" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) $(KC get clusterissuer "$ci" -o jsonpath='{.status.conditions[*].message}' 2>/dev/null | cut -c1-200)"
-  done
 fi
 
-# ---------- 3. ESO + ArgoCD ----------
+log "=== 3/4: reconcile SecretStore/ExternalSecret + refresh ArgoCD ==="
+TS=$(date +%s)
+for r in $(KC -n "$NS" get secretstore -o name 2>/dev/null); do
+  KC -n "$NS" annotate "$r" force-reconcile="$TS" --overwrite >/dev/null 2>&1 && echo "  $r"
+done
+for r in $(KC -n "$NS" get externalsecret -o name 2>/dev/null); do
+  KC -n "$NS" annotate "$r" force-sync="$TS" --overwrite >/dev/null 2>&1 && echo "  $r"
+done
+KC -n argocd annotate application "$ARGO_APP" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 \
+  && ok "ArgoCD: hard refresh $ARGO_APP." || warn "Nie znaleziono Application $ARGO_APP w ns argocd."
+echo "  --- ExternalSecret: pelny komunikat statusu ---"
+for es in fastapi-db-creds message-processor-db-creds; do
+  echo "  [$es] $(KC -n "$NS" get externalsecret "$es" -o jsonpath='{.status.conditions[*].reason}: {.status.conditions[*].message}' 2>/dev/null)"
+done
+echo "  --- ESO: ostatni pelny blad (po aplikacji generatora) ---"
+KC -n external-secrets logs deploy/external-secrets --since=10m 2>/dev/null | grep -iE 'fastapi-db-creds|message-processor-db-creds' | tail -1 | grep -o '"error":"[^}]*' | cut -c1-900
+echo "  --- VaultDynamicSecret ---"
+KC -n "$NS" get vaultdynamicsecret db-creds-davtro-app-rw -o jsonpath='path={.spec.path} method={.spec.method} provider={.spec.provider.server} ns-auth={.spec.provider.auth.kubernetes.role}{"\n"}' 2>/dev/null
+if [ -n "${RTOKEN:-}" ]; then
+  echo "  --- Vault: policy davtro-apps (czy zawiera database/creds) ---"
+  vexec "VAULT_TOKEN='$RTOKEN' vault policy read davtro-apps" 2>/dev/null | grep -nE 'path|capabilities' | head -20
+fi
+
+
+# Nieudany sync (np. "Sync failed ... 1 Error") NIE jest ponawiany przez auto-sync dla tej samej rewizji.
+PHASE=$(KC -n argocd get application "$ARGO_APP" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
+log "ArgoCD: operationState.phase=${PHASE:-brak}"
+KC -n argocd get application "$ARGO_APP" -o jsonpath='{.status.operationState.message}{"\n"}{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}' 2>/dev/null | head -c 1500
+echo "  --- zasoby, ktore nie przeszly sync (ArgoCD syncResult) ---"
+KC -n argocd get application "$ARGO_APP" -o json 2>/dev/null | jq -r '(.status.operationState.syncResult.resources // [])[] | select(.status=="SyncFailed" or .hookPhase=="Failed") | "  BLAD: \(.kind)/\(.name) (fala \(.syncWave // 0)): \(.message)"' 2>/dev/null | head -c 3000
+echo "  --- zasoby OutOfSync/Missing w najnizszej fali ---"
+KC -n argocd get application "$ARGO_APP" -o json 2>/dev/null | jq -r '[.status.resources[]? | select(.status!="Synced")] | map({k:"\(.kind)/\(.name)",s:.status,w:(.syncWave // 0)}) | sort_by(.w) | .[:8][] | "  fala \(.w): \(.k) \(.s)"' 2>/dev/null
+if [ "$PHASE" = "Running" ]; then
+  warn "Sync nadal trwa (czeka na zdrowe zasoby) — poczekaj; jesli stoi >10 min: kubectl -n argocd patch application $ARGO_APP --type merge -p '{\"operation\":null}' i uruchom skrypt ponownie."
+else
+  KC -n argocd patch application "$ARGO_APP" --type merge -p '{"operation":{"initiatedBy":{"username":"unblock-sync"},"sync":{}}}' >/dev/null 2>&1 \
+    && ok "ArgoCD: uruchomiono nowy sync $ARGO_APP." || warn "Nie udalo sie uruchomic sync (zrob to w UI: SYNC)."
+fi
+
+
+# ---------- 4. Diagnostyka ----------
 log "=== 3b: ClusterIssuery (wave 2) — dlaczego nie Ready ==="
 for ci in vault-issuer vault-issuer-internal vault-issuer-mesh; do
   echo "  [$ci] $(KC get clusterissuer "$ci" -o jsonpath='{.status.conditions[*].reason}: {.status.conditions[*].message}' 2>/dev/null | cut -c1-600)"
