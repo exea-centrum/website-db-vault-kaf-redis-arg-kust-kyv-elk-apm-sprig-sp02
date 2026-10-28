@@ -133,3 +133,78 @@ kubectl -n davtro02 scale deploy pgadmin spark-worker spark-master kafka-ui --re
 Suma: ok. **1–1,3 GiB mniej requests** → zejdziesz z 99% na ~80% i przestaniesz tyrać swap.
 
 Potwierdź mi: (a) co pokazały zapytania z pkt. 2 (kto robi rollout restart), (b) logi fastapi z kroku 3 — i od razu przygotuję Ci gotowe patche do `manifests/base/*.yaml` (requests + opcjonalnie `replicas` dla pgadmin/spark na dev), żeby wypchnąć jednym commitem.
+
+
+# Po tych kopitach się prawie szystko podnosi Commit 6ea69ea Commit b6ac801 Kimi 
+ci: aktualizacja obrazow na 694819e775be266ac99c458fc3de3bd5e11781eb
+skipped:
+CI/CD - Davtro Platform
+#217:
+Commit
+8031a6c
+pushed
+by
+exea-centrum
+main
+3 minutes ago
+1s
+GitSecOps MLOps Marietta Julia Zosia Helena test kimi [200~Commit b6…
+completed successfully:
+CI/CD - Davtro Platform
+#216:
+Commit
+# 694819e
+pushed
+by
+exea-centrum
+main
+4 minutes ago
+1m 26s
+ci: aktualizacja obrazow na b6ac801c28a42f0519f0ed01ee5889f740f59e79
+skipped:
+CI/CD - Davtro Platform
+#215:
+Commit
+1504d6e
+pushed
+by
+exea-centrum
+main
+Oct 27, 20:14 GMT+1
+1s
+GitSecOps MLOps Marietta Julia Zosia Helena test claudiusz add-sync-w…
+completed successfully:
+CI/CD - Davtro Platform
+#214:
+Commit
+# b6ac801 po tym  prawi bajaka 
+pushed
+by
+exea-centrum
+main
+Oct 27, 20:12 GMT+1
+1m 49s
+ci: aktualizacja obrazow na 6ea69eaf8bad21fb2406661a5739d01fd78ec99d
+skipped:
+CI/CD - Davtro Platform
+#213:
+Commit
+e4eb879
+pushed
+by
+exea-centrum
+main
+Oct 27, 11:47 GMT+1
+2s
+GitSecOps MLOps Marietta Julia Zosia Helena test claudiusz add-sync-w…
+completed successfully:
+CI/CD - Davtro Platform
+#212:
+Commit
+6ea69ea
+pushed
+by
+exea-centrum
+main
+Oct 27, 11:46 GMT+1
+
