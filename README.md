@@ -1,8 +1,8 @@
 # Davtro Apartments - platforma wynajmu krotkoterminowego (Full Open Source)
 
-### opcja dla leniwych full automat, skryp instaluje wszystko od microK8s do podów z app ~150 obiektów .
-### Tylko potrzeba VMs z ubuntu lub debianem z 8 core i 16 GB ram minimum
-### 🚀 Trzy sposoby uruchomienia
+## 🚀 full-automat, skryp instaluje wszystko od microK8s do podów z app ~150 obiektów .
+### Tylko potrzeba VMs z ubuntu lub debianem z minimum 8 core i 16 GB RAM-u
+#### 🚀 Trzy sposoby uruchomienia
 1. Bez pytania (podajesz PAT – GHCR_PAT, GHCR_PAT_02, GITHUB_PAT to tylko nazwa – w linii poleceń): wklej skrypt i idź kawę wypić i będzie gotowe!!! No chyba że masz serię Kioxia GP1 osiągającą od 10 milionów do ponad 20 milionów losowych IOPS przy odczycie bloków 512-bajtowych albo Corsair MP700 Pro XT 2,4M IOPS – to kawy nie zdążysz wypić!!!
 
 ```bash
@@ -62,6 +62,7 @@ GHCR_USER='exea-centrum' GHCR_PAT='ghp_xxx' \
 ### GHCR_PAT='ghp_..............................' 
 ### GITHUB_PAT='ghp_...........................' 
 
+## 🚀 semi-automat --> 2 opcja poniżej w raz opisem projektu.
 ## Spis tresci
 
 - [1. Architektura przeplywu rezerwacji](#1--architektura-przeplywu-rezerwacji)
