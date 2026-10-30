@@ -107,7 +107,10 @@ for pod in pods:
         w=c.get('state',{}).get('waiting')
         if w and w.get('reason'): reason=w['reason']
     mr=ml=cr=cl=0.0; mu=cu=0.0; istio=0.0; nores=[]
-    for c in pod['spec'].get('containers',[]):
+    # Istio >= 1.19 z natywnymi sidecarami: istio-proxy jest w initContainers (restartPolicy: Always),
+    # a nie w containers — bez tego requests sidecarow (np. 64Mi x ~20 podow) bylyby niewidoczne.
+    allc=list(pod['spec'].get('containers',[]))+[ic for ic in pod['spec'].get('initContainers',[]) if ic.get('restartPolicy')=='Always']
+    for c in allc:
         r=c.get('resources',{}); rq=r.get('requests',{}); lm=r.get('limits',{})
         a,b=mem(rq.get('memory')),mem(lm.get('memory'))
         mr+=a; ml+=b; cr+=cpu(rq.get('cpu')); cl+=cpu(lm.get('cpu'))
