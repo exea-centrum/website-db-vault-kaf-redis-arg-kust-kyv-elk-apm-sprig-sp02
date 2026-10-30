@@ -1,90 +1,89 @@
 
 [1m=== 1. WEZEL: pamiec, swap, obciazenie ===[0m
-Czas: 2026-10-30 14:48:23
+Czas: 2026-10-30 15:38:23
                razem       użyte       wolne    dzielone   buf/cache    dostępne
-Pamięć:        7,7Gi       5,9Gi       100Mi        50Mi       1,9Gi       1,7Gi
-Wymiana:       8,8Gi       4,1Gi       4,7Gi
+Pamięć:        7,7Gi       6,0Gi       130Mi        37Mi       1,8Gi       1,6Gi
+Wymiana:       8,8Gi       4,3Gi       4,5Gi
 
 NAME      TYPE      SIZE USED PRIO
-/dev/sda2 partition 8,8G 4,1G   -1
+/dev/sda2 partition 8,8G 4,3G   -1
 
-load average: 24.69 23.36 23.01  | rdzenie: 8
+load average: 25.46 20.36 21.72  | rdzenie: 8
 
 --- kubectl top node ---
-Unable to connect to the server: net/http: TLS handshake timeout
+error: Metrics API not available
 (top node niedostepne)
 
 --- Allocated resources (requests/limits wezla wg schedulera) ---
+Allocated resources:
+  (Total limits may be over 100 percent, i.e., overcommitted.)
+  Resource           Requests      Limits
+  --------           --------      ------
+  cpu                5745m (71%)   54500m (681%)
+  memory             7302Mi (94%)  35226Mi (455%)
+  ephemeral-storage  0 (0%)        0 (0%)
+  hugepages-2Mi      0 (0%)        0 (0%)
+Events:              <none>
 
 [1m=== 2. Zbieranie danych z klastra (pody + metryki) ===[0m
 pody: OK
-UWAGA: brak metryk (metrics-server): error: Metrics API not available
+UWAGA: brak metryk (metrics-server): Error from server (ServiceUnavailable): the server is currently unable to handle the request (get pods.metrics.k8s.io)
 
 [1m=== 3. PODY: requests / limity / realne uzycie (posortowane wg requests pamieci) ===[0m
 NAMESPACE          POD                                            STATUS             RST | RAMreq RAMlim RAMuse | CPUreq CPUlim CPUuse | UWAGI
 ------------------------------------------------------------------------------------------------------------------------------------------------------
 davtro02           kafka-kraft-0                                  Running              5 |    576   2048      - |    300   3000      - | 
-davtro02           spark-worker-66bcfd975c-jbr4b                  Running              3 |    512   1024      - |    100    500      - | 
-davtro02           spark-worker-66bcfd975c-gvpsc                  Running              5 |    512   1024      - |    100    500      - | 
-davtro02           spring-app-deployment-5bbc5987d4-7xk7b         Running              5 |    320   1536      - |    300   2500      - | 
-davtro02           spring-app-deployment-5b48b848b5-hl6mv         Pending              0 |    320   1536      - |    300   2500      - | PENDING
-davtro02           spring-app-deployment-56ccf5dcf8-lnv9m         Pending              0 |    320   1536      - |    300   2500      - | PENDING
+davtro02           spark-worker-66bcfd975c-nmtrw                  Running              0 |    512   1024      - |    100    500      - | 
+davtro02           spark-worker-66bcfd975c-88rk2                  Running              0 |    512   1024      - |    100    500      - | 
+davtro02           spring-app-deployment-5b48b848b5-hl6mv         Running              0 |    320   1536      - |    300   2500      - | 
 davtro02           postgres-db-0                                  Running              5 |    320   1536      - |    200   2500      - | 
-davtro02           kafka-ui-884d56f98-zmxrj                       Pending              0 |    320   1536      - |    200   2500      - | PENDING
-davtro02           fastapi-web-app-7749cfc7bc-w8wzt               Running             95 |    320   1536      - |    200   2500      - | restarty
-davtro02           fastapi-web-app-7749cfc7bc-tjd67               Running             20 |    320   1536      - |    200   2500      - | restarty
-davtro02           fastapi-web-app-7749cfc7bc-qdzfj               Pending              0 |    320   1536      - |    200   2500      - | PENDING
-kyverno            kyverno-postgresql-0                           Running              5 |    256      -      - |    250      -      - | 
+davtro02           kafka-ui-884d56f98-dkvbf                       Running              0 |    320   1536      - |    200   2500      - | 
+davtro02           fastapi-web-app-7749cfc7bc-w8wzt               Running            105 |    320   1536      - |    200   2500      - | restarty
+davtro02           fastapi-web-app-7749cfc7bc-qdzfj               Running              6 |    320   1536      - |    200   2500      - | 
 istio-system       istiod-78957dfdc-dzrll                         Running              5 |    256      -      - |    500      -      - | 
-davtro02           vault-0                                        Running             64 |    256    512      - |    100    500      - | restarty
-davtro02           spark-master-68889d69d8-lzz2q                  Running              4 |    256    768      - |    100    500      - | 
+davtro02           vault-0                                        Running             69 |    256    512      - |    100    500      - | restarty
+davtro02           spark-master-68889d69d8-729hn                  Running              0 |    256    768      - |    100    500      - | 
 kubernetes-dashboa kubernetes-dashboard-web-7f7574785f-fr7zn      Running              5 |    200    400      - |    100    250      - | 
-kubernetes-dashboa kubernetes-dashboard-metrics-scraper-594bbfb84 Running              5 |    200    400      - |    100    250      - | 
 kubernetes-dashboa kubernetes-dashboard-auth-5b8bc76d7d-kbbvd     Running              5 |    200    400      - |    100    250      - | 
 kubernetes-dashboa kubernetes-dashboard-api-7db8df6767-mbwx7      Running              5 |    200    400      - |    100    250      - | 
-kube-system        metrics-server-65556bc7f8-hxnff                CrashLoopBackOff   161 |    200      -      - |    100      -      - | CrashLoopBackOff; restarty
-davtro02           prometheus-749bf9b95-l7ch2                     Running              5 |    192   1280      - |    200   2300      - | 
-davtro02           pgadmin-749469884d-6z5sw                       Running              1 |    192   1536      - |    200   2500      - | 
-davtro02           pgadmin-685cd86c75-zkhtw                       Pending              0 |    192   1536      - |    200   2500      - | PENDING
+kube-system        metrics-server-65556bc7f8-hxnff                Running            172 |    200      -      - |    100      -      - | restarty
+davtro02           prometheus-749bf9b95-cc8cn                     PodInitializing      0 |    192   1280      - |    200   2300      - | PENDING; PodInitializing
+davtro02           pgadmin-685cd86c75-qkg79                       PodInitializing      0 |    192   1536      - |    200   2500      - | PENDING; PodInitializing
 davtro02           message-processor-6db9b7c5dc-jcb82             Running              5 |    192   1280      - |    200   2300      - | 
-davtro02           loki-579df55495-z2nqx                          Running              3 |    192   1536      - |    200   2500      - | 
-davtro02           grafana-bfcb6f5db-8xbf6                        Running              5 |    192   1536      - |    200   2500      - | 
-kyverno            kyverno-admission-controller-58974699f7-927lj  Running            240 |    128    384      - |    100      -      - | restarty
+davtro02           loki-579df55495-8vhth                          Running              0 |    192   1536      - |    200   2500      - | 
+davtro02           grafana-bfcb6f5db-bc2kd                        Running              0 |    192   1536      - |    200   2500      - | 
+kyverno            kyverno-admission-controller-58974699f7-927lj  Running            253 |    128    384      - |    100      -      - | restarty
 istio-system       istio-ingressgateway-7fb6b748db-wrq6g          Running              5 |    128   1024      - |    100   2000      - | 
 davtro02           vault-bootstrap-686fd4c7b5-6k46g               Running              4 |    128   1280      - |    150   2250      - | 
-davtro02           tempo-566df5845f-8xdnr                         Running              3 |    128   1280      - |    150   2250      - | 
+davtro02           tempo-566df5845f-2qxll                         Running              0 |    128   1280      - |    150   2250      - | 
 davtro02           redis-69b5599966-mznhq                         Running              5 |    128   1280      - |    150   2250      - | 
 davtro02           promtail-4j77f                                 Running              5 |    128   1280      - |    150   2200      - | 
-davtro02           frontend-6b5865cddc-rfbkg                      Running             18 |    128   1152      - |    150   2200      - | restarty
-davtro02           frontend-6b5865cddc-8bslk                      Running             23 |    128   1152      - |    150   2200      - | restarty
-davtro02           postgres-exporter-777c4ff8c6-592lv             Pending              0 |     96   1152      - |    125   2100      - | PENDING
-davtro02           postgres-exporter-665d575d5f-jp496             Running              1 |     96   1152      - |    125   2100      - | 
-davtro02           kafka-exporter-757d975bb4-2bht4                Running             15 |     96   1152      - |    125   2100      - | restarty
-davtro02           cert-expiry-exporter-846dff7ccf-hcmgs          Running              5 |     96   1088      - |    110   2100      - | 
-davtro02           alertmanager-5954587b5f-rdkgb                  Running              5 |     96   1152      - |    110   2200      - | 
+davtro02           frontend-6b5865cddc-rfbkg                      Running             22 |    128   1152      - |    150   2200      - | restarty
+davtro02           frontend-6b5865cddc-8bslk                      Running             24 |    128   1152      - |    150   2200      - | restarty
+davtro02           postgres-exporter-777c4ff8c6-s6xxc             PodInitializing      0 |     96   1152      - |    125   2100      - | PENDING; PodInitializing
+davtro02           kafka-exporter-757d975bb4-khxv5                Running              0 |     96   1152      - |    125   2100      - | 
+davtro02           cert-expiry-exporter-846dff7ccf-hfdbq          PodInitializing      0 |     96   1088      - |    110   2100      - | PENDING; PodInitializing
+davtro02           alertmanager-5954587b5f-kq4bk                  PodInitializing      0 |     96   1152      - |    110   2200      - | PENDING; PodInitializing
 kube-system        coredns-78894c95f4-swlgn                       Running              5 |     70    170      - |    100      -      - | 
-kyverno            kyverno-reports-controller-69df6b7456-r9wdk    Running            193 |     64    128      - |    100      -      - | restarty
-kyverno            kyverno-cleanup-controller-555586b58c-9bnnb    CrashLoopBackOff   230 |     64    128      - |    100      -      - | CrashLoopBackOff; restarty
-kyverno            kyverno-background-controller-6db788f476-jkhgr Running            190 |     64    128      - |    100      -      - | restarty
+kyverno            kyverno-background-controller-6db788f476-jkhgr Running            199 |     64    128      - |    100      -      - | restarty
 davtro02           vault-snapshot-29888760-sf5wm                  Failed               0 |     64    128      - |     50    200      - | Failed
 davtro02           vault-snapshot-29888760-ppc9c                  Succeeded            0 |     64    128      - |     50    200      - | 
 davtro02           node-exporter-dkplt                            Running              5 |     32    128      - |     25    100      - | 
-metallb-system     speaker-25r8h                                  Running             59 |      0      -      - |      0      -      - | bez requests: speaker; restarty
-metallb-system     controller-59f49888d7-5ndtn                    Running            275 |      0      -      - |      0      -      - | bez requests: controller; restarty
-kyverno            kyverno-reports-server-66dfd6747c-krzwr        Running             80 |      0      -      - |      0      -      - | bez requests: reports-server; restarty
+metallb-system     speaker-25r8h                                  Running             63 |      0      -      - |      0      -      - | bez requests: speaker; restarty
+metallb-system     controller-59f49888d7-5ndtn                    CrashLoopBackOff   289 |      0      -      - |      0      -      - | CrashLoopBackOff; bez requests: controller; restarty
 kubernetes-dashboa kubernetes-dashboard-kong-78b7499b45-l7j58     Running              5 |      0      -      - |      0      -      - | bez requests: proxy
-kube-system        hostpath-provisioner-7775d5d66c-nbcfn          CrashLoopBackOff   228 |      0      -      - |      0      -      - | CrashLoopBackOff; bez requests: hostpath-provisioner; restarty
+kube-system        hostpath-provisioner-7775d5d66c-nbcfn          Running            237 |      0      -      - |      0      -      - | bez requests: hostpath-provisioner; restarty
 kube-system        calico-node-cmgrb                              Running              5 |      0      -      - |    250      -      - | 
-kube-system        calico-kube-controllers-676854dc5d-tgjx6       Running             70 |      0      -      - |      0      -      - | bez requests: calico-kube-controllers; restarty
+kube-system        calico-kube-controllers-676854dc5d-tgjx6       Running             76 |      0      -      - |      0      -      - | bez requests: calico-kube-controllers; restarty
 ingress            traefik-58qzg                                  Running              9 |      0      -      - |      0      -      - | bez requests: traefik
 external-secrets   external-secrets-webhook-bd86c95f6-zfl89       Running              5 |      0      -      - |      0      -      - | bez requests: webhook
 external-secrets   external-secrets-cert-controller-6cb9898bd4-8l Running              5 |      0      -      - |      0      -      - | bez requests: cert-controller
 external-secrets   external-secrets-67fd8dc558-pmnll              Running              5 |      0      -      - |      0      -      - | bez requests: external-secrets
-cert-manager       cert-manager-webhook-674b6c7468-m8rkp          Running             29 |      0      -      - |      0      -      - | bez requests: cert-manager-webhook; restarty
-cert-manager       cert-manager-cainjector-5d85cc9c99-zvmff       Running             44 |      0      -      - |      0      -      - | bez requests: cert-manager-cainjector; restarty
-cert-manager       cert-manager-7b64759498-dtcpg                  Running             44 |      0      -      - |      0      -      - | bez requests: cert-manager-controller; restarty
-argocd             argo-cd-argocd-server-7c6c8d7765-ns7mr         CrashLoopBackOff   230 |      0      -      - |      0      -      - | CrashLoopBackOff; bez requests: server; restarty
-argocd             argo-cd-argocd-repo-server-6fcf48bd7-rqmp6     Running             42 |      0      -      - |      0      -      - | bez requests: repo-server; restarty
+cert-manager       cert-manager-webhook-674b6c7468-m8rkp          Running             35 |      0      -      - |      0      -      - | bez requests: cert-manager-webhook; restarty
+cert-manager       cert-manager-cainjector-5d85cc9c99-zvmff       Running             46 |      0      -      - |      0      -      - | bez requests: cert-manager-cainjector; restarty
+cert-manager       cert-manager-7b64759498-dtcpg                  Running             45 |      0      -      - |      0      -      - | bez requests: cert-manager-controller; restarty
+argocd             argo-cd-argocd-server-7c6c8d7765-ns7mr         Running            242 |      0      -      - |      0      -      - | bez requests: server; restarty
+argocd             argo-cd-argocd-repo-server-6fcf48bd7-rqmp6     Running             44 |      0      -      - |      0      -      - | bez requests: repo-server; restarty
 argocd             argo-cd-argocd-redis-75f5cc9cf-2ndvl           Running              5 |      0      -      - |      0      -      - | bez requests: redis
 argocd             argo-cd-argocd-notifications-controller-fd4c44 Running              5 |      0      -      - |      0      -      - | bez requests: notifications-controller
 argocd             argo-cd-argocd-dex-server-7d664c7cbd-bwjsr     Running              5 |      0      -      - |      0      -      - | bez requests: dex-server
@@ -96,19 +95,19 @@ Jednostki: RAM w Mi, CPU w mCPU. RAMreq/CPUreq = suma requests kontenerow (z sid
 
 --- SUMY per namespace (tylko pody Running) ---
 NAMESPACE               pody    RAMreq    RAMuse    CPUreq    CPUuse istio-proxy Pending RAM
-davtro02                  33      5536         -      3995         -        1280        1696
-kubernetes-dashboard       5       800         -       400         -           0           0
-kyverno                    6       576         -       650         -           0           0
+davtro02                  28      5184         -      3450         -        1024         800
+kubernetes-dashboard       4       600         -       300         -           0           0
 istio-system               2       384         -       600         -         128           0
 kube-system                5       270         -       450         -           0           0
+kyverno                    2       192         -       200         -           0           0
 argocd                     7         0         -         0         -           0           0
 cert-manager               3         0         -         0         -           0           0
 external-secrets           3         0         -         0         -           0           0
 ingress                    1         0         -         0         -           0           0
 metallb-system             2         0         -         0         -           0           0
-RAZEM                     67      7566         -      6095         -        1408        1696
+RAZEM                     57      6630         -      5000         -        1152         800
 
-sidecary istio-proxy lacznie: 1408 Mi requests
+sidecary istio-proxy lacznie: 1152 Mi requests
 
 
 [1m=== 4. MANIFESTY: manifests/base (replicas, requests, limits na kontener) ===[0m
