@@ -43,19 +43,19 @@ Skrypt zapyta o GITHUB_PAT (Krok 8.5), GHCR_USER (Krok 12), GHCR_PAT (Krok 12). 
 GHCR_USER='exea-centrum' GHCR_PAT='ghp_xxx' \
   ./scripts/setup-from-scratch.sh
 ```  
-### Skrypt zapyta tylko o GITHUB_PAT 
+#### Skrypt zapyta tylko o GITHUB_PAT 
 
 
-### read -r -s — hasła nie są widoczne na ekranie (nie logują się).
+#### read -r -s — hasła nie są widoczne na ekranie (nie logują się).
 
-### tee — jeśli używasz tee, PAT nie pojawi się w logu (bo read -s nie echo'uje).
+#### tee — jeśli używasz tee, PAT nie pojawi się w logu (bo read -s nie echo'uje).
 
-### Enter = pomiń — jeśli repo jest publiczne, a pakiety GHCR są PUBLIC (README §24 mówi, że muszą być), możesz pominąć oba pytania.
+#### Enter = pomiń — jeśli repo jest publiczne, a pakiety GHCR są PUBLIC (README §24 mówi, że muszą być), możesz pominąć oba pytania.
 
-### GHCR_REPO — jeśli repo nazywa się inaczej, ustaw GHCR_REPO='inna-nazwa'. 
+#### GHCR_REPO — jeśli repo nazywa się inaczej, ustaw GHCR_REPO='inna-nazwa'. 
 
 # ⚠️ Ważne 
-## powyższ skrypt instaluje wszystko a poniżej by ArgoCD wrożyło ci projek miusisz zainstalować zgodnie z 24 punktem (K8s, istio, cert-manager, external-secret, kyverno, argoCD)
+## powyższy skrypt instaluje wszystko full-automat a poniższy semi-automat. By ArgoCD wrożyło ci projek miusisz zainstalować zgodnie z 24 punktem (K8s, istio, cert-manager, external-secret, kyverno, argoCD)
 ### to poniżej,  musisz sobie ogarnąc w github-ie, 2 opcja skryptu full-automat i Semi-automated.
 ### GHCR_USER='exea-centrum' 
 ### GHCR_REPO='website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02' 
