@@ -45,14 +45,22 @@ GHCR_USER='exea-centrum' GHCR_PAT='ghp_xxx' \
 ```  
 ### Skrypt zapyta tylko o GITHUB_PAT 
 
-# ⚠️ Ważne
+
 ### read -r -s — hasła nie są widoczne na ekranie (nie logują się).
 
 ### tee — jeśli używasz tee, PAT nie pojawi się w logu (bo read -s nie echo'uje).
 
 ### Enter = pomiń — jeśli repo jest publiczne, a pakiety GHCR są PUBLIC (README §24 mówi, że muszą być), możesz pominąć oba pytania.
 
-### GHCR_REPO — jeśli repo nazywa się inaczej, ustaw GHCR_REPO='inna-nazwa'.
+### GHCR_REPO — jeśli repo nazywa się inaczej, ustaw GHCR_REPO='inna-nazwa'. 
+
+# ⚠️ Ważne 
+## powyższ skrypt instaluje wszystko a poniżej by ArgoCD wrożyło ci projek miusisz zainstalować zgodnie z 24 punktem (K8s, istio, cert-manager, external-secret, kyverno, argoCD)
+### to poniżej,  musisz sobie ogarnąc w github-ie, 2 opcja skryptu full-automat i Semi-automated.
+### GHCR_USER='exea-centrum' 
+### GHCR_REPO='website-db-vault-kaf-redis-arg-kust-kyv-elk-apm-sprig-sp02' 
+### GHCR_PAT='ghp_..............................' 
+### GITHUB_PAT='ghp_...........................' 
 
 ## Spis tresci
 
